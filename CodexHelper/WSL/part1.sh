@@ -4,7 +4,7 @@
 # repo-local Codex workflow files. Semgrep and project linters are handled by
 # part2.sh.
 #
-# Version: 2026-07-22-v17
+# Version: 2026-07-27-v18
 #
 # Safe defaults:
 # - Prompts before network installs unless --yes is passed.
@@ -16,7 +16,7 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 
 SCRIPT_NAME="$(basename "$0")"
-SCRIPT_VERSION="2026-07-22-v17"
+SCRIPT_VERSION="2026-07-27-v18"
 YES=0
 DRY_RUN=0
 FORCE=0
@@ -43,6 +43,8 @@ INSTALL_SKIPPED=()
 PATH_FIXES=()
 CURRENT_SHELL_PATH_FIXES=()
 FINAL_EXIT_CODE=0
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+HELPER_ROOT="$(cd "$SCRIPT_DIR/.." >/dev/null 2>&1 && pwd)"
 
 log() { printf '\033[1;34m[ai-bootstrap]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[warn]\033[0m %s\n' "$*" >&2; }
@@ -1065,6 +1067,48 @@ setup_humanizer() {
 	fi
 }
 
+maybe_install_rtk() {
+	if have_cli rtk; then
+		log "RTK already installed: $(resolve_binary rtk)"
+		record_install_ok "RTK already present at $(resolve_binary rtk)"
+		return 0
+	fi
+
+	if ! confirm "RTK is missing. Install RTK for the default Codex hook?"; then
+		record_install_skipped "RTK skipped by user"
+		return 0
+	fi
+
+	if ! have curl; then
+		warn "Cannot install RTK because curl is unavailable."
+		record_install_skipped "RTK skipped: curl unavailable"
+		return 0
+	fi
+
+	if [[ "$DRY_RUN" == "1" ]]; then
+		log "Would install RTK via: curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/master/install.sh | sh"
+		record_install_skipped "RTK would install via curl (dry-run)"
+		return 0
+	fi
+
+	if ! curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/master/install.sh | sh; then
+		warn "RTK install failed. The generated hook will pass commands through unchanged."
+		record_install_failed "RTK failed via curl installer"
+		return 1
+	fi
+
+	ensure_current_script_path rtk || true
+	if have_cli rtk; then
+		log "RTK installed: $(resolve_binary rtk)"
+		record_install_ok "RTK installed via curl installer at $(resolve_binary rtk)"
+		return 0
+	fi
+
+	warn "RTK install script finished, but rtk is not on PATH."
+	record_install_failed "RTK installed but not found on PATH"
+	return 1
+}
+
 install_global_tools() {
 	if [[ "$SKIP_GLOBAL" == "1" ]]; then
 		log "Skipping global tool installs (--repo-only/--skip-global)."
@@ -1074,6 +1118,10 @@ install_global_tools() {
 	fi
 
 	log "Global tool setup"
+
+	if [[ "$CREATE_CODEX_HOOKS" == "1" && "$CREATE_RTK_HOOK" == "1" ]]; then
+		maybe_install_rtk || true
+	fi
 
 	# Ponytail: Codex plugin marketplace add can be automated, but actual install/trust is interactive.
 	if have codex; then
@@ -1255,7 +1303,7 @@ detect_file_signals() {
 	while IFS= read -r -d '' path; do
 		path="${path#./}"
 		base="${path##*/}"
-		lower="${path,,}"
+		lower="$(printf '%s' "$path" | tr '[:upper:]' '[:lower:]')"
 
 		case "$base" in
 		package.json) NODE_MANIFESTS=$((NODE_MANIFESTS + 1)) ;;
@@ -1346,6 +1394,7 @@ Repo memory workflow:
 - Promote only stable, reusable facts into `codebase-wiki/`; do not copy raw Graphify output.
 - Use `make wiki-ai` to draft concise wiki updates from Graphify/session context, then review the result before relying on it.
 - After changes, update `codebase-wiki/` only when the task reveals durable architecture, testing, security, or integration knowledge.
+- Use `make skills-check` after helper upgrades or when managed skills/plugins may be stale; use `make skills-update` only when the user asks to refresh them or an installer explicitly allows it.
 
 Implementation rules:
 - Prefer small diffs.
@@ -1397,6 +1446,7 @@ Default workflow:
 8. Add or update tests when behavior changes.
 9. Run `make edited-ai` after edits so changed files are formatted, linted, and typechecked. Use `make verify-ai` for broader AI-safe repo checks when risk warrants it.
 10. Run `make wiki-ai` when Graphify/session work reveals durable knowledge, then review the generated wiki sections.
+11. Run `make skills-check` after helper upgrades or when managed skills/plugins may be stale; run `make skills-update` only on explicit refresh requests.
 EOF_AGENT_INDEX
 	)
 	write_file "agent/index.md" "$agent_index"
@@ -1417,6 +1467,8 @@ make typecheck
 make test
 make security
 make verify-ai
+make skills-check
+make skills-update
 ```
 
 Useful AI tooling commands:
@@ -1427,7 +1479,20 @@ code-review-graph update
 code-review-graph detect-changes --brief
 make security-ai
 make wiki-ai
+make skills-check
+make skills-update
 ```
+
+Managed skills/plugins:
+
+```bash
+make skills-check
+make skills-update
+python3 vibe_scripts/sync-skills.py --check
+python3 vibe_scripts/sync-skills.py --update --dry-run
+```
+
+Use `skills-check` after helper upgrades or when skill/plugin behavior seems stale. Use `skills-update` only when the user asks to refresh managed skills/plugins or an installer explicitly allows it.
 
 Ponytail in Codex:
 
@@ -1777,7 +1842,7 @@ create_makefile() {
 	block=$(
 		cat <<EOF_MAKE
 $marker
-.PHONY: setup lint typecheck test security verify edited-ai wiki-ai agent-verify
+.PHONY: setup lint typecheck test security verify edited-ai wiki-ai skills-check skills-update agent-verify
 export PATH := \$(HOME)/.local/bin:\$(PATH)
 
 setup:
@@ -1802,6 +1867,12 @@ edited-ai:
 
 wiki-ai:
 	python3 vibe_scripts/update-codebase-wiki.py
+
+skills-check:
+	python3 vibe_scripts/sync-skills.py --check
+
+skills-update:
+	python3 vibe_scripts/sync-skills.py --update
 
 agent-verify:
 	./vibe_scripts/agent-verify.sh
@@ -1835,9 +1906,15 @@ PY
 			wiki_block=$(
 				cat <<'EOF_WIKI_MAKE'
 # >>> codebase-wiki target >>>
-.PHONY: wiki-ai
+.PHONY: wiki-ai skills-check skills-update
 wiki-ai:
 	python3 vibe_scripts/update-codebase-wiki.py
+
+skills-check:
+	python3 vibe_scripts/sync-skills.py --check
+
+skills-update:
+	python3 vibe_scripts/sync-skills.py --update
 # <<< codebase-wiki target <<<
 EOF_WIKI_MAKE
 			)
@@ -1960,6 +2037,8 @@ def makefile_targets() -> list[str]:
     preferred = [
         "edited-ai",
         "wiki-ai",
+        "skills-check",
+        "skills-update",
         "verify-ai",
         "lint-ai",
         "typecheck-ai",
@@ -2156,6 +2235,45 @@ if __name__ == "__main__":
 EOF_WIKI_SCRIPT
 	)
 	write_file "vibe_scripts/update-codebase-wiki.py" "$script" "0755"
+}
+
+create_skill_sync_script() {
+	local src
+	for src in "$HELPER_ROOT/templates/vibe_scripts/sync-skills.py" "$HELPER_ROOT/../templates/vibe_scripts/sync-skills.py"; do
+		if [[ -f "$src" ]]; then
+			if [[ "$DRY_RUN" == "1" ]]; then
+				log "Would copy $src -> vibe_scripts/sync-skills.py"
+			else
+				mkdir -p vibe_scripts
+				cp "$src" vibe_scripts/sync-skills.py
+				chmod 0755 vibe_scripts/sync-skills.py
+				log "Wrote vibe_scripts/sync-skills.py"
+			fi
+			return 0
+		fi
+	done
+	warn "sync-skills.py template not found; skills-check/skills-update targets will be skipped until it exists."
+}
+
+create_skills_lock() {
+	local src
+	for src in "$HELPER_ROOT/templates/skills-lock.json" "$HELPER_ROOT/../templates/skills-lock.json"; do
+		if [[ -f "$src" ]]; then
+			if [[ -f skills-lock.json && "$FORCE" != "1" ]]; then
+				log "skills-lock.json already exists; leaving it unchanged."
+				return 0
+			fi
+			if [[ "$DRY_RUN" == "1" ]]; then
+				log "Would copy $src -> skills-lock.json"
+			else
+				[[ -f skills-lock.json ]] && backup_file skills-lock.json
+				cp "$src" skills-lock.json
+				log "Wrote skills-lock.json"
+			fi
+			return 0
+		fi
+	done
+	warn "skills-lock.json template not found; sync-skills.py will use built-in defaults."
 }
 
 create_verify_script() {
@@ -3400,7 +3518,11 @@ print_next_steps() {
    make wiki-ai
    Review codebase-wiki/ before relying on generated sections.
 
-4. Trust Codex enforcement hooks when enabled
+4. Check managed skills and plugins
+   make skills-check
+   Use make skills-update only when you intentionally want policy-approved refreshes.
+
+5. Trust Codex enforcement hooks when enabled
    Unless --no-codex-hooks was used, this bootstrap writes project hooks under .codex/ that make Codex run the
    formatter, linter, and typechecker on edited files:
    - PreToolUse routes eligible shell output through RTK when that hook is enabled and RTK is installed.
@@ -3411,7 +3533,7 @@ print_next_steps() {
    then start a new thread. Codex will skip changed non-managed hooks until
    you trust them.
 
-5. Finish optional Ponytail setup
+6. Finish optional Ponytail setup
 EOF_NEXT
 
 	if ! have codex; then
@@ -3443,7 +3565,7 @@ EOF_PONYTAIL_NOT_CONFIGURED
 	fi
 
 	cat <<'EOF_NEXT'
-6. Context7
+7. Context7
    Run when ready for interactive OAuth/API setup:
    npx ctx7 setup
 
@@ -3451,26 +3573,38 @@ EOF_NEXT
 
 	if [[ "$CREATE_CODEX_HOOKS" != "1" ]]; then
 		cat <<'EOF_RTK_NEXT_NO_HOOKS'
-7. RTK automatic shell-output reduction
+8. RTK automatic shell-output reduction
    RTK command rewriting was skipped because --no-codex-hooks was used.
    Rerun part1.sh with Codex hooks enabled to create the project RTK hook.
 
 EOF_RTK_NEXT_NO_HOOKS
-	elif [[ "$CREATE_RTK_HOOK" == "1" ]]; then
+	elif [[ "$CREATE_RTK_HOOK" == "1" ]] && have_cli rtk; then
 		cat <<'EOF_RTK_NEXT'
-7. RTK automatic shell-output reduction
-   The project RTK PreToolUse hook is created by default with Codex hooks.
-   It rewrites eligible literal read-only/noisy Bash commands through rtk when RTK is installed.
-   Install RTK separately if needed, then restart Codex and approve the hook in /hooks:
-   curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/master/install.sh | sh
-   rtk init --codex
+8. RTK automatic shell-output reduction
+   RTK is installed and the project RTK PreToolUse hook was created.
+   Restart Codex and approve the project hook in /hooks. A separate
+   rtk init --codex is not required for this project hook.
 
    To avoid command rewriting, rerun part1.sh with --no-rtk-hook.
 
 EOF_RTK_NEXT
+	elif [[ "$CREATE_RTK_HOOK" == "1" ]]; then
+		cat <<'EOF_RTK_NEXT_MISSING'
+8. RTK automatic shell-output reduction
+   The project RTK PreToolUse hook was created, but rtk is still missing.
+   A full WSL setup normally installs it automatically via the official installer.
+   If the install was skipped or failed, run:
+   curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/master/install.sh | sh
+
+   Then restart Codex and approve the project hook in /hooks. A separate
+   rtk init --codex is not required for this project hook.
+
+   To avoid command rewriting, rerun part1.sh with --no-rtk-hook.
+
+EOF_RTK_NEXT_MISSING
 	else
 		cat <<'EOF_RTK_NEXT_DISABLED'
-7. RTK automatic shell-output reduction
+8. RTK automatic shell-output reduction
    RTK command rewriting was skipped because --no-rtk-hook was used.
    Rerun part1.sh without --no-rtk-hook to create the project RTK PreToolUse hook.
 
@@ -3478,7 +3612,7 @@ EOF_RTK_NEXT_DISABLED
 	fi
 
 	cat <<'EOF_NEXT'
-8. Impeccable frontend design skill
+9. Impeccable frontend design skill
    Run only when you want Codex to use Impeccable for frontend design tasks:
    bash part1.sh --impeccable
    /impeccable init
@@ -3487,13 +3621,13 @@ EOF_RTK_NEXT_DISABLED
    and start a new thread. Frontend design tasks should then use $impeccable or
    /impeccable for design context, polish, critique, audit, and detector checks.
 
-9. Humanizer writing skill
+10. Humanizer writing skill
    Humanizer is installed for this project by default. To skip it, use:
    bash part1.sh --no-humanizer
 
    Restart Codex after installation, then invoke $humanizer or ask Codex to humanize prose.
 
-10. code-review-graph
+11. code-review-graph
 EOF_NEXT
 
 	if have_cli code-review-graph && ! binary_in_active_venv code-review-graph; then
@@ -3516,7 +3650,7 @@ EOF_CRG_MISSING
 	fi
 
 	cat <<'EOF_NEXT'
-11. Codex Git-command blocker
+12. Codex Git-command blocker
    The script searches for ~/.codex/config.toml and can apply the hook when you approve it.
    To apply non-interactively, rerun with --apply-codex-config.
    This blocks Codex Bash calls for git add/commit/push/reset/checkout/etc.
@@ -3533,8 +3667,9 @@ main() {
 	create_agent_files
 	create_session_logging_files
 	ensure_cache_gitignored
-	create_makefile
 	create_codebase_wiki_script
+	create_skill_sync_script
+	create_skills_lock
 	create_ai_quality_wrapper_script
 	create_edited_check_script
 	create_verify_script

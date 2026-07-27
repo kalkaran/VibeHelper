@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Wire AI-safe quality targets for a repository already bootstrapped by part1.sh.
 #
-# Version: 2026-07-21-v2
+# Version: 2026-07-27-v4
 
 set -Eeuo pipefail
 IFS=$'\n\t'
@@ -114,17 +114,32 @@ make_target() {
 	printf '.PHONY: %s\n%s:\n%s\n\n' "$target" "$target" "$body"
 }
 
+helper_targets_expected() {
+	[[ "${CLAUDEHELPER_UNIFIED_INSTALL:-0}" == "1" ]]
+}
+
 wrapper='python3 vibe_scripts/ai-quality-wrapper.py'
 targets=()
 verify_deps=()
+helper_expected=0
+helper_targets_expected && helper_expected=1
 
-if [[ -f vibe_scripts/agent-check-edited.py ]]; then
+if [[ -f vibe_scripts/agent-check-edited.py || "$helper_expected" -eq 1 ]]; then
 	targets+=("$(make_target edited-ai $'\t@python3 vibe_scripts/agent-check-edited.py')")
 	verify_deps+=("edited-ai")
 fi
 
-if [[ -f vibe_scripts/update-codebase-wiki.py ]]; then
+if [[ -f vibe_scripts/update-codebase-wiki.py || -d codebase-wiki || "$helper_expected" -eq 1 ]]; then
 	targets+=("$(make_target wiki-ai $'\t@python3 vibe_scripts/update-codebase-wiki.py')")
+fi
+
+if [[ -f vibe_scripts/sync-skills.py || "$helper_expected" -eq 1 ]]; then
+	targets+=("$(make_target skills-check $'\t@python3 vibe_scripts/sync-skills.py --check')")
+	targets+=("$(make_target skills-update $'\t@python3 vibe_scripts/sync-skills.py --update')")
+fi
+
+if [[ -f vibe_scripts/agent-verify.sh || "$helper_expected" -eq 1 ]]; then
+	targets+=("$(make_target agent-verify $'\t@./vibe_scripts/agent-verify.sh')")
 fi
 
 lint_commands=()
@@ -173,7 +188,7 @@ fi
 
 block_start="# >>> ClaudeHelper managed targets"
 block_end="# <<< ClaudeHelper managed targets"
-block="$block_start"$'\n'"# ClaudeHelper-Version: 2026-07-21-v2"$'\n\n'
+block="$block_start"$'\n'"# ClaudeHelper-Version: 2026-07-27-v4"$'\n\n'
 for target in "${targets[@]}"; do
 	block+="$target"$'\n\n'
 done

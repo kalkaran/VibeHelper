@@ -247,6 +247,9 @@ if [[ -n "${PYTHON_INDEX_URL:-}" ]]; then
 	PART2_ARGS+=("--python-index-url=$PYTHON_INDEX_URL")
 fi
 [[ -n "$QUALITY_INSTALL_MODE" ]] && PART2_ARGS+=("$QUALITY_INSTALL_MODE")
+if [[ -z "$QUALITY_WIRE_MODE" && "$FRESH_INSTALL" -ne 1 ]]; then
+	QUALITY_WIRE_MODE="--wire"
+fi
 [[ -n "$QUALITY_WIRE_MODE" ]] && PART2_ARGS+=("$QUALITY_WIRE_MODE")
 [[ -n "$QUALITY_FIX_MODE" ]] && PART2_ARGS+=("$QUALITY_FIX_MODE")
 
@@ -264,9 +267,9 @@ fi
 log "Running quality-tool detection and wiring (part 2 of 2)."
 run_part2() {
 	if [[ "${#PART2_ARGS[@]}" -gt 0 ]]; then
-		bash "$PART2" "${PART2_ARGS[@]}"
+		CODEXHELPER_UNIFIED_INSTALL=1 bash "$PART2" "${PART2_ARGS[@]}"
 	else
-		bash "$PART2"
+		CODEXHELPER_UNIFIED_INSTALL=1 bash "$PART2"
 	fi
 }
 if run_part2; then

@@ -36,7 +36,7 @@ Options:
   --no-ponytail   Do not install the Ponytail plugin.
   --no-crg        Do not install/register code-review-graph.
   --crg-build     Build the code-review-graph index for the repo after install.
-  --context7      Run interactive Context7 setup.
+  --no-context7   Do not run Context7 setup (npx ctx7 setup).
   --impeccable    Install the Impeccable design skill/hooks.
   --with-llm-council  Clone karpathy/llm-council locally.
   --repo-only     Only write repo files; skip all global tool installs.
@@ -82,7 +82,7 @@ while [[ $# -gt 0 ]]; do
 		WIRE_MODE="no-wire"
 		shift
 		;;
-	--no-humanizer | --no-rtk | --no-graphify | --no-ponytail | --no-crg | --crg-build | --context7 | --impeccable | --with-llm-council | --repo-only | --skip-global | --yes)
+	--no-humanizer | --no-rtk | --no-graphify | --no-ponytail | --no-crg | --crg-build | --no-context7 | --impeccable | --with-llm-council | --repo-only | --skip-global | --yes)
 		PART1_ONLY_ARGS+=("$1")
 		shift
 		;;
@@ -190,9 +190,9 @@ run_part1() {
 
 run_part2() {
 	if [[ "${#PART2_ARGS[@]}" -gt 0 ]]; then
-		bash "$PART2" "${PART2_ARGS[@]}"
+		CLAUDEHELPER_UNIFIED_INSTALL=1 bash "$PART2" "${PART2_ARGS[@]}"
 	else
-		bash "$PART2"
+		CLAUDEHELPER_UNIFIED_INSTALL=1 bash "$PART2"
 	fi
 }
 
