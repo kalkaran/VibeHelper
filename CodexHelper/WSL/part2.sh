@@ -6,9 +6,9 @@ set -euo pipefail
 # It detects likely repo types, offers to install missing dev quality tools,
 # then wires Makefile targets for tools/scripts that exist.
 #
-# Version: 2026-07-27-v18
+# Version: 2026-07-27-v19
 
-SCRIPT_VERSION="2026-07-27-v18"
+SCRIPT_VERSION="2026-07-27-v19"
 DRY_RUN=0
 YES=0
 FORCE=0
@@ -317,12 +317,14 @@ has_any() {
 	match="$(find . -maxdepth 4 \
 		\( -name '.git' \
 		-o -name '.agents' \
+		-o -name '.claude' \
 		-o -name '.codex' \
 		-o -name 'node_modules' \
 		-o -name 'vendor' \
 		-o -name 'dist' \
 		-o -name 'build' \
 		-o -name 'coverage' \
+		-o -name 'graphify-out' \
 		-o -name '.cache' \
 		-o -name '.venv' \
 		-o -name 'obsidian' \) -prune \
@@ -641,12 +643,14 @@ detect_file_signals() {
 	done < <(find . \
 		\( -name '.git' \
 		-o -name '.agents' \
+		-o -name '.claude' \
 		-o -name '.codex' \
 		-o -name 'node_modules' \
 		-o -name 'vendor' \
 		-o -name 'dist' \
 		-o -name 'build' \
 		-o -name 'coverage' \
+		-o -name 'graphify-out' \
 		-o -name '.cache' \
 		-o -name '.venv' \
 		-o -name '__pycache__' \
@@ -755,8 +759,8 @@ PHP:
 
   Then you can wire:
     php -l path/to/file.php
-    vendor/bin/phpcs --standard=PSR12 --extensions=php --ignore=.agents/*,.codex/*,vendor/*,node_modules/*,dist/*,build/*,coverage/*,.git/*,.cache/*,.venv/*,obsidian/* .
-    find . \( -name '.agents' -o -name '.codex' -o -name 'vendor' -o -name 'node_modules' -o -name 'dist' -o -name 'build' -o -name 'coverage' -o -name '.git' -o -name '.cache' -o -name '.venv' -o -name 'obsidian' \) -prune -o -name '*.php' -print0 | xargs -0 vendor/bin/phpstan analyse --memory-limit=1G --no-progress --
+    vendor/bin/phpcs --standard=PSR12 --extensions=php --ignore=.agents/*,.claude/*,.codex/*,vendor/*,node_modules/*,dist/*,build/*,coverage/*,graphify-out/*,.git/*,.cache/*,.venv/*,obsidian/* .
+    find . \( -name '.agents' -o -name '.claude' -o -name '.codex' -o -name 'vendor' -o -name 'node_modules' -o -name 'dist' -o -name 'build' -o -name 'coverage' -o -name 'graphify-out' -o -name '.git' -o -name '.cache' -o -name '.venv' -o -name 'obsidian' \) -prune -o -name '*.php' -print0 | xargs -0 vendor/bin/phpstan analyse --memory-limit=1G --no-progress --
 PHPREC
 	fi
 
@@ -891,7 +895,7 @@ reset_checks() {
 
 detect_available_checks() {
 	reset_checks
-	local biome_scope="find . -mindepth 1 -maxdepth 1 ! -name .agents ! -name .codex -exec"
+	local biome_scope="find . -mindepth 1 -maxdepth 1 ! -name .agents ! -name .claude ! -name .codex ! -name graphify-out -exec"
 
 	# Python checks
 	if [[ "$PYTHON" -eq 1 ]]; then
@@ -928,9 +932,9 @@ detect_available_checks() {
 		fi
 		if has_any -name '*.html'; then
 			if local_bin_exists htmlhint; then
-				add_check lint html "npx htmlhint --ignore \"**/.git/**,**/.agents/**,**/.codex/**,**/node_modules/**,**/vendor/**,**/dist/**,**/build/**,**/coverage/**,**/.cache/**,**/.venv/**,**/obsidian/**\" \"**/*.html\""
+				add_check lint html "npx htmlhint --ignore \"**/.git/**,**/.agents/**,**/.claude/**,**/.codex/**,**/node_modules/**,**/vendor/**,**/dist/**,**/build/**,**/coverage/**,**/graphify-out/**,**/.cache/**,**/.venv/**,**/obsidian/**\" \"**/*.html\""
 			elif tool_exists htmlhint; then
-				add_check lint html "$(tool_cmd htmlhint) --ignore \"**/.git/**,**/.agents/**,**/.codex/**,**/node_modules/**,**/vendor/**,**/dist/**,**/build/**,**/coverage/**,**/.cache/**,**/.venv/**,**/obsidian/**\" \"**/*.html\""
+				add_check lint html "$(tool_cmd htmlhint) --ignore \"**/.git/**,**/.agents/**,**/.claude/**,**/.codex/**,**/node_modules/**,**/vendor/**,**/dist/**,**/build/**,**/coverage/**,**/graphify-out/**,**/.cache/**,**/.venv/**,**/obsidian/**\" \"**/*.html\""
 			fi
 		fi
 	fi
@@ -938,23 +942,23 @@ detect_available_checks() {
 	# PHP checks
 	if [[ "$PHP_LANG" -eq 1 ]]; then
 		if tool_exists php && has_any -name '*.php'; then
-			add_check lint php-syntax "find . \\( -name '.agents' -o -name '.codex' -o -name 'vendor' -o -name 'node_modules' -o -name 'dist' -o -name 'build' -o -name 'coverage' -o -name '.git' -o -name '.cache' -o -name '.venv' -o -name 'obsidian' \\) -prune -o -name '*.php' -print0 | xargs -0 -n1 $(tool_cmd php) -l"
+			add_check lint php-syntax "find . \\( -name '.agents' -o -name '.claude' -o -name '.codex' -o -name 'vendor' -o -name 'node_modules' -o -name 'dist' -o -name 'build' -o -name 'coverage' -o -name 'graphify-out' -o -name '.git' -o -name '.cache' -o -name '.venv' -o -name 'obsidian' \\) -prune -o -name '*.php' -print0 | xargs -0 -n1 $(tool_cmd php) -l"
 		fi
 		if tool_exists phpcs; then
-			add_check lint phpcs "$(tool_cmd phpcs) --standard=PSR12 --extensions=php --ignore=.agents/*,.codex/*,vendor/*,node_modules/*,dist/*,build/*,coverage/*,.git/*,.cache/*,.venv/*,obsidian/* ."
+			add_check lint phpcs "$(tool_cmd phpcs) --standard=PSR12 --extensions=php --ignore=.agents/*,.claude/*,.codex/*,vendor/*,node_modules/*,dist/*,build/*,coverage/*,graphify-out/*,.git/*,.cache/*,.venv/*,obsidian/* ."
 		fi
 		if tool_exists phpcbf; then
-			add_check format phpcbf "$(tool_cmd phpcbf) --standard=PSR12 --extensions=php --ignore=.agents/*,.codex/*,vendor/*,node_modules/*,dist/*,build/*,coverage/*,.git/*,.cache/*,.venv/*,obsidian/* . || true"
+			add_check format phpcbf "$(tool_cmd phpcbf) --standard=PSR12 --extensions=php --ignore=.agents/*,.claude/*,.codex/*,vendor/*,node_modules/*,dist/*,build/*,coverage/*,graphify-out/*,.git/*,.cache/*,.venv/*,obsidian/* . || true"
 		fi
 		if tool_exists phpstan; then
-			add_check type phpstan "find . \\( -name '.agents' -o -name '.codex' -o -name 'vendor' -o -name 'node_modules' -o -name 'dist' -o -name 'build' -o -name 'coverage' -o -name '.git' -o -name '.cache' -o -name '.venv' -o -name 'obsidian' \\) -prune -o -name '*.php' -print0 | xargs -0 $(tool_cmd phpstan) analyse --memory-limit=1G --no-progress --"
+			add_check type phpstan "find . \\( -name '.agents' -o -name '.claude' -o -name '.codex' -o -name 'vendor' -o -name 'node_modules' -o -name 'dist' -o -name 'build' -o -name 'coverage' -o -name 'graphify-out' -o -name '.git' -o -name '.cache' -o -name '.venv' -o -name 'obsidian' \\) -prune -o -name '*.php' -print0 | xargs -0 $(tool_cmd phpstan) analyse --memory-limit=1G --no-progress --"
 		fi
 	fi
 
 	# Shell checks
 	if [[ "$SHELL_LANG" -eq 1 ]]; then
-		if tool_exists shellcheck; then add_check lint shell "find . \\( -name '.agents' -o -name '.codex' -o -name 'vendor' -o -name 'node_modules' -o -name 'dist' -o -name 'build' -o -name 'coverage' -o -name '.git' -o -name '.cache' -o -name '.venv' -o -name 'obsidian' \\) -prune -o -name '*.sh' -print0 | xargs -0 $(tool_cmd shellcheck)"; fi
-		if tool_exists shfmt; then add_check format shell "find . \\( -name '.agents' -o -name '.codex' -o -name 'vendor' -o -name 'node_modules' -o -name 'dist' -o -name 'build' -o -name 'coverage' -o -name '.git' -o -name '.cache' -o -name '.venv' -o -name 'obsidian' \\) -prune -o -name '*.sh' -print0 | xargs -0 $(tool_cmd shfmt) -w"; fi
+		if tool_exists shellcheck; then add_check lint shell "find . \\( -name '.agents' -o -name '.claude' -o -name '.codex' -o -name 'vendor' -o -name 'node_modules' -o -name 'dist' -o -name 'build' -o -name 'coverage' -o -name 'graphify-out' -o -name '.git' -o -name '.cache' -o -name '.venv' -o -name 'obsidian' \\) -prune -o -name '*.sh' -print0 | xargs -0 $(tool_cmd shellcheck)"; fi
+		if tool_exists shfmt; then add_check format shell "find . \\( -name '.agents' -o -name '.claude' -o -name '.codex' -o -name 'vendor' -o -name 'node_modules' -o -name 'dist' -o -name 'build' -o -name 'coverage' -o -name 'graphify-out' -o -name '.git' -o -name '.cache' -o -name '.venv' -o -name 'obsidian' \\) -prune -o -name '*.sh' -print0 | xargs -0 $(tool_cmd shfmt) -w"; fi
 	fi
 
 	# Go checks
@@ -1190,16 +1194,19 @@ from pathlib import Path
 EXCLUDED_DIRS = {
     ".agents",
     ".cache",
+    ".claude",
     ".codex",
     ".git",
     ".venv",
     "build",
     "coverage",
     "dist",
+    "graphify-out",
     "node_modules",
     "obsidian",
     "vendor",
 }
+EXCLUDED_FILES = {".mcp.json"}
 
 BIOME_EXTS = {".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".css", ".json", ".jsonc"}
 HTML_EXTS = {".html", ".htm"}
@@ -1239,7 +1246,8 @@ def git_changed_files(root: Path) -> list[str]:
 
 
 def is_excluded(path: str) -> bool:
-    return any(part in EXCLUDED_DIRS for part in Path(path).parts)
+    parts = Path(path).parts
+    return path in EXCLUDED_FILES or any(part in EXCLUDED_DIRS for part in parts)
 
 
 def existing_project_files(root: Path, files: list[str]) -> list[str]:
@@ -1654,12 +1662,14 @@ write_biome_config() {
       "package.json",
       "!!**/.git",
       "!!**/.agents",
+      "!!**/.claude",
       "!!**/.codex",
       "!!**/node_modules",
       "!!**/vendor",
       "!!**/dist",
       "!!**/build",
       "!!**/coverage",
+      "!!**/graphify-out",
       "!!**/.cache",
       "!!**/.venv",
       "!!**/obsidian",

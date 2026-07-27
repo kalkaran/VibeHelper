@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # Bootstrap a small Claude Code workflow into the current repository.
 #
-# Version: 2026-07-27-v4
+# Version: 2026-07-27-v5
 
 set -Eeuo pipefail
 IFS=$'\n\t'
 
 SCRIPT_NAME="$(basename "$0")"
-SCRIPT_VERSION="2026-07-27-v4"
+SCRIPT_VERSION="2026-07-27-v5"
 DRY_RUN=0
 FORCE=0
 RUN_HUMANIZER=1
@@ -696,6 +696,10 @@ setup_context7() {
 
 setup_impeccable() {
 	[[ "$RUN_IMPECCABLE" -eq 1 ]] || return 0
+	if [[ -f ".claude/skills/impeccable/SKILL.md" ]]; then
+		log "Impeccable is already installed for Claude Code."
+		return 0
+	fi
 	if ! command -v npx >/dev/null 2>&1; then
 		warn "npx not found; skipping Impeccable setup."
 		return 0

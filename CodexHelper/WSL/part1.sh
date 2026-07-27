@@ -4,7 +4,7 @@
 # repo-local Codex workflow files. Semgrep and project linters are handled by
 # part2.sh.
 #
-# Version: 2026-07-27-v18
+# Version: 2026-07-27-v19
 #
 # Safe defaults:
 # - Prompts before network installs unless --yes is passed.
@@ -16,7 +16,7 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 
 SCRIPT_NAME="$(basename "$0")"
-SCRIPT_VERSION="2026-07-27-v18"
+SCRIPT_VERSION="2026-07-27-v19"
 YES=0
 DRY_RUN=0
 FORCE=0
@@ -1005,19 +1005,24 @@ install_with_uv_or_pipx() {
 }
 
 setup_impeccable() {
+	if [[ -f ".agents/skills/impeccable/SKILL.md" ]]; then
+		log "Impeccable is already installed for Codex."
+		record_install_ok "Impeccable already installed for Codex"
+		return 0
+	fi
 	if [[ "$RUN_IMPECCABLE" == "1" || "$YES" != "1" ]]; then
 		if have npx; then
 			warn "Impeccable install may write .agents/, .codex/hooks.json, .impeccable/, PRODUCT.md, and DESIGN.md."
 			warn "Codex still requires opening /hooks and approving the Impeccable project hook before it runs automatically."
 			if confirm "Install Impeccable design skill/hooks for Codex?"; then
 				if [[ "$DRY_RUN" == "1" ]]; then
-					run npx npx impeccable skills install -y --providers=codex --scope=project
+					run npx npx impeccable install -y --providers=codex --scope=project
 					record_install_skipped "Impeccable install would run (dry-run)"
-				elif run npx npx impeccable skills install -y --providers=codex --scope=project; then
+				elif run npx npx impeccable install -y --providers=codex --scope=project && [[ -f ".agents/skills/impeccable/SKILL.md" ]]; then
 					record_install_ok "Impeccable install completed"
 					record_install_skipped "Impeccable still needs /impeccable init and Codex /hooks approval"
 				else
-					warn "Impeccable install failed or was cancelled."
+					warn "Impeccable install failed, was cancelled, or did not create .agents/skills/impeccable/SKILL.md."
 					record_install_failed "Impeccable install failed/cancelled"
 				fi
 			else
@@ -1523,7 +1528,7 @@ The generated Codex RTK hook rewrites eligible literal read-only/noisy Bash comm
 Impeccable for frontend design:
 
 ```bash
-npx impeccable skills install -y --providers=codex --scope=project
+npx impeccable install -y --providers=codex --scope=project
 /impeccable init
 /impeccable polish the page or component
 /impeccable audit the frontend area
@@ -1791,16 +1796,16 @@ create_makefile() {
 		lint_parts+=('command -v biome >/dev/null 2>&1 && biome check . || echo "biome not installed; skipping web lint"')
 	fi
 	if [[ "$HTML_FILES" -gt 0 ]]; then
-		lint_parts+=('command -v htmlhint >/dev/null 2>&1 && htmlhint --ignore "**/.git/**,**/node_modules/**,**/vendor/**,**/dist/**,**/build/**,**/coverage/**,**/.cache/**,**/.venv/**" "**/*.html" || echo "htmlhint not installed; skipping HTML lint"')
+		lint_parts+=('command -v htmlhint >/dev/null 2>&1 && htmlhint --ignore "**/.git/**,**/.agents/**,**/.claude/**,**/.codex/**,**/node_modules/**,**/vendor/**,**/dist/**,**/build/**,**/coverage/**,**/graphify-out/**,**/.cache/**,**/.venv/**" "**/*.html" || echo "htmlhint not installed; skipping HTML lint"')
 	fi
 	if [[ "$has_php" -eq 1 ]]; then
 		setup_parts+=('command -v composer >/dev/null 2>&1 && [ -f composer.json ] && composer install || echo "composer not installed or composer.json missing; skipping PHP dependency install"')
-		lint_parts+=('if command -v php >/dev/null 2>&1; then find . \( -name vendor -o -name node_modules -o -name dist -o -name build -o -name coverage -o -name .git -o -name .cache -o -name .venv \) -prune -o -name "*.php" -print0 | xargs -0 -r -n1 php -l; else echo "php not installed; skipping PHP syntax lint"; fi')
-		lint_parts+=('if [ -x vendor/bin/phpcs ]; then vendor/bin/phpcs --standard=PSR12 --extensions=php --ignore=vendor/*,node_modules/*,dist/*,build/*,coverage/*,.git/*,.cache/*,.venv/* .; else echo "vendor/bin/phpcs not installed; skipping PHPCS"; fi')
-		typecheck_parts+=('if [ -x vendor/bin/phpstan ]; then find . \( -name vendor -o -name node_modules -o -name dist -o -name build -o -name coverage -o -name .git -o -name .cache -o -name .venv \) -prune -o -name "*.php" -print0 | xargs -0 -r vendor/bin/phpstan analyse --memory-limit=1G --no-progress --; else echo "vendor/bin/phpstan not installed; skipping PHPStan"; fi')
+		lint_parts+=('if command -v php >/dev/null 2>&1; then find . \( -name .agents -o -name .claude -o -name .codex -o -name vendor -o -name node_modules -o -name dist -o -name build -o -name coverage -o -name graphify-out -o -name .git -o -name .cache -o -name .venv \) -prune -o -name "*.php" -print0 | xargs -0 -r -n1 php -l; else echo "php not installed; skipping PHP syntax lint"; fi')
+		lint_parts+=('if [ -x vendor/bin/phpcs ]; then vendor/bin/phpcs --standard=PSR12 --extensions=php --ignore=.agents/*,.claude/*,.codex/*,vendor/*,node_modules/*,dist/*,build/*,coverage/*,graphify-out/*,.git/*,.cache/*,.venv/* .; else echo "vendor/bin/phpcs not installed; skipping PHPCS"; fi')
+		typecheck_parts+=('if [ -x vendor/bin/phpstan ]; then find . \( -name .agents -o -name .claude -o -name .codex -o -name vendor -o -name node_modules -o -name dist -o -name build -o -name coverage -o -name graphify-out -o -name .git -o -name .cache -o -name .venv \) -prune -o -name "*.php" -print0 | xargs -0 -r vendor/bin/phpstan analyse --memory-limit=1G --no-progress --; else echo "vendor/bin/phpstan not installed; skipping PHPStan"; fi')
 	fi
 	if [[ "$has_shell" -eq 1 ]]; then
-		lint_parts+=('if command -v shellcheck >/dev/null 2>&1; then find . \( -name vendor -o -name node_modules -o -name dist -o -name build -o -name coverage -o -name .git -o -name .cache -o -name .venv \) -prune -o \( -name "*.sh" -o -name "*.bash" -o -name "*.zsh" \) -print0 | xargs -0 -r shellcheck; else echo "shellcheck not installed; skipping shell lint"; fi')
+		lint_parts+=('if command -v shellcheck >/dev/null 2>&1; then find . \( -name .agents -o -name .claude -o -name .codex -o -name vendor -o -name node_modules -o -name dist -o -name build -o -name coverage -o -name graphify-out -o -name .git -o -name .cache -o -name .venv \) -prune -o \( -name "*.sh" -o -name "*.bash" -o -name "*.zsh" \) -print0 | xargs -0 -r shellcheck; else echo "shellcheck not installed; skipping shell lint"; fi')
 	fi
 	if [[ "$has_go" -eq 1 ]]; then
 		setup_parts+=('go mod download')
@@ -2479,7 +2484,8 @@ import sys
 from pathlib import Path
 
 
-EXCLUDED_DIRS = {".agents", ".cache", ".codex", ".git", ".venv", "build", "coverage", "dist", "node_modules", "obsidian", "vendor"}
+EXCLUDED_DIRS = {".agents", ".cache", ".claude", ".codex", ".git", ".venv", "build", "coverage", "dist", "graphify-out", "node_modules", "obsidian", "vendor"}
+EXCLUDED_FILES = {".mcp.json"}
 BIOME_EXTS = {".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".css", ".json", ".jsonc"}
 HTML_EXTS = {".html", ".htm"}
 FRONTEND_DESIGN_EXTS = {
@@ -2518,7 +2524,8 @@ def git_changed_files(root: Path) -> list[str]:
 
 
 def is_excluded(path: str) -> bool:
-    return any(part in EXCLUDED_DIRS for part in Path(path).parts)
+    parts = Path(path).parts
+    return path in EXCLUDED_FILES or any(part in EXCLUDED_DIRS for part in parts)
 
 
 def existing_project_files(root: Path, files: list[str]) -> list[str]:

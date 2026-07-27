@@ -147,7 +147,7 @@ if has_npm_script lint; then
 	lint_commands+=("$wrapper --label lint-npm --max-lines 30 -- npm run lint")
 fi
 if cmd_exists shellcheck; then
-	lint_commands+=("$wrapper --label lint-shell --max-lines 30 --shell -- 'find . \\( -name node_modules -o -name vendor -o -name dist -o -name build -o -name coverage -o -name .git -o -name .cache -o -name .venv \\) -prune -o -name \"*.sh\" -print0 | xargs -0 shellcheck'")
+	lint_commands+=("$wrapper --label lint-shell --max-lines 30 --shell -- 'find . \\( -name .agents -o -name .claude -o -name .codex -o -name node_modules -o -name vendor -o -name dist -o -name build -o -name coverage -o -name graphify-out -o -name .git -o -name .cache -o -name .venv \\) -prune -o -name \"*.sh\" -print0 | xargs -0 shellcheck'")
 fi
 if [[ "${#lint_commands[@]}" -gt 0 ]]; then
 	body=""
