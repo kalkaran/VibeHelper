@@ -35,6 +35,7 @@ Options:
   --no-graphify   Do not install the graphify skill or its guidance.
   --no-ponytail   Do not install the Ponytail plugin.
   --no-crg        Do not install/register code-review-graph.
+  --no-system-packages  On WSL, skip the apt-get bootstrap of base packages.
   --crg-build     Build the code-review-graph index for the repo after install.
   --no-context7   Do not run Context7 setup (npx ctx7 setup).
   --impeccable    Install the Impeccable design skill/hooks.
@@ -82,7 +83,7 @@ while [[ $# -gt 0 ]]; do
 		WIRE_MODE="no-wire"
 		shift
 		;;
-	--no-humanizer | --no-rtk | --no-graphify | --no-ponytail | --no-crg | --crg-build | --no-context7 | --impeccable | --with-llm-council | --repo-only | --skip-global | --yes)
+	--no-humanizer | --no-rtk | --no-graphify | --no-ponytail | --no-crg | --crg-build | --no-context7 | --impeccable | --with-llm-council | --repo-only | --skip-global | --yes | --no-system-packages)
 		PART1_ONLY_ARGS+=("$1")
 		shift
 		;;

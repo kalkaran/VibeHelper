@@ -1797,7 +1797,7 @@ create_makefile() {
 		typecheck_parts+=('if [ -x vendor/bin/phpstan ]; then find . \( -name .agents -o -name .claude -o -name .codex -o -name vendor -o -name node_modules -o -name dist -o -name build -o -name coverage -o -name graphify-out -o -name .git -o -name .cache -o -name .venv \) -prune -o -name "*.php" -print0 | xargs -0 vendor/bin/phpstan analyse --memory-limit=1G --no-progress --; else echo "vendor/bin/phpstan not installed; skipping PHPStan"; fi')
 	fi
 	if [[ "$has_shell" -eq 1 ]]; then
-		lint_parts+=('if command -v shellcheck >/dev/null 2>&1; then find . \( -name .agents -o -name .claude -o -name .codex -o -name vendor -o -name node_modules -o -name dist -o -name build -o -name coverage -o -name graphify-out -o -name .git -o -name .cache -o -name .venv \) -prune -o \( -name "*.sh" -o -name "*.bash" -o -name "*.zsh" \) -print0 | xargs -0 shellcheck; else echo "shellcheck not installed; skipping shell lint"; fi')
+		lint_parts+=('if command -v shellcheck >/dev/null 2>&1; then find . \( -name .agents -o -name .claude -o -name .codex -o -name vendor -o -name node_modules -o -name dist -o -name build -o -name coverage -o -name graphify-out -o -name .git -o -name .cache -o -name .venv \) -prune -o \( -name "*.sh" -o -name "*.bash" -o -name "*.zsh" \) -print0 | xargs -0 -r shellcheck; else echo "shellcheck not installed; skipping shell lint"; fi')
 	fi
 	if [[ "$has_go" -eq 1 ]]; then
 		setup_parts+=('go mod download')

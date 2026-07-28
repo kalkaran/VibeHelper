@@ -909,7 +909,7 @@ detect_available_checks() {
 
 	# Shell checks
 	if [[ "$SHELL_LANG" -eq 1 ]]; then
-		if tool_exists shellcheck; then add_check lint shell "find . \\( -name '.agents' -o -name '.claude' -o -name '.codex' -o -name 'vendor' -o -name 'node_modules' -o -name 'dist' -o -name 'build' -o -name 'coverage' -o -name 'graphify-out' -o -name '.git' -o -name '.cache' -o -name '.venv' -o -name 'obsidian' \\) -prune -o -name '*.sh' -print0 | xargs -0 $(tool_cmd shellcheck)"; fi
+		if tool_exists shellcheck; then add_check lint shell "find . \\( -name '.agents' -o -name '.claude' -o -name '.codex' -o -name 'vendor' -o -name 'node_modules' -o -name 'dist' -o -name 'build' -o -name 'coverage' -o -name 'graphify-out' -o -name '.git' -o -name '.cache' -o -name '.venv' -o -name 'obsidian' \\) -prune -o -name '*.sh' -print0 | xargs -0 -r $(tool_cmd shellcheck)"; fi
 		if tool_exists shfmt; then add_check format shell "find . \\( -name '.agents' -o -name '.claude' -o -name '.codex' -o -name 'vendor' -o -name 'node_modules' -o -name 'dist' -o -name 'build' -o -name 'coverage' -o -name 'graphify-out' -o -name '.git' -o -name '.cache' -o -name '.venv' -o -name 'obsidian' \\) -prune -o -name '*.sh' -print0 | xargs -0 $(tool_cmd shfmt) -w"; fi
 	fi
 

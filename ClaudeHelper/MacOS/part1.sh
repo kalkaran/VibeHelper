@@ -112,6 +112,10 @@ while [[ $# -gt 0 ]]; do
 		# Accepted for compatibility; installs are already non-interactive.
 		shift
 		;;
+	--no-system-packages)
+		# WSL-only apt bootstrap flag; no-op on this platform.
+		shift
+		;;
 	--repo)
 		REPO_ROOT="${2:-}"
 		if [[ -z "$REPO_ROOT" ]]; then
@@ -155,6 +159,7 @@ repo_root() {
 }
 
 HELPER_ROOT="$(cd "$(script_dir)/.." >/dev/null 2>&1 && pwd)"
+PLATFORM_LABEL="${CLAUDE_HELPER_PLATFORM_LABEL:-MacOS}"
 TEMPLATE_ROOT="$HELPER_ROOT/templates"
 ROOT="$(repo_root)"
 cd "$ROOT"
@@ -2046,8 +2051,8 @@ else
 	cat <<NEXT
 
 Next steps:
-  1. Run: bash $HELPER_ROOT/MacOS/part2.sh --dry-run --wire
-  2. Run: bash $HELPER_ROOT/MacOS/part2.sh --wire
+  1. Run: bash $HELPER_ROOT/$PLATFORM_LABEL/part2.sh --dry-run --wire
+  2. Run: bash $HELPER_ROOT/$PLATFORM_LABEL/part2.sh --wire
   3. Restart Claude Code in this repo (reloads hooks; RTK routing and graphify guidance apply).
   4. Run: make edited-ai
   5. Run: make skills-check
