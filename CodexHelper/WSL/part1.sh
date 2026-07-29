@@ -1391,6 +1391,7 @@ Before editing:
 - Apply Ponytail discipline: skip unnecessary work, reuse existing code, prefer stdlib/native features, avoid new dependencies, and make the smallest safe change.
 - Use Context7 for library/API/framework docs, setup, configuration, or unfamiliar APIs.
 - Use `$impeccable` for frontend design work when available: UI creation, visual polish, layout, typography, color, responsive behavior, UX copy, design-system drift, accessibility, or frontend design audits.
+- When an Impeccable critique would benefit from subagents, ask: "Use subagents for the Impeccable critique? Reply yes to approve." Treat a plain "yes" as approval only when it directly answers that question; otherwise continue single-agent.
 - Read `/agent/index.md` for workflow details.
 - Read only the minimal files needed.
 
@@ -2730,11 +2731,40 @@ Scope:
 import json
 import re
 import sys
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
+
+def log_hook_error(reason: str, *, raw: str = "", error: Exception | None = None) -> None:
+    entry = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "hook": "pre_tool_use_policy.py",
+        "reason": reason,
+    }
+    if error is not None:
+        entry["error"] = str(error)
+    if raw:
+        entry["stdin_preview"] = raw[:8000]
+    try:
+        log_path = Path(__file__).resolve().parents[2] / ".cache" / "hook-errors.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(entry, sort_keys=True) + "\n")
+    except Exception as exc:
+        print(f"[codex-helper] failed to log hook error: {exc}", file=sys.stderr)
+
+
 try:
-    payload: Any = json.load(sys.stdin)
-except Exception:
+    raw_payload = sys.stdin.read()
+    payload: Any = json.loads(raw_payload) if raw_payload.strip() else {}
+    if not raw_payload.strip():
+        log_hook_error("stdin-empty")
+except json.JSONDecodeError as exc:
+    log_hook_error("json-decode-failed", raw=raw_payload, error=exc)
+    payload = {}
+except Exception as exc:
+    log_hook_error("stdin-read-failed", error=exc)
     payload = {}
 
 
@@ -2830,6 +2860,8 @@ import re
 import shlex
 import shutil
 import sys
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 
@@ -2841,10 +2873,38 @@ SHELL_META_RE = re.compile(r"[|;&<>\x60$*?\[\]{}()\r\n]")
 UNSAFE_GIT_OPTIONS = {"--ext-diff", "--output", "--textconv"}
 
 
+def log_hook_error(reason: str, *, raw: str = "", error: Exception | None = None) -> None:
+    entry = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "hook": "rtk_pre_tool_use.py",
+        "reason": reason,
+    }
+    if error is not None:
+        entry["error"] = str(error)
+    if raw:
+        entry["stdin_preview"] = raw[:8000]
+    try:
+        log_path = Path(__file__).resolve().parents[2] / ".cache" / "hook-errors.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(entry, sort_keys=True) + "\n")
+    except Exception as exc:
+        print(f"[codex-helper] failed to log hook error: {exc}", file=sys.stderr)
+
+
 def load_payload() -> dict[str, Any]:
     try:
-        value = json.load(sys.stdin)
-    except Exception:
+        raw = sys.stdin.read()
+    except Exception as exc:
+        log_hook_error("stdin-read-failed", error=exc)
+        return {}
+    if not raw.strip():
+        log_hook_error("stdin-empty")
+        return {}
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        log_hook_error("json-decode-failed", raw=raw, error=exc)
         return {}
     return value if isinstance(value, dict) else {}
 
@@ -2952,11 +3012,31 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 
 PATH_KEYS = {"file", "file_path", "filename", "path", "target_file"}
+
+
+def log_hook_error(reason: str, *, raw: str = "", error: Exception | None = None) -> None:
+    entry = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "hook": "post_edit_check.py",
+        "reason": reason,
+    }
+    if error is not None:
+        entry["error"] = str(error)
+    if raw:
+        entry["stdin_preview"] = raw[:8000]
+    try:
+        log_path = Path(__file__).resolve().parents[2] / ".cache" / "hook-errors.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(entry, sort_keys=True) + "\n")
+    except Exception as exc:
+        print(f"[codex-helper] failed to log hook error: {exc}", file=sys.stderr)
 
 
 def emit_failure(reason: str) -> None:
@@ -2984,9 +3064,22 @@ def git_root() -> Path:
 
 def main() -> int:
     try:
-        payload = json.load(sys.stdin)
-    except Exception:
+        raw = sys.stdin.read()
+    except Exception as exc:
+        log_hook_error("stdin-read-failed", error=exc)
         payload = {}
+    else:
+        if not raw.strip():
+            log_hook_error("stdin-empty")
+            payload = {}
+        else:
+            try:
+                payload = json.loads(raw)
+            except json.JSONDecodeError as exc:
+                log_hook_error("json-decode-failed", raw=raw, error=exc)
+                payload = {}
+            if not isinstance(payload, dict):
+                payload = {}
 
     paths: set[str] = set()
     collect_paths(payload, paths)
@@ -3049,7 +3142,25 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
+
+
+def log_hook_error(reason: str, *, error: Exception | None = None) -> None:
+    entry = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "hook": "stop_edited_check.py",
+        "reason": reason,
+    }
+    if error is not None:
+        entry["error"] = str(error)
+    try:
+        log_path = Path(__file__).resolve().parents[2] / ".cache" / "hook-errors.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(entry, sort_keys=True) + "\n")
+    except Exception as exc:
+        print(f"[codex-helper] failed to log hook error: {exc}", file=sys.stderr)
 
 
 def emit_response(exit_code: int, reason: str | None = None) -> None:
@@ -3096,6 +3207,7 @@ if __name__ == "__main__":
         exit_code = main()
     except Exception as exc:
         reason = f"Stop hook failed unexpectedly: {exc}"
+        log_hook_error("unexpected-error", error=exc)
         print(f"[stop-edited-check] unexpected error: {exc}", file=sys.stderr)
     finally:
         emit_response(exit_code, reason)

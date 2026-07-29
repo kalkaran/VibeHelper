@@ -883,6 +883,8 @@ import os
 import re
 import shlex
 import sys
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 
@@ -946,16 +948,40 @@ GIT_OPTIONS_WITH_VALUES = {
 }
 
 
+def log_hook_error(reason: str, *, raw: str = "", error: Exception | None = None) -> None:
+    entry = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "hook": "pre_tool_use_policy.py",
+        "reason": reason,
+    }
+    if error is not None:
+        entry["error"] = str(error)
+    if raw:
+        entry["stdin_preview"] = raw[:8000]
+    try:
+        root = os.environ.get("CLAUDE_PROJECT_DIR")
+        base = Path(root) if root else Path.cwd()
+        log_path = base / ".cache" / "hook-errors.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(entry, sort_keys=True) + "\n")
+    except Exception as exc:
+        print(f"[claude-helper] failed to log hook error: {exc}", file=sys.stderr)
+
+
 def read_payload() -> dict[str, Any]:
     try:
         raw = sys.stdin.read()
-    except Exception:
+    except Exception as exc:
+        log_hook_error("stdin-read-failed", error=exc)
         return {}
     if not raw.strip():
+        log_hook_error("stdin-empty")
         return {}
     try:
         data = json.loads(raw)
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as exc:
+        log_hook_error("json-decode-failed", raw=raw, error=exc)
         return {}
     return data if isinstance(data, dict) else {}
 
@@ -1168,10 +1194,13 @@ by hand.
 from __future__ import annotations
 
 import json
+import os
 import re
 import shlex
 import shutil
 import sys
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 
@@ -1194,10 +1223,40 @@ SHELL_META_RE = re.compile(r"[|;&<>\x60$*?\[\]{}()\r\n]")
 UNSAFE_GIT_OPTIONS = {"--ext-diff", "--output", "--textconv"}
 
 
+def log_hook_error(reason: str, *, raw: str = "", error: Exception | None = None) -> None:
+    entry = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "hook": "rtk_pre_tool_use.py",
+        "reason": reason,
+    }
+    if error is not None:
+        entry["error"] = str(error)
+    if raw:
+        entry["stdin_preview"] = raw[:8000]
+    try:
+        root = os.environ.get("CLAUDE_PROJECT_DIR")
+        base = Path(root) if root else Path.cwd()
+        log_path = base / ".cache" / "hook-errors.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(entry, sort_keys=True) + "\n")
+    except Exception as exc:
+        print(f"[claude-helper] failed to log hook error: {exc}", file=sys.stderr)
+
+
 def load_payload() -> dict[str, Any]:
     try:
-        value = json.load(sys.stdin)
-    except Exception:
+        raw = sys.stdin.read()
+    except Exception as exc:
+        log_hook_error("stdin-read-failed", error=exc)
+        return {}
+    if not raw.strip():
+        log_hook_error("stdin-empty")
+        return {}
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        log_hook_error("json-decode-failed", raw=raw, error=exc)
         return {}
     return value if isinstance(value, dict) else {}
 
@@ -1302,21 +1361,47 @@ import json
 import os
 import sys
 import tempfile
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 TRACKED_TOOLS = {"Grep", "Glob", "Read"}
 
 
+def log_hook_error(reason: str, *, raw: str = "", error: Exception | None = None) -> None:
+    entry = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "hook": "graph_first_policy.py",
+        "reason": reason,
+    }
+    if error is not None:
+        entry["error"] = str(error)
+    if raw:
+        entry["stdin_preview"] = raw[:8000]
+    try:
+        root = os.environ.get("CLAUDE_PROJECT_DIR")
+        base = Path(root) if root else Path.cwd()
+        log_path = base / ".cache" / "hook-errors.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(entry, sort_keys=True) + "\n")
+    except Exception as exc:
+        print(f"[claude-helper] failed to log hook error: {exc}", file=sys.stderr)
+
+
 def read_payload() -> dict[str, Any]:
     try:
         raw = sys.stdin.read()
-    except Exception:
+    except Exception as exc:
+        log_hook_error("stdin-read-failed", error=exc)
         return {}
     if not raw.strip():
+        log_hook_error("stdin-empty")
         return {}
     try:
         data = json.loads(raw)
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as exc:
+        log_hook_error("json-decode-failed", raw=raw, error=exc)
         return {}
     return data if isinstance(data, dict) else {}
 
@@ -1372,6 +1457,7 @@ import json
 import os
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -1402,16 +1488,40 @@ def repo_root(payload: dict[str, Any]) -> Path:
     )
 
 
+def log_hook_error(reason: str, *, raw: str = "", error: Exception | None = None) -> None:
+    entry = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "hook": "post_edit_check.py",
+        "reason": reason,
+    }
+    if error is not None:
+        entry["error"] = str(error)
+    if raw:
+        entry["stdin_preview"] = raw[:8000]
+    try:
+        root = os.environ.get("CLAUDE_PROJECT_DIR")
+        base = Path(root) if root else Path.cwd()
+        log_path = base / ".cache" / "hook-errors.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(entry, sort_keys=True) + "\n")
+    except Exception as exc:
+        print(f"[claude-helper] failed to log hook error: {exc}", file=sys.stderr)
+
+
 def read_payload() -> dict[str, Any]:
     try:
         raw = sys.stdin.read()
-    except Exception:
+    except Exception as exc:
+        log_hook_error("stdin-read-failed", error=exc)
         return {}
     if not raw.strip():
+        log_hook_error("stdin-empty")
         return {}
     try:
         data = json.loads(raw)
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as exc:
+        log_hook_error("json-decode-failed", raw=raw, error=exc)
         return {}
     return data if isinstance(data, dict) else {}
 
@@ -1517,20 +1627,45 @@ import json
 import os
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+
+def log_hook_error(reason: str, *, raw: str = "", error: Exception | None = None) -> None:
+    entry = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "hook": "stop_edited_check.py",
+        "reason": reason,
+    }
+    if error is not None:
+        entry["error"] = str(error)
+    if raw:
+        entry["stdin_preview"] = raw[:8000]
+    try:
+        root = os.environ.get("CLAUDE_PROJECT_DIR")
+        base = Path(root) if root else Path.cwd()
+        log_path = base / ".cache" / "hook-errors.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(entry, sort_keys=True) + "\n")
+    except Exception as exc:
+        print(f"[claude-helper] failed to log hook error: {exc}", file=sys.stderr)
 
 
 def read_payload() -> dict[str, Any]:
     try:
         raw = sys.stdin.read()
-    except Exception:
+    except Exception as exc:
+        log_hook_error("stdin-read-failed", error=exc)
         return {}
     if not raw.strip():
+        log_hook_error("stdin-empty")
         return {}
     try:
         data = json.loads(raw)
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as exc:
+        log_hook_error("json-decode-failed", raw=raw, error=exc)
         return {}
     return data if isinstance(data, dict) else {}
 
@@ -1767,6 +1902,7 @@ Before editing:
 - Read relevant `/codebase-wiki/` pages for durable repo memory.
 - Read `/agent/index.md` for workflow details on non-trivial tasks.
 - Use Context7 for library/API/framework docs, setup, configuration, or unfamiliar APIs.
+- When an Impeccable critique would benefit from subagents, ask: "Use subagents for the Impeccable critique? Reply yes to approve." Treat a plain "yes" as approval only when it directly answers that question; otherwise continue single-agent.
 - Prefer existing local patterns and helper APIs over new abstractions.
 - Read only the minimal files needed.
 
