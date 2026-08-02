@@ -447,6 +447,10 @@ has_biome_config() {
 	[[ -f biome.json || -f biome.jsonc ]]
 }
 
+markdownlint_globs() {
+	printf '"**/*.md" "**/*.markdown" "#**/.agents/**" "#**/.claude/**" "#**/.codex/**" "#**/node_modules/**" "#**/vendor/**" "#**/dist/**" "#**/build/**" "#**/coverage/**" "#**/graphify-out/**" "#**/.git/**" "#**/.cache/**" "#**/.venv/**" "#**/obsidian/**"'
+}
+
 should_install() {
 	local prompt="$1"
 	if [[ "$INSTALL_MODE" == "no" ]]; then
@@ -510,15 +514,18 @@ install_missing_quality_tools() {
 		tool_exists biome || node_packages+=("@biomejs/biome")
 		tool_exists htmlhint || node_packages+=("htmlhint")
 	fi
+	if [[ "$MARKDOWN" -eq 1 ]]; then
+		tool_exists markdownlint-cli2 || node_packages+=("markdownlint-cli2")
+	fi
 
 	if [[ ${#node_packages[@]} -gt 0 ]]; then
 		if ! cmd_exists npm; then
-			warn "npm is missing; cannot install missing JavaScript/CSS/HTML quality tools automatically."
-		elif should_install "Install missing JavaScript/CSS/HTML quality tools with npm?"; then
+			warn "npm is missing; cannot install missing npm-based quality tools automatically."
+		elif should_install "Install missing npm-based quality tools?"; then
 			if [[ ! -f package.json ]]; then
 				create_minimal_package_json || warn "package.json creation failed."
 			fi
-			run_install "Missing JavaScript/CSS/HTML quality tools" npm install --save-dev --save-exact "${node_packages[@]}" || warn "npm quality tool install failed."
+			run_install "Missing npm-based quality tools" npm install --save-dev --save-exact "${node_packages[@]}" || warn "npm quality tool install failed."
 		fi
 	fi
 
@@ -574,6 +581,7 @@ detect_file_signals() {
 	PHP_LANG=0
 	TS=0
 	SHELL_LANG=0
+	MARKDOWN=0
 	GO_LANG=0
 	RUST_LANG=0
 	DOTNET=0
@@ -592,6 +600,7 @@ detect_file_signals() {
 	PHP_FILES=0
 	PHP_MANIFESTS=0
 	SHELL_FILES=0
+	MARKDOWN_FILES=0
 	GO_FILES=0
 	GO_MANIFESTS=0
 	RUST_FILES=0
@@ -626,6 +635,7 @@ detect_file_signals() {
 		*.html | *.htm) HTML_FILES=$((HTML_FILES + 1)) ;;
 		*.css) CSS_FILES=$((CSS_FILES + 1)) ;;
 		*.php) PHP_FILES=$((PHP_FILES + 1)) ;;
+		*.md | *.markdown) MARKDOWN_FILES=$((MARKDOWN_FILES + 1)) ;;
 		*.sh | *.bash | *.zsh) SHELL_FILES=$((SHELL_FILES + 1)) ;;
 		*.go) GO_FILES=$((GO_FILES + 1)) ;;
 		*.rs) RUST_FILES=$((RUST_FILES + 1)) ;;
@@ -666,10 +676,11 @@ detect_file_signals() {
 	[[ "$HTML_FILES" -gt 0 || "$CSS_FILES" -gt 0 || "$JS_FILES" -gt 0 || "$JSX_FILES" -gt 0 || "$TS_FILES" -gt 0 || "$TSX_FILES" -gt 0 ]] && STATIC_WEB=1
 	[[ "$PHP_FILES" -gt 0 || "$PHP_MANIFESTS" -gt 0 ]] && PHP_LANG=1
 	[[ "$SHELL_FILES" -gt 0 ]] && SHELL_LANG=1
+	[[ "$MARKDOWN_FILES" -gt 0 ]] && MARKDOWN=1
 	[[ "$GO_FILES" -gt 0 || "$GO_MANIFESTS" -gt 0 ]] && GO_LANG=1
 	[[ "$RUST_FILES" -gt 0 || "$RUST_MANIFESTS" -gt 0 ]] && RUST_LANG=1
 	[[ "$DOTNET_FILES" -gt 0 || "$DOTNET_MANIFESTS" -gt 0 ]] && DOTNET=1
-	if [[ "$PYTHON" -eq 1 || "$NODE_PKG" -eq 1 || "$STATIC_WEB" -eq 1 || "$PHP_LANG" -eq 1 || "$SHELL_LANG" -eq 1 || "$GO_LANG" -eq 1 || "$RUST_LANG" -eq 1 || "$DOTNET" -eq 1 ]]; then
+	if [[ "$PYTHON" -eq 1 || "$NODE_PKG" -eq 1 || "$STATIC_WEB" -eq 1 || "$PHP_LANG" -eq 1 || "$SHELL_LANG" -eq 1 || "$MARKDOWN" -eq 1 || "$GO_LANG" -eq 1 || "$RUST_LANG" -eq 1 || "$DOTNET" -eq 1 ]]; then
 		UNKNOWN=0
 	fi
 	return 0
@@ -685,6 +696,7 @@ print_detection() {
 	[[ "$HTML_FILES" -gt 0 || "$CSS_FILES" -gt 0 ]] && echo "  - Web markup/styles: $HTML_FILES HTML, $CSS_FILES CSS"
 	[[ "$PHP_LANG" -eq 1 ]] && echo "  - PHP: $PHP_FILES .php, $PHP_MANIFESTS composer.json"
 	[[ "$SHELL_LANG" -eq 1 ]] && echo "  - Shell: $SHELL_FILES shell scripts"
+	[[ "$MARKDOWN" -eq 1 ]] && echo "  - Markdown: $MARKDOWN_FILES Markdown files"
 	[[ "$GO_LANG" -eq 1 ]] && echo "  - Go: $GO_FILES .go, $GO_MANIFESTS go.mod"
 	[[ "$RUST_LANG" -eq 1 ]] && echo "  - Rust: $RUST_FILES .rs, $RUST_MANIFESTS Cargo.toml"
 	[[ "$DOTNET" -eq 1 ]] && echo "  - .NET: $DOTNET_FILES .cs, $DOTNET_MANIFESTS project/solution files"
@@ -748,6 +760,15 @@ JS/TS/HTML/CSS files without package.json:
     create a package.json with a valid lowercase package name
     npm install --save-dev --save-exact @biomejs/biome htmlhint
 WEBREC
+	fi
+
+	if [[ "$MARKDOWN" -eq 1 ]]; then
+		cat <<'MDREC'
+
+Markdown:
+  Recommended:
+    npm install --save-dev --save-exact markdownlint-cli2
+MDREC
 	fi
 
 	if [[ "$PHP_LANG" -eq 1 ]]; then
@@ -959,6 +980,17 @@ detect_available_checks() {
 	if [[ "$SHELL_LANG" -eq 1 ]]; then
 		if tool_exists shellcheck; then add_check lint shell "find . \\( -name '.agents' -o -name '.claude' -o -name '.codex' -o -name 'vendor' -o -name 'node_modules' -o -name 'dist' -o -name 'build' -o -name 'coverage' -o -name 'graphify-out' -o -name '.git' -o -name '.cache' -o -name '.venv' -o -name 'obsidian' \\) -prune -o -name '*.sh' -print0 | xargs -0 -r $(tool_cmd shellcheck)"; fi
 		if tool_exists shfmt; then add_check format shell "find . \\( -name '.agents' -o -name '.claude' -o -name '.codex' -o -name 'vendor' -o -name 'node_modules' -o -name 'dist' -o -name 'build' -o -name 'coverage' -o -name 'graphify-out' -o -name '.git' -o -name '.cache' -o -name '.venv' -o -name 'obsidian' \\) -prune -o -name '*.sh' -print0 | xargs -0 $(tool_cmd shfmt) -w"; fi
+	fi
+
+	# Markdown checks
+	if [[ "$MARKDOWN" -eq 1 ]]; then
+		if local_bin_exists markdownlint-cli2; then
+			add_check lint markdown "npx markdownlint-cli2 $(markdownlint_globs)"
+			add_check format markdown "npx markdownlint-cli2 --fix $(markdownlint_globs)"
+		elif tool_exists markdownlint-cli2; then
+			add_check lint markdown "$(tool_cmd markdownlint-cli2) $(markdownlint_globs)"
+			add_check format markdown "$(tool_cmd markdownlint-cli2) --fix $(markdownlint_globs)"
+		fi
 	fi
 
 	# Go checks
@@ -1210,6 +1242,7 @@ EXCLUDED_FILES = {".mcp.json"}
 
 BIOME_EXTS = {".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".css", ".json", ".jsonc"}
 HTML_EXTS = {".html", ".htm"}
+MARKDOWN_EXTS = {".md", ".markdown"}
 FRONTEND_DESIGN_EXTS = {
     ".astro",
     ".css",
@@ -1267,13 +1300,15 @@ def existing_project_files(root: Path, files: list[str]) -> list[str]:
 
 
 def split_by_ext(files: list[str]) -> dict[str, list[str]]:
-    groups = {"biome": [], "html": [], "design": [], "php": [], "shell": []}
+    groups = {"biome": [], "html": [], "markdown": [], "design": [], "php": [], "shell": []}
     for file in files:
         suffix = Path(file).suffix.lower()
         if suffix in BIOME_EXTS:
             groups["biome"].append(file)
         if suffix in HTML_EXTS:
             groups["html"].append(file)
+        if suffix in MARKDOWN_EXTS:
+            groups["markdown"].append(file)
         if suffix in FRONTEND_DESIGN_EXTS:
             groups["design"].append(file)
         if suffix in PHP_EXTS:
@@ -1308,6 +1343,16 @@ def local_impeccable_command(root: Path) -> list[str] | None:
     if local_bin.exists():
         return ["npx", "--no-install", "impeccable"]
     executable = shutil.which("impeccable")
+    if executable:
+        return [executable]
+    return None
+
+
+def markdownlint_command(root: Path) -> list[str] | None:
+    local_bin = root / "node_modules" / ".bin" / "markdownlint-cli2"
+    if local_bin.exists():
+        return ["npx", "--no-install", "markdownlint-cli2"]
+    executable = shutil.which("markdownlint-cli2")
     if executable:
         return [executable]
     return None
@@ -1360,6 +1405,13 @@ def build_commands(root: Path, groups: dict[str, list[str]]) -> tuple[list[tuple
         files = quote_files(groups["html"])
         lint_cmds.append(("lint-html-edited", [f"npx htmlhint --nocolor --format compact {files}"], True, 24, False))
 
+    markdownlint = markdownlint_command(root)
+    if groups["markdown"] and markdownlint:
+        files = quote_files(groups["markdown"])
+        command = " ".join(shlex.quote(part) for part in markdownlint)
+        format_cmds.append(("format-markdownlint-edited", [f"{command} --fix {files}"], True, 20, False))
+        lint_cmds.append(("lint-markdown-edited", [f"{command} {files}"], True, 24, False))
+
     impeccable = local_impeccable_command(root)
     if groups["design"] and impeccable:
         detector_args = " ".join(shlex.quote(part) for part in impeccable + ["detect", *groups["design"]])
@@ -1402,11 +1454,11 @@ def main() -> int:
     os.chdir(root)
     files = existing_project_files(root, args.files if args.files else git_changed_files(root))
     groups = split_by_ext(files)
-    relevant = sorted(set(groups["biome"] + groups["html"] + groups["design"] + groups["php"] + groups["shell"]))
+    relevant = sorted(set(groups["biome"] + groups["html"] + groups["markdown"] + groups["design"] + groups["php"] + groups["shell"]))
 
     print(f"[edited-check] root: {root}")
     if not relevant:
-        print("[edited-check] no edited frontend/PHP/shell files to check")
+        print("[edited-check] no edited frontend/Markdown/PHP/shell files to check")
         return 0
 
     print(f"[edited-check] files: {len(relevant)}")
@@ -1739,6 +1791,9 @@ fixer_verify_cmd() {
 		;;
 	*biome\ check\ --write\ *)
 		printf '%s\n' "${cmd/biome check --write/biome check}"
+		;;
+	*markdownlint-cli2\ --fix\ *)
+		printf '%s\n' "${cmd/ --fix/}"
 		;;
 	ruff\ format\ *)
 		printf '%s\n' "${cmd/ruff format/ruff format --check}"

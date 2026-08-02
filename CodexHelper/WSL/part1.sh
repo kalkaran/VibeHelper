@@ -1288,6 +1288,7 @@ detect_file_signals() {
 	PHP_FILES=0
 	PHP_MANIFESTS=0
 	SHELL_FILES=0
+	MARKDOWN_FILES=0
 	GO_FILES=0
 	GO_MANIFESTS=0
 	RUST_FILES=0
@@ -1300,6 +1301,7 @@ detect_file_signals() {
 	has_php=0
 	has_static_web=0
 	has_shell=0
+	has_markdown=0
 	has_go=0
 	has_rust=0
 	has_dotnet=0
@@ -1331,6 +1333,7 @@ detect_file_signals() {
 		*.html | *.htm) HTML_FILES=$((HTML_FILES + 1)) ;;
 		*.css) CSS_FILES=$((CSS_FILES + 1)) ;;
 		*.php) PHP_FILES=$((PHP_FILES + 1)) ;;
+		*.md | *.markdown) MARKDOWN_FILES=$((MARKDOWN_FILES + 1)) ;;
 		*.sh | *.bash | *.zsh) SHELL_FILES=$((SHELL_FILES + 1)) ;;
 		*.go) GO_FILES=$((GO_FILES + 1)) ;;
 		*.rs) RUST_FILES=$((RUST_FILES + 1)) ;;
@@ -1367,6 +1370,7 @@ detect_file_signals() {
 	[[ "$PHP_FILES" -gt 0 || "$PHP_MANIFESTS" -gt 0 ]] && has_php=1
 	[[ "$HTML_FILES" -gt 0 || "$CSS_FILES" -gt 0 || "$JS_FILES" -gt 0 || "$JSX_FILES" -gt 0 || "$TS_FILES" -gt 0 || "$TSX_FILES" -gt 0 ]] && has_static_web=1
 	[[ "$SHELL_FILES" -gt 0 ]] && has_shell=1
+	[[ "$MARKDOWN_FILES" -gt 0 ]] && has_markdown=1
 	[[ "$GO_FILES" -gt 0 || "$GO_MANIFESTS" -gt 0 ]] && has_go=1
 	[[ "$RUST_FILES" -gt 0 || "$RUST_MANIFESTS" -gt 0 ]] && has_rust=1
 	[[ "$DOTNET_FILES" -gt 0 || "$DOTNET_MANIFESTS" -gt 0 ]] && has_dotnet=1
@@ -1390,6 +1394,7 @@ Before editing:
 - Before writing code, state the change plan and check that it directly solves the issue without creating broader side effects.
 - Apply Ponytail discipline: skip unnecessary work, reuse existing code, prefer stdlib/native features, avoid new dependencies, and make the smallest safe change.
 - Use Context7 for library/API/framework docs, setup, configuration, or unfamiliar APIs.
+- Use Humanizer before finalizing user-facing prose, docs, README copy, PR descriptions, release notes, or other natural-language text when the skill is available.
 - Use `$impeccable` for frontend design work when available: UI creation, visual polish, layout, typography, color, responsive behavior, UX copy, design-system drift, accessibility, or frontend design audits.
 - When an Impeccable critique would benefit from subagents, ask: "Use subagents for the Impeccable critique? Reply yes to approve." Treat a plain "yes" as approval only when it directly answers that question; otherwise continue single-agent.
 - Read `/agent/index.md` for workflow details.
@@ -1798,6 +1803,9 @@ create_makefile() {
 	fi
 	if [[ "$HTML_FILES" -gt 0 ]]; then
 		lint_parts+=('command -v htmlhint >/dev/null 2>&1 && htmlhint --ignore "**/.git/**,**/.agents/**,**/.claude/**,**/.codex/**,**/node_modules/**,**/vendor/**,**/dist/**,**/build/**,**/coverage/**,**/graphify-out/**,**/.cache/**,**/.venv/**" "**/*.html" || echo "htmlhint not installed; skipping HTML lint"')
+	fi
+	if [[ "$has_markdown" -eq 1 ]]; then
+		lint_parts+=('command -v markdownlint-cli2 >/dev/null 2>&1 && markdownlint-cli2 "**/*.md" "**/*.markdown" "#**/.agents/**" "#**/.claude/**" "#**/.codex/**" "#**/node_modules/**" "#**/vendor/**" "#**/dist/**" "#**/build/**" "#**/coverage/**" "#**/graphify-out/**" "#**/.git/**" "#**/.cache/**" "#**/.venv/**" "#**/obsidian/**" || echo "markdownlint-cli2 not installed; skipping Markdown lint"')
 	fi
 	if [[ "$has_php" -eq 1 ]]; then
 		setup_parts+=('command -v composer >/dev/null 2>&1 && [ -f composer.json ] && composer install || echo "composer not installed or composer.json missing; skipping PHP dependency install"')
@@ -2489,6 +2497,7 @@ EXCLUDED_DIRS = {".agents", ".cache", ".claude", ".codex", ".git", ".venv", "bui
 EXCLUDED_FILES = {".mcp.json"}
 BIOME_EXTS = {".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".css", ".json", ".jsonc"}
 HTML_EXTS = {".html", ".htm"}
+MARKDOWN_EXTS = {".md", ".markdown"}
 FRONTEND_DESIGN_EXTS = {
     ".astro",
     ".css",
@@ -2546,13 +2555,15 @@ def existing_project_files(root: Path, files: list[str]) -> list[str]:
 
 
 def split_by_ext(files: list[str]) -> dict[str, list[str]]:
-    groups = {"biome": [], "html": [], "design": [], "php": [], "shell": []}
+    groups = {"biome": [], "html": [], "markdown": [], "design": [], "php": [], "shell": []}
     for file in files:
         suffix = Path(file).suffix.lower()
         if suffix in BIOME_EXTS:
             groups["biome"].append(file)
         if suffix in HTML_EXTS:
             groups["html"].append(file)
+        if suffix in MARKDOWN_EXTS:
+            groups["markdown"].append(file)
         if suffix in FRONTEND_DESIGN_EXTS:
             groups["design"].append(file)
         if suffix in PHP_EXTS:
@@ -2587,6 +2598,16 @@ def local_impeccable_command(root: Path) -> list[str] | None:
     if local_bin.exists():
         return ["npx", "--no-install", "impeccable"]
     executable = shutil.which("impeccable")
+    if executable:
+        return [executable]
+    return None
+
+
+def markdownlint_command(root: Path) -> list[str] | None:
+    local_bin = root / "node_modules" / ".bin" / "markdownlint-cli2"
+    if local_bin.exists():
+        return ["npx", "--no-install", "markdownlint-cli2"]
+    executable = shutil.which("markdownlint-cli2")
     if executable:
         return [executable]
     return None
@@ -2632,6 +2653,12 @@ def build_commands(root: Path, groups: dict[str, list[str]]) -> tuple[list[tuple
     if groups["html"] and have_path(root, "node_modules/.bin/htmlhint"):
         files = quote_files(groups["html"])
         lint_cmds.append(("lint-html-edited", [f"npx htmlhint --nocolor --format compact {files}"], True, 24, False))
+    markdownlint = markdownlint_command(root)
+    if groups["markdown"] and markdownlint:
+        files = quote_files(groups["markdown"])
+        command = " ".join(shlex.quote(part) for part in markdownlint)
+        format_cmds.append(("format-markdownlint-edited", [f"{command} --fix {files}"], True, 20, False))
+        lint_cmds.append(("lint-markdown-edited", [f"{command} {files}"], True, 24, False))
     impeccable = local_impeccable_command(root)
     if groups["design"] and impeccable:
         detector_args = " ".join(shlex.quote(part) for part in impeccable + ["detect", *groups["design"]])
@@ -2666,10 +2693,10 @@ def main() -> int:
     os.chdir(root)
     files = existing_project_files(root, args.files if args.files else git_changed_files(root))
     groups = split_by_ext(files)
-    relevant = sorted(set(groups["biome"] + groups["html"] + groups["design"] + groups["php"] + groups["shell"]))
+    relevant = sorted(set(groups["biome"] + groups["html"] + groups["markdown"] + groups["design"] + groups["php"] + groups["shell"]))
     print(f"[edited-check] root: {root}")
     if not relevant:
-        print("[edited-check] no edited frontend/PHP/shell files to check")
+        print("[edited-check] no edited frontend/Markdown/PHP/shell files to check")
         return 0
     print(f"[edited-check] files: {len(relevant)}")
     for file in relevant[:30]:

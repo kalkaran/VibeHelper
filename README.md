@@ -56,6 +56,27 @@ Depending on the helper and options you choose, VibeHelper can add:
 - helper scripts for edited-file checks
 - Makefile commands such as `make edited-ai`, `make lint-ai`, `make verify-ai`, `make wiki-ai`, `make skills-check`, and `make skills-update`
 
+## What it can install
+
+The installer asks before adding tools unless you run it with install flags. It can add:
+
+- Codex project files: instructions, hooks, repo notes, and local helper scripts for Codex.
+- Claude Code project files: instructions, hooks, slash commands, repo notes, and local helper scripts for Claude.
+- Humanizer: rewrites generated prose so docs, READMEs, and release notes sound less stiff.
+- Context7: gives agents current library and framework docs when they need API details.
+- Ponytail: pushes agents toward smaller changes and less overbuilt code.
+- Graphify: maps a repo into a graph so agents can understand large codebases faster.
+- code-review-graph: tracks code relationships so agents can review blast radius before changing files.
+- Impeccable: helps with frontend design, layout, polish, and UI checks when enabled.
+- RTK: trims noisy read-only command output before it reaches the agent.
+- Ruff: formats and lints Python.
+- Biome: formats and checks JavaScript, TypeScript, CSS, and JSON.
+- HTMLHint: checks HTML.
+- markdownlint-cli2: checks Markdown files.
+- ShellCheck and shfmt: check and format shell scripts.
+- PHP_CodeSniffer and PHPStan: check PHP style, syntax, and types.
+- Semgrep: runs optional static security checks.
+
 ## After install
 
 Restart Codex or Claude Code in the configured repo so it reloads the new files.

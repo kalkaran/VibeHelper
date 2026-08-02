@@ -93,6 +93,18 @@ raise SystemExit(0 if isinstance(scripts, dict) and isinstance(scripts.get(name)
 PY
 }
 
+has_markdown_files() {
+	local match
+	match="$(find . \
+		\( -name .agents -o -name .claude -o -name .codex -o -name node_modules -o -name vendor -o -name dist -o -name build -o -name coverage -o -name graphify-out -o -name .git -o -name .cache -o -name .venv \) -prune \
+		-o \( -name '*.md' -o -name '*.markdown' \) -print -quit 2>/dev/null)"
+	[[ -n "$match" ]]
+}
+
+markdownlint_globs() {
+	printf '"**/*.md" "**/*.markdown" "#**/.agents/**" "#**/.claude/**" "#**/.codex/**" "#**/node_modules/**" "#**/vendor/**" "#**/dist/**" "#**/build/**" "#**/coverage/**" "#**/graphify-out/**" "#**/.git/**" "#**/.cache/**" "#**/.venv/**" "#**/obsidian/**"'
+}
+
 ROOT="$(repo_root)"
 cd "$ROOT"
 export PATH="$HOME/.local/bin:$PATH"
@@ -149,6 +161,9 @@ if has_npm_script lint; then
 fi
 if cmd_exists shellcheck; then
 	lint_commands+=("$wrapper --label lint-shell --max-lines 30 --shell -- 'find . \\( -name .agents -o -name .claude -o -name .codex -o -name node_modules -o -name vendor -o -name dist -o -name build -o -name coverage -o -name graphify-out -o -name .git -o -name .cache -o -name .venv \\) -prune -o -name \"*.sh\" -print0 | xargs -0 -r shellcheck'")
+fi
+if cmd_exists markdownlint-cli2 && has_markdown_files; then
+	lint_commands+=("$wrapper --label lint-markdown --max-lines 30 --shell -- 'markdownlint-cli2 $(markdownlint_globs)'")
 fi
 if [[ "${#lint_commands[@]}" -gt 0 ]]; then
 	body=""

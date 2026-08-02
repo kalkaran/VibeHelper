@@ -1847,6 +1847,7 @@ Before editing:
 - Read relevant `/codebase-wiki/` pages for durable repo memory.
 - Read `/agent/index.md` for workflow details on non-trivial tasks.
 - Use Context7 for library/API/framework docs, setup, configuration, or unfamiliar APIs.
+- Use Humanizer before finalizing user-facing prose, docs, README copy, PR descriptions, release notes, or other natural-language text when the skill is available.
 - When an Impeccable critique would benefit from subagents, ask: "Use subagents for the Impeccable critique? Reply yes to approve." Treat a plain "yes" as approval only when it directly answers that question; otherwise continue single-agent.
 - Prefer existing local patterns and helper APIs over new abstractions.
 - Read only the minimal files needed.
