@@ -1041,6 +1041,7 @@ install_with_uv_or_pipx() {
 setup_impeccable() {
 	if [[ -f ".agents/skills/impeccable/SKILL.md" ]]; then
 		log "Impeccable is already installed for Codex."
+		patch_codex_impeccable_stop_hook
 		record_install_ok "Impeccable already installed for Codex"
 		return 0
 	fi
@@ -1053,6 +1054,7 @@ setup_impeccable() {
 					run npx npx impeccable install -y --providers=codex --scope=project
 					record_install_skipped "Impeccable install would run (dry-run)"
 				elif run npx npx impeccable install -y --providers=codex --scope=project && [[ -f ".agents/skills/impeccable/SKILL.md" ]]; then
+					patch_codex_impeccable_stop_hook
 					record_install_ok "Impeccable install completed"
 					record_install_skipped "Impeccable still needs /impeccable init and Codex /hooks approval"
 				else
@@ -1069,6 +1071,33 @@ setup_impeccable() {
 	else
 		warn "Impeccable setup not run in --yes mode. Use --impeccable to approve it non-interactively."
 	fi
+}
+
+patch_codex_impeccable_stop_hook() {
+	local hook_lib=".agents/skills/impeccable/scripts/hook-lib.mjs"
+	[[ -f "$hook_lib" ]] || return 0
+	if ! grep -Fq "JSON.stringify({ decision: 'block', reason: text })" "$hook_lib"; then
+		return 0
+	fi
+	if [[ "$DRY_RUN" == "1" ]]; then
+		log "Would patch Impeccable Codex Stop hook JSON compatibility."
+		return 0
+	fi
+	if ! python3 - "$hook_lib" <<'PY'; then
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text(encoding="utf-8")
+old = "return JSON.stringify({ decision: 'block', reason: text });"
+new = "return JSON.stringify({ continue: false, stopReason: text });"
+if old in text:
+    path.write_text(text.replace(old, new, 1), encoding="utf-8")
+PY
+		warn "Could not patch Impeccable Codex Stop hook compatibility."
+		return 0
+	fi
+	log "Patched Impeccable Codex Stop hook JSON compatibility."
 }
 
 humanizer_installed() {
