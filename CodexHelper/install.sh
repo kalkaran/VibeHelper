@@ -11,6 +11,7 @@ DRY_RUN=0
 YES=0
 FORCE=0
 FRESH_INSTALL=0
+CLEANUP=0
 REPO_ONLY=0
 REPO_ROOT=""
 CODEX_CONFIG_FLAG="--no-apply-codex-config"
@@ -33,6 +34,7 @@ Options:
   --dry-run             Preview both phases without making changes.
   --yes, -y             Accept non-interactive defaults in both phases.
   --fresh-install       Refresh managed files and install/wire missing tools.
+  --cleanup             Remove CodexHelper project files from the target repo.
   --force               Back up and refresh managed files in both phases.
   --repo PATH           Configure PATH instead of the current repository.
   --repo-only           Skip global and quality-tool installs; wire existing tools.
@@ -87,6 +89,10 @@ while [[ $# -gt 0 ]]; do
 		;;
 	--fresh-install)
 		FRESH_INSTALL=1
+		shift
+		;;
+	--cleanup)
+		CLEANUP=1
 		shift
 		;;
 	--force)
@@ -167,6 +173,78 @@ if [[ "$REPO_ONLY" -eq 1 && "$QUALITY_INSTALL_MODE" == "--install" ]]; then
 	exit 2
 fi
 
+if [[ -n "$REPO_ROOT" ]]; then
+	if [[ ! -d "$REPO_ROOT" ]]; then
+		err "Repository path does not exist: $REPO_ROOT"
+		exit 2
+	fi
+	cd "$REPO_ROOT"
+fi
+
+remove_gitignore_block() {
+	[[ -f .gitignore ]] || return 0
+	local tmp
+	tmp="$(mktemp)"
+	awk '
+		$0 == "# VibeHelper local AI/dev tooling" { skip = 1; next }
+		skip && ($0 == "*.bak" || $0 == "*.bak.*" || $0 == ".cache/" || $0 == ".agents/" || $0 == ".claude/" || $0 == ".codex/" || $0 == ".mcp.json" || $0 == "AGENTS.md" || $0 == "CLAUDE.md" || $0 == "Makefile" || $0 == "agent/" || $0 == "agents/" || $0 == "codebase-wiki/" || $0 == "graphify-out/" || $0 == "node_modules/" || $0 == "notes/" || $0 == "obsidian/" || $0 == "vendor/" || $0 == "vibe_scripts/" || $0 == "skills-lock.json" || $0 == "biome.json") { next }
+		{ skip = 0; print }
+	' .gitignore >"$tmp"
+	if cmp -s "$tmp" .gitignore; then
+		rm -f "$tmp"
+	else
+		mv "$tmp" .gitignore
+		[[ -s .gitignore ]] || rm -f .gitignore
+		log "Removed VibeHelper .gitignore block."
+	fi
+}
+
+cleanup_project() {
+	local paths=(
+		".agents"
+		".codex"
+		".cache"
+		".mcp.json"
+		"AGENTS.md"
+		"Makefile"
+		"agent"
+		"agents"
+		"codebase-wiki"
+		"graphify-out"
+		"notes"
+		"vibe_scripts"
+		"skills-lock.json"
+		"biome.json"
+	)
+	if [[ "$DRY_RUN" -eq 1 ]]; then
+		log "Would remove CodexHelper project files from $(pwd)."
+		printf '  %s\n' "${paths[@]}"
+		log "Would remove the managed VibeHelper block from .gitignore."
+		return 0
+	fi
+	if [[ "$YES" -ne 1 ]]; then
+		printf 'Remove CodexHelper project files from %s? [y/N] ' "$(pwd)"
+		read -r answer || answer=""
+		[[ "$answer" == "y" || "$answer" == "Y" || "$answer" == "yes" || "$answer" == "YES" ]] || {
+			log "Cleanup cancelled."
+			return 0
+		}
+	fi
+	local path
+	for path in "${paths[@]}"; do
+		[[ -e "$path" || -L "$path" ]] || continue
+		rm -rf -- "$path"
+		log "Removed $path"
+	done
+	remove_gitignore_block
+	log "CodexHelper project cleanup complete."
+}
+
+if [[ "$CLEANUP" -eq 1 ]]; then
+	cleanup_project
+	exit 0
+fi
+
 detect_platform_dir() {
 	local kernel
 	kernel="$(uname -s 2>/dev/null || true)"
@@ -199,14 +277,6 @@ for phase_script in "$PART1" "$PART2"; do
 		exit 1
 	fi
 done
-
-if [[ -n "$REPO_ROOT" ]]; then
-	if [[ ! -d "$REPO_ROOT" ]]; then
-		err "Repository path does not exist: $REPO_ROOT"
-		exit 2
-	fi
-	cd "$REPO_ROOT"
-fi
 
 PART1_ARGS=()
 PART2_ARGS=()

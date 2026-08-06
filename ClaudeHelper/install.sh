@@ -8,7 +8,9 @@ SCRIPT_NAME="$(basename "$0")"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
 DRY_RUN=0
+YES=0
 FORCE=0
+CLEANUP=0
 REPO_ROOT=""
 WIRE_MODE="auto"
 PART1_ONLY_ARGS=()
@@ -26,6 +28,7 @@ setup is detected.
 
 Options:
   --dry-run       Preview both phases without making changes.
+  --cleanup       Remove ClaudeHelper project files from the target repo.
   --force         Back up and refresh managed files (not allowed with Codex).
   --repo PATH     Configure PATH instead of the current repository.
   --wire          Write/update the quality Makefile (default).
@@ -66,6 +69,15 @@ while [[ $# -gt 0 ]]; do
 		DRY_RUN=1
 		shift
 		;;
+	--cleanup)
+		CLEANUP=1
+		shift
+		;;
+	--yes)
+		YES=1
+		PART1_ONLY_ARGS+=("$1")
+		shift
+		;;
 	--force)
 		FORCE=1
 		shift
@@ -83,7 +95,7 @@ while [[ $# -gt 0 ]]; do
 		WIRE_MODE="no-wire"
 		shift
 		;;
-	--no-humanizer | --no-rtk | --no-graphify | --no-ponytail | --no-crg | --crg-build | --no-context7 | --impeccable | --with-llm-council | --repo-only | --skip-global | --yes | --no-system-packages)
+	--no-humanizer | --no-rtk | --no-graphify | --no-ponytail | --no-crg | --crg-build | --no-context7 | --impeccable | --with-llm-council | --repo-only | --skip-global | --no-system-packages)
 		PART1_ONLY_ARGS+=("$1")
 		shift
 		;;
@@ -98,6 +110,77 @@ while [[ $# -gt 0 ]]; do
 		;;
 	esac
 done
+
+if [[ -n "$REPO_ROOT" ]]; then
+	if [[ ! -d "$REPO_ROOT" ]]; then
+		err "Repository path does not exist: $REPO_ROOT"
+		exit 2
+	fi
+	cd "$REPO_ROOT"
+fi
+
+remove_gitignore_block() {
+	[[ -f .gitignore ]] || return 0
+	local tmp
+	tmp="$(mktemp)"
+	awk '
+		$0 == "# VibeHelper local AI/dev tooling" { skip = 1; next }
+		skip && ($0 == "*.bak" || $0 == "*.bak.*" || $0 == ".cache/" || $0 == ".agents/" || $0 == ".claude/" || $0 == ".codex/" || $0 == ".mcp.json" || $0 == "AGENTS.md" || $0 == "CLAUDE.md" || $0 == "Makefile" || $0 == "agent/" || $0 == "agents/" || $0 == "codebase-wiki/" || $0 == "graphify-out/" || $0 == "node_modules/" || $0 == "notes/" || $0 == "obsidian/" || $0 == "vendor/" || $0 == "vibe_scripts/" || $0 == "skills-lock.json" || $0 == "biome.json") { next }
+		{ skip = 0; print }
+	' .gitignore >"$tmp"
+	if cmp -s "$tmp" .gitignore; then
+		rm -f "$tmp"
+	else
+		mv "$tmp" .gitignore
+		[[ -s .gitignore ]] || rm -f .gitignore
+		log "Removed VibeHelper .gitignore block."
+	fi
+}
+
+cleanup_project() {
+	local paths=(
+		".claude"
+		".cache"
+		".mcp.json"
+		"CLAUDE.md"
+		"Makefile"
+		"agent"
+		"agents"
+		"codebase-wiki"
+		"graphify-out"
+		"notes"
+		"vibe_scripts"
+		"skills-lock.json"
+		"biome.json"
+	)
+	if [[ "$DRY_RUN" -eq 1 ]]; then
+		log "Would remove ClaudeHelper project files from $(pwd)."
+		printf '  %s\n' "${paths[@]}"
+		log "Would remove the managed VibeHelper block from .gitignore."
+		return 0
+	fi
+	if [[ "$YES" -ne 1 ]]; then
+		printf 'Remove ClaudeHelper project files from %s? [y/N] ' "$(pwd)"
+		read -r answer || answer=""
+		[[ "$answer" == "y" || "$answer" == "Y" || "$answer" == "yes" || "$answer" == "YES" ]] || {
+			log "Cleanup cancelled."
+			return 0
+		}
+	fi
+	local path
+	for path in "${paths[@]}"; do
+		[[ -e "$path" || -L "$path" ]] || continue
+		rm -rf -- "$path"
+		log "Removed $path"
+	done
+	remove_gitignore_block
+	log "ClaudeHelper project cleanup complete."
+}
+
+if [[ "$CLEANUP" -eq 1 ]]; then
+	cleanup_project
+	exit 0
+fi
 
 detect_platform_dir() {
 	local kernel
@@ -131,14 +214,6 @@ for phase_script in "$PART1" "$PART2"; do
 		exit 1
 	fi
 done
-
-if [[ -n "$REPO_ROOT" ]]; then
-	if [[ ! -d "$REPO_ROOT" ]]; then
-		err "Repository path does not exist: $REPO_ROOT"
-		exit 2
-	fi
-	cd "$REPO_ROOT"
-fi
 
 codex_setup_present() {
 	[[ -d .codex ]] ||
