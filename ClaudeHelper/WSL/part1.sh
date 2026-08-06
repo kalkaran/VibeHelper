@@ -507,18 +507,18 @@ install_shared_vibe_script() {
 
 append_gitignore_block() {
 	local path="$ROOT/.gitignore"
-	local marker="# ClaudeHelper"
+	local marker="# VibeHelper local AI/dev tooling"
 	local block
 	local existed=0
-	block=$'# ClaudeHelper\n.cache/\n.claude/settings.local.json\n.mcp.json\n'
+	block=$'# VibeHelper local AI/dev tooling\n*.bak\n*.bak.*\n.cache/\n.agents/\n.claude/\n.codex/\n.mcp.json\nAGENTS.md\nCLAUDE.md\nMakefile\nagent/\nagents/\ncodebase-wiki/\ngraphify-out/\nnode_modules/\nnotes/\nobsidian/\nvendor/\nvibe_scripts/\nskills-lock.json\nbiome.json\n'
 	if [[ "$DRY_RUN" -eq 1 ]]; then
-		log "Would ensure .gitignore has ClaudeHelper local-file entries"
+		log "Would ensure .gitignore has VibeHelper local-file entries"
 		return 0
 	fi
 	[[ -e "$path" ]] && existed=1
 	touch "$path"
 	if grep -Fq "$marker" "$path"; then
-		log ".gitignore already contains ClaudeHelper block"
+		log ".gitignore already contains VibeHelper block"
 		return 0
 	fi
 	[[ "$existed" -eq 1 ]] && backup_file "$path"

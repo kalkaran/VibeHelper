@@ -1488,14 +1488,17 @@ PYCHECK
 }
 
 ensure_cache_gitignored() {
+	local marker="# VibeHelper local AI/dev tooling"
+	local block
+	block=$'# VibeHelper local AI/dev tooling\n*.bak\n*.bak.*\n.cache/\n.agents/\n.claude/\n.codex/\n.mcp.json\nAGENTS.md\nCLAUDE.md\nMakefile\nagent/\nagents/\ncodebase-wiki/\ngraphify-out/\nnode_modules/\nnotes/\nobsidian/\nvendor/\nvibe_scripts/\nskills-lock.json\nbiome.json\n'
 	if [[ "$DRY_RUN" -eq 1 ]]; then
-		log "Would ensure .cache/ is ignored in .gitignore."
+		log "Would ensure .gitignore has VibeHelper local-file entries."
 		return 0
 	fi
 	touch .gitignore
-	if ! grep -Fxq ".cache/" .gitignore; then
-		printf '\n# Local tool logs and caches\n.cache/\n' >>.gitignore
-		log "Added .cache/ to .gitignore."
+	if ! grep -Fq "$marker" .gitignore; then
+		printf '\n%s' "$block" >>.gitignore
+		log "Updated .gitignore."
 	fi
 }
 
