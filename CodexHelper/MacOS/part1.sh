@@ -595,6 +595,74 @@ codex_plugin_installed() {
 	codex plugin list --json 2>/dev/null | grep -Fq "\"pluginId\": \"$plugin_id\""
 }
 
+patch_codex_ponytail_hooks() {
+	local manifests=()
+	local manifest
+	for manifest in \
+		"$HOME"/.codex/plugins/cache/ponytail/ponytail/*/hooks/claude-codex-hooks.json \
+		"$HOME"/.codex/.tmp/marketplaces/ponytail/hooks/claude-codex-hooks.json; do
+		[[ -f "$manifest" ]] && manifests+=("$manifest")
+	done
+	[[ "${#manifests[@]}" -gt 0 ]] || return 0
+
+	if [[ "$DRY_RUN" == "1" ]]; then
+		log "Would patch Ponytail Codex hook path diagnostics."
+		return 0
+	fi
+	if ! python3 - "${manifests[@]}" <<'PY'; then
+import json
+import sys
+from pathlib import Path
+
+EVENTS = {
+    "SessionStart": "ponytail-activate.js",
+    "SubagentStart": "ponytail-subagent.js",
+    "UserPromptSubmit": "ponytail-mode-tracker.js",
+}
+
+def command(event: str, script: str) -> str:
+    return (
+        'root="${CLAUDE_PLUGIN_ROOT:-}"; '
+        + f'if [ -z "$root" ]; then for candidate in "$HOME"/.codex/plugins/cache/ponytail/ponytail/*; do [ -f "$candidate/hooks/{script}" ] && root="$candidate" && break; done; fi; '
+        + f'hook="$root/hooks/{script}"; '
+        + f'[ -f "$hook" ] || {{ echo "[ponytail] {event} hook missing: $hook" >&2; exit 1; }}; '
+        + 'node "$hook"; rc=$?; '
+        + f'[ "$rc" -eq 0 ] || echo "[ponytail] {event} hook failed: $hook (exit $rc)" >&2; '
+        + 'exit "$rc"'
+    )
+
+patched = []
+for arg in sys.argv[1:]:
+    path = Path(arg)
+    data = json.loads(path.read_text(encoding="utf-8"))
+    changed = False
+    for event, script in EVENTS.items():
+        entries = data.get("hooks", {}).get(event)
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            hooks = entry.get("hooks") if isinstance(entry, dict) else None
+            if not isinstance(hooks, list):
+                continue
+            for hook in hooks:
+                if isinstance(hook, dict) and script in str(hook.get("command", "")):
+                    next_command = command(event, script)
+                    if hook.get("command") != next_command:
+                        hook["command"] = next_command
+                        changed = True
+    if changed:
+        path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        patched.append(str(path))
+
+for path in patched:
+    print(path)
+PY
+		warn "Could not patch Ponytail Codex hook path diagnostics."
+		return 0
+	fi
+	log "Patched Ponytail Codex hook path diagnostics."
+}
+
 print_ponytail_status() {
 	if ! have codex; then
 		printf '  %-20s %s\n' "ponytail" "codex not found"
@@ -1161,9 +1229,11 @@ install_global_tools() {
 
 		if [[ "$ponytail_installed" == "1" ]]; then
 			log "Ponytail Codex plugin already installed."
+			patch_codex_ponytail_hooks
 			record_install_ok "Ponytail Codex plugin already installed"
 		elif [[ "$ponytail_marketplace_configured" == "1" ]]; then
 			log "Ponytail Codex marketplace already configured."
+			patch_codex_ponytail_hooks
 			record_install_ok "Ponytail Codex marketplace already configured"
 			record_install_skipped "Ponytail plugin install still requires /plugins and hook trust review"
 		elif confirm "Add Ponytail marketplace to Codex? This does not auto-trust hooks."; then
@@ -1171,6 +1241,7 @@ install_global_tools() {
 				run codex codex plugin marketplace add DietrichGebert/ponytail
 				record_install_skipped "Ponytail Codex marketplace add would run (dry-run)"
 			elif run codex codex plugin marketplace add DietrichGebert/ponytail; then
+				patch_codex_ponytail_hooks
 				record_install_ok "Ponytail Codex marketplace added"
 				record_install_skipped "Ponytail plugin install still requires /plugins and hook trust review"
 			else

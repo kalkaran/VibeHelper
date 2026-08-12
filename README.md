@@ -44,6 +44,12 @@ bash /path/to/VibeHelper/CodexHelper/install.sh --repo /path/to/project
 bash /path/to/VibeHelper/ClaudeHelper/install.sh --repo /path/to/project
 ```
 
+After setup, RTK can save tokens by trimming noisy read-only command output before the assistant sees it. Savings depend on the command, but these are reasonable estimates:
+
+- `git status` or a short `ls`: about 50-150 tokens saved when the raw output includes untracked files or repeated metadata.
+- `git diff`, `git log`, `grep`, or `rg` output across several files: often 500-2,000 tokens saved.
+- Very large diffs, logs, or search results: commonly 5,000+ tokens saved because RTK keeps the useful summary instead of sending the whole dump.
+
 ## What gets added
 
 Depending on the helper and options you choose, VibeHelper can add:
