@@ -6,9 +6,9 @@ set -euo pipefail
 # It detects likely repo types, offers to install missing dev quality tools,
 # then wires Makefile targets for tools/scripts that exist.
 #
-# Version: 2026-07-27-v19
+# Version: 2026-08-22-v20
 
-SCRIPT_VERSION="2026-07-27-v19"
+SCRIPT_VERSION="2026-08-22-v20"
 DRY_RUN=0
 YES=0
 FORCE=0
@@ -30,8 +30,8 @@ Usage: part2.sh [options]
 Options:
   --dry-run          Show what would happen without writing files.
   --yes              Non-interactive defaults. Continues with available checks.
-  --force            Update managed files after backing up existing copies.
-  --fresh-install    Fresh quality setup: install missing tools and wire Makefile.
+  --force            Refresh installed helper-managed tools and managed files.
+  --fresh-install    Install missing tools, refresh installed tools, and wire Makefile.
   --install          Install missing recommended quality tools without prompting.
   --no-install       Do not install tools; recommendations/wiring only.
   --wire             Write/update Makefile using only currently available checks.
@@ -189,6 +189,16 @@ tool_path() {
 tool_exists() {
 	local binary="$1"
 	tool_path "$binary" >/dev/null 2>&1
+}
+
+brew_formula_installed() { cmd_exists brew && HOMEBREW_NO_AUTO_UPDATE=1 brew list --formula --versions "$1" >/dev/null 2>&1; }
+
+uv_tool_installed() {
+	cmd_exists uv && uv tool list 2>/dev/null | awk -v package="$1" '$1 == package { found=1 } END { exit !found }'
+}
+
+pipx_package_installed() {
+	cmd_exists pipx && pipx list --short 2>/dev/null | awk -v package="$1" '$1 == package { found=1 } END { exit !found }'
 }
 
 tool_cmd() {
@@ -448,7 +458,7 @@ run_install() {
 	for arg in "$@"; do printf ' %q' "$arg"; done
 	printf '\n'
 	if [[ "$DRY_RUN" -eq 1 ]]; then
-		log "Would install: $label"
+		log "Would run: $label"
 		return 0
 	fi
 	"$@"
@@ -458,6 +468,59 @@ install_missing_quality_tools() {
 	if [[ "$INSTALL_MODE" == "no" ]]; then
 		log "Tool installation disabled (--no-install)."
 		return 0
+	fi
+
+	if [[ "$FORCE" -eq 1 ]]; then
+		cmd_exists brew && run_install "Homebrew package metadata refresh" brew update || true
+
+		if [[ "$PYTHON" -eq 1 ]] && tool_exists ruff; then
+			if uv_tool_installed ruff; then
+				run_install "Ruff refresh" uv tool upgrade ruff || warn "Ruff refresh failed."
+			elif pipx_package_installed ruff; then
+				run_install "Ruff refresh" pipx upgrade ruff || warn "Ruff refresh failed."
+			else
+				warn "ruff is installed but is not owned by uv or pipx; leaving it unchanged."
+			fi
+		fi
+
+		local npm_refresh=()
+		[[ "$STATIC_WEB" -eq 1 || "$NODE_PKG" -eq 1 || "$TS" -eq 1 ]] && local_bin_exists biome && npm_refresh+=("@biomejs/biome@latest")
+		[[ "$STATIC_WEB" -eq 1 || "$NODE_PKG" -eq 1 || "$TS" -eq 1 ]] && local_bin_exists htmlhint && npm_refresh+=("htmlhint@latest")
+		[[ "$MARKDOWN" -eq 1 ]] && local_bin_exists markdownlint-cli2 && npm_refresh+=("markdownlint-cli2@latest")
+		[[ "$STATIC_WEB" -eq 1 || "$NODE_PKG" -eq 1 || "$TS" -eq 1 ]] && tool_exists biome && ! local_bin_exists biome && warn "biome is not project-local; leaving the unmanaged executable unchanged."
+		[[ "$STATIC_WEB" -eq 1 || "$NODE_PKG" -eq 1 || "$TS" -eq 1 ]] && tool_exists htmlhint && ! local_bin_exists htmlhint && warn "htmlhint is not project-local; leaving the unmanaged executable unchanged."
+		[[ "$MARKDOWN" -eq 1 ]] && tool_exists markdownlint-cli2 && ! local_bin_exists markdownlint-cli2 && warn "markdownlint-cli2 is not project-local; leaving the unmanaged executable unchanged."
+		if [[ ${#npm_refresh[@]} -gt 0 ]]; then
+			if cmd_exists npm; then
+				run_install "npm quality tool refresh" npm install --save-dev --save-exact "${npm_refresh[@]}" || warn "npm quality tool refresh failed."
+			else
+				warn "npm-managed quality tools were found, but npm is unavailable."
+			fi
+		fi
+
+		if [[ "$PHP_LANG" -eq 1 ]] && cmd_exists composer; then
+			local composer_refresh=()
+			composer show squizlabs/php_codesniffer >/dev/null 2>&1 && composer_refresh+=("squizlabs/php_codesniffer")
+			composer show phpstan/phpstan >/dev/null 2>&1 && composer_refresh+=("phpstan/phpstan")
+			tool_exists phpcs && ! composer show squizlabs/php_codesniffer >/dev/null 2>&1 && warn "phpcs is not owned by this project's Composer setup; leaving it unchanged."
+			tool_exists phpstan && ! composer show phpstan/phpstan >/dev/null 2>&1 && warn "phpstan is not owned by this project's Composer setup; leaving it unchanged."
+			[[ ${#composer_refresh[@]} -gt 0 ]] && run_install "Composer quality tool refresh" composer update "${composer_refresh[@]}" --with-dependencies || true
+			brew_formula_installed composer && run_install "Composer refresh" brew upgrade composer || true
+		fi
+
+		if [[ "$SHELL_LANG" -eq 1 ]]; then
+			local brew_refresh=()
+			brew_formula_installed shellcheck && brew_refresh+=("shellcheck")
+			brew_formula_installed shfmt && brew_refresh+=("shfmt")
+			tool_exists shellcheck && ! brew_formula_installed shellcheck && warn "shellcheck is not owned by Homebrew; leaving it unchanged."
+			tool_exists shfmt && ! brew_formula_installed shfmt && warn "shfmt is not owned by Homebrew; leaving it unchanged."
+			[[ ${#brew_refresh[@]} -gt 0 ]] && run_install "Shell quality tool refresh" brew upgrade "${brew_refresh[@]}" || true
+		fi
+		if brew_formula_installed semgrep; then
+			run_install "Semgrep refresh" brew upgrade semgrep || true
+		elif tool_exists semgrep; then
+			warn "semgrep is not owned by Homebrew; leaving it unchanged."
+		fi
 	fi
 
 	if [[ "$PYTHON" -eq 1 ]] && ! tool_exists ruff; then

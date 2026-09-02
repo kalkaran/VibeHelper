@@ -4,7 +4,7 @@
 # repo-local Codex workflow files. Semgrep and project linters are handled by
 # part2.sh.
 #
-# Version: 2026-07-27-v19
+# Version: 2026-09-01-v23
 #
 # Safe defaults:
 # - Prompts before network installs unless --yes is passed.
@@ -16,7 +16,7 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 
 SCRIPT_NAME="$(basename "$0")"
-SCRIPT_VERSION="2026-07-27-v19"
+SCRIPT_VERSION="2026-09-01-v23"
 YES=0
 DRY_RUN=0
 FORCE=0
@@ -57,12 +57,12 @@ Usage: $SCRIPT_NAME [options]
 Options:
   --yes                 Do not prompt before installs/file writes.
   --dry-run             Print what would happen, but do not change files or install tools.
-  --force               Overwrite managed files after backing them up.
-  --fresh-install       Freshen repo files and explicitly install/check uv + pipx.
+  --force               Refresh installed helper-managed tools and managed files.
+  --fresh-install       Install missing tools, refresh installed tools, and refresh files.
   --repo-only           Only create repo files; skip global tool installs.
   --skip-global         Alias for --repo-only.
   --with-llm-council    Clone Karpathy llm-council into ~/.local/share/llm-council.
-  --context7            Run interactive Context7 setup with npx ctx7 setup.
+  --context7            Configure Context7 MCP for Codex with hosted OAuth.
   --impeccable          Install Impeccable design skill/hooks for Codex.
   --no-humanizer        Do not install Humanizer writing skill for Codex.
   --codex-hooks         Create local Codex hooks for edited-file checks and Git blocking. Enabled by default.
@@ -98,7 +98,7 @@ Repo scaffolding only:
 
 Notes:
   - Ponytail for Codex requires an interactive /plugins and /hooks step after marketplace add.
-  - Context7 setup is interactive OAuth, so it only runs when --context7 is used.
+  - Context7 setup uses the hosted OAuth endpoint; in --yes mode it only runs with --context7.
   - Impeccable setup is optional and only runs with --impeccable. Codex hook trust still requires /hooks.
   - Humanizer is installed for this project by default; use --no-humanizer to skip it.
   - RTK shell-command rewriting hook is created by default with Codex hooks; use --no-rtk-hook to skip it.
@@ -117,6 +117,7 @@ for arg in "$@"; do
 	--fresh-install)
 		FRESH_INSTALL=1
 		FORCE=1
+		INSTALL_SYSTEM_PACKAGES=1
 		INSTALL_UV=1
 		INSTALL_PIPX=1
 		;;
@@ -234,6 +235,8 @@ run_package_manager_install() {
 	run system-package ${sudo_cmd:+"$sudo_cmd"} "$manager_path" install -y "$@"
 }
 
+apt_package_installed() { command -v dpkg >/dev/null 2>&1 && dpkg -s "$1" >/dev/null 2>&1; }
+
 base_system_packages() {
 	printf '%s\n' curl git ca-certificates python3 python3-pip python3-venv pipx nodejs npm
 }
@@ -273,6 +276,26 @@ resolve_binary() {
 }
 
 have_cli() { resolve_binary "$1" >/dev/null 2>&1; }
+
+uv_tool_installed() {
+	local path
+	path="$(resolve_binary uv 2>/dev/null || true)"
+	[[ -n "$path" ]] && "$path" tool list 2>/dev/null | awk -v package="$1" '$1 == package { found=1 } END { exit !found }'
+}
+
+pipx_package_installed() {
+	local path
+	path="$(resolve_binary pipx 2>/dev/null || true)"
+	[[ -n "$path" ]] && "$path" list --short 2>/dev/null | awk -v package="$1" '$1 == package { found=1 } END { exit !found }'
+}
+
+rtk_is_expected() {
+	local path help
+	path="$(resolve_binary rtk 2>/dev/null || true)"
+	[[ -n "$path" ]] || return 1
+	help="$("$path" --help 2>&1 || true)"
+	grep -Ei 'LLM context|token(-| )optimized|token consumption' >/dev/null <<<"$help"
+}
 
 semgrep_cert_file() {
 	if [[ -n "${SSL_CERT_FILE:-}" && -r "${SSL_CERT_FILE:-}" ]]; then
@@ -833,6 +856,19 @@ maybe_install_system_packages() {
 
 maybe_install_uv() {
 	if have_cli uv; then
+		if [[ "$FORCE" == "1" ]]; then
+			if pipx_package_installed uv; then
+				run_cli pipx upgrade uv || {
+					record_install_failed "uv refresh failed via pipx"
+					return 1
+				}
+			elif ! run_cli uv self update; then
+				warn "uv is installed, but its owner could not refresh it."
+				record_install_failed "uv refresh failed: unsupported installation owner"
+				return 1
+			fi
+			record_install_ok "uv refreshed"
+		fi
 		log "uv already installed: $(resolve_binary uv)"
 		record_install_ok "uv already present at $(resolve_binary uv)"
 		maybe_add_bin_dir_to_shell_profile uv
@@ -886,6 +922,18 @@ maybe_install_uv() {
 
 maybe_install_pipx() {
 	if have_cli pipx; then
+		if [[ "$FORCE" == "1" ]]; then
+			if apt_package_installed pipx; then
+				run_package_manager_install pipx || {
+					record_install_failed "pipx refresh failed via apt-get"
+					return 1
+				}
+				record_install_ok "pipx refreshed via apt-get"
+			else
+				warn "pipx is installed but is not owned by apt; leaving it unchanged."
+				record_install_skipped "pipx refresh skipped: unmanaged installation"
+			fi
+		fi
 		log "pipx already installed: $(resolve_binary pipx)"
 		record_install_ok "pipx already present at $(resolve_binary pipx)"
 		maybe_add_bin_dir_to_shell_profile pipx
@@ -950,13 +998,13 @@ bootstrap_prereqs() {
 		log "Fresh install: checking uv/pipx prerequisites even with --repo-only."
 	fi
 
-	if [[ "$INSTALL_SYSTEM_PACKAGES" == "1" || "$INSTALL_PREREQS" == "1" ]]; then
+	if [[ "$FORCE" == "1" || "$INSTALL_SYSTEM_PACKAGES" == "1" || "$INSTALL_PREREQS" == "1" ]]; then
 		maybe_install_system_packages || true
 	fi
 
 	maybe_install_uv || true
 
-	if [[ "$INSTALL_PIPX" == "1" || "$INSTALL_PREREQS" == "1" ]]; then
+	if [[ "$FORCE" == "1" || "$INSTALL_PIPX" == "1" || "$INSTALL_PREREQS" == "1" ]]; then
 		maybe_install_pipx || true
 	elif ! have_cli pipx && [[ "$YES" != "1" ]]; then
 		maybe_install_pipx || true
@@ -974,6 +1022,24 @@ install_with_uv_or_pipx() {
 			warn "$binary is installed inside the active virtualenv: $(command -v "$binary")"
 			warn "Not treating this as a safe global install. Install via uv tool or pipx instead."
 		else
+			if [[ "$FORCE" == "1" ]]; then
+				if uv_tool_installed "$package"; then
+					run_cli uv tool upgrade "$package" || {
+						record_install_failed "$package refresh failed via uv"
+						return 1
+					}
+					record_install_ok "$package refreshed via uv"
+				elif pipx_package_installed "$package"; then
+					run_cli pipx upgrade "$package" || {
+						record_install_failed "$package refresh failed via pipx"
+						return 1
+					}
+					record_install_ok "$package refreshed via pipx"
+				else
+					warn "$binary is installed but is not owned by uv or pipx; leaving it unchanged."
+					record_install_skipped "$package refresh skipped: unmanaged installation"
+				fi
+			fi
 			log "$binary already installed: $(resolve_binary "$binary")"
 			record_install_ok "$package already present at $(resolve_binary "$binary")"
 			maybe_add_bin_dir_to_shell_profile "$binary"
@@ -1074,16 +1140,20 @@ install_with_uv_or_pipx() {
 
 setup_impeccable() {
 	if [[ -f ".agents/skills/impeccable/SKILL.md" ]]; then
-		log "Impeccable is already installed for Codex."
-		patch_codex_impeccable_stop_hook
-		record_install_ok "Impeccable already installed for Codex"
+		if [[ "$FORCE" != "1" ]]; then
+			log "Impeccable is already installed for Codex."
+			patch_codex_impeccable_stop_hook
+			record_install_ok "Impeccable already installed for Codex"
+			return 0
+		fi
+	elif [[ "$RUN_IMPECCABLE" != "1" ]]; then
 		return 0
 	fi
-	if [[ "$RUN_IMPECCABLE" == "1" || "$YES" != "1" ]]; then
+	if [[ "$FORCE" == "1" || "$RUN_IMPECCABLE" == "1" || "$YES" != "1" ]]; then
 		if have npx; then
 			warn "Impeccable install may write .agents/, .codex/hooks.json, .impeccable/, PRODUCT.md, and DESIGN.md."
 			warn "Codex still requires opening /hooks and approving the Impeccable project hook before it runs automatically."
-			if confirm "Install Impeccable design skill/hooks for Codex?"; then
+			if [[ "$FORCE" == "1" ]] || confirm "Install Impeccable design skill/hooks for Codex?"; then
 				if [[ "$DRY_RUN" == "1" ]]; then
 					run npx npx impeccable install -y --providers=codex --scope=project
 					record_install_skipped "Impeccable install would run (dry-run)"
@@ -1109,29 +1179,49 @@ setup_impeccable() {
 
 patch_codex_impeccable_stop_hook() {
 	local hook_lib=".agents/skills/impeccable/scripts/hook-lib.mjs"
-	[[ -f "$hook_lib" ]] || return 0
-	if ! grep -Fq "JSON.stringify({ decision: 'block', reason: text })" "$hook_lib"; then
-		return 0
-	fi
+	local hooks_file=".codex/hooks.json"
+	[[ -f "$hook_lib" || -f "$hooks_file" ]] || return 0
 	if [[ "$DRY_RUN" == "1" ]]; then
-		log "Would patch Impeccable Codex Stop hook JSON compatibility."
+		log "Would patch Impeccable Codex hook compatibility."
 		return 0
 	fi
-	if ! python3 - "$hook_lib" <<'PY'; then
+	if ! python3 - "$hook_lib" "$hooks_file" <<'PY'; then
+import json
 from pathlib import Path
 import sys
 
-path = Path(sys.argv[1])
-text = path.read_text(encoding="utf-8")
+hook_lib = Path(sys.argv[1])
+hooks_file = Path(sys.argv[2])
 old = "return JSON.stringify({ decision: 'block', reason: text });"
 new = "return JSON.stringify({ continue: false, stopReason: text });"
-if old in text:
-    path.write_text(text.replace(old, new, 1), encoding="utf-8")
+if hook_lib.is_file():
+    text = hook_lib.read_text(encoding="utf-8")
+    if old in text:
+        hook_lib.write_text(text.replace(old, new, 1), encoding="utf-8")
+
+if hooks_file.is_file():
+    data = json.loads(hooks_file.read_text(encoding="utf-8"))
+    marker = ".agents/skills/impeccable/scripts/hook.mjs"
+    command = 'root="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0; hook="$root/.agents/skills/impeccable/scripts/hook.mjs"; [ -f "$hook" ] || exit 0; exec node "$hook"'
+    relative_commands = {f'node "{marker}"', f'[ ! -f "{marker}" ] || node "{marker}"'}
+    changed = False
+    for groups in data.get("hooks", {}).values():
+        if not isinstance(groups, list):
+            continue
+        for group in groups:
+            if not isinstance(group, dict):
+                continue
+            for handler in group.get("hooks", []):
+                if isinstance(handler, dict) and handler.get("command") in relative_commands:
+                    handler["command"] = command
+                    changed = True
+    if changed:
+        hooks_file.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 PY
-		warn "Could not patch Impeccable Codex Stop hook compatibility."
+		warn "Could not patch Impeccable Codex hook compatibility."
 		return 0
 	fi
-	log "Patched Impeccable Codex Stop hook JSON compatibility."
+	log "Patched Impeccable Codex hook compatibility."
 }
 
 humanizer_installed() {
@@ -1143,9 +1233,11 @@ setup_humanizer() {
 	[[ "$RUN_HUMANIZER" == "1" ]] || return 0
 
 	if humanizer_installed; then
-		log "Humanizer is already installed for Codex."
-		record_install_ok "Humanizer already installed"
-		return 0
+		if [[ "$FORCE" != "1" ]]; then
+			log "Humanizer is already installed for Codex."
+			record_install_ok "Humanizer already installed"
+			return 0
+		fi
 	fi
 	if ! have npx; then
 		warn "Cannot install Humanizer because npx was not found."
@@ -1154,7 +1246,7 @@ setup_humanizer() {
 	fi
 
 	warn "Humanizer installs project skill files under .agents/skills/."
-	if ! confirm "Install the Humanizer writing skill for Codex?"; then
+	if [[ "$FORCE" != "1" ]] && ! confirm "Install the Humanizer writing skill for Codex?"; then
 		record_install_skipped "Humanizer install skipped by user"
 		return 0
 	fi
@@ -1169,8 +1261,61 @@ setup_humanizer() {
 	fi
 }
 
+unlazy_installed() {
+	[[ -f ".agents/skills/unlazy/SKILL.md" ]] ||
+		[[ -f "$HOME/.codex/skills/unlazy/SKILL.md" ]]
+}
+
+setup_unlazy() {
+	if unlazy_installed && [[ "$FORCE" != "1" ]]; then
+		log "Unlazy is already installed for Codex."
+		record_install_ok "Unlazy already installed"
+		return 0
+	fi
+	if ! have npx; then
+		warn "Cannot install Unlazy because npx was not found."
+		record_install_failed "Unlazy skipped: npx unavailable"
+		return 0
+	fi
+
+	warn "Unlazy installs project skill files under .agents/skills/."
+	if [[ "$FORCE" != "1" ]] && ! confirm "Install the Unlazy skill for Codex?"; then
+		record_install_skipped "Unlazy install skipped by user"
+		return 0
+	fi
+	if [[ "$DRY_RUN" == "1" ]]; then
+		run npx npx --yes skills add Leonxlnx/unlazy --agent codex --yes
+		record_install_skipped "Unlazy install would run (dry-run)"
+	elif run npx npx --yes skills add Leonxlnx/unlazy --agent codex --yes; then
+		record_install_ok "Unlazy install completed"
+	else
+		warn "Unlazy install failed."
+		record_install_failed "Unlazy install failed"
+	fi
+}
+
 maybe_install_rtk() {
 	if have_cli rtk; then
+		if ! rtk_is_expected; then
+			warn "The resolved rtk executable is not rtk-ai: $(resolve_binary rtk)"
+			record_install_failed "RTK name collision: resolved executable is not rtk-ai"
+			return 1
+		fi
+		if [[ "$FORCE" == "1" ]]; then
+			if ! have curl; then
+				record_install_failed "RTK refresh failed: curl unavailable"
+				return 1
+			fi
+			if ! run_shell "curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/master/install.sh | sh"; then
+				record_install_failed "RTK refresh failed via official installer"
+				return 1
+			fi
+			rtk_is_expected || {
+				record_install_failed "RTK refresh produced an unexpected rtk executable"
+				return 1
+			}
+			record_install_ok "RTK refreshed via official installer"
+		fi
 		log "RTK already installed: $(resolve_binary rtk)"
 		record_install_ok "RTK already present at $(resolve_binary rtk)"
 		return 0
@@ -1200,14 +1345,14 @@ maybe_install_rtk() {
 	fi
 
 	ensure_current_script_path rtk || true
-	if have_cli rtk; then
+	if have_cli rtk && rtk_is_expected; then
 		log "RTK installed: $(resolve_binary rtk)"
 		record_install_ok "RTK installed via curl installer at $(resolve_binary rtk)"
 		return 0
 	fi
 
-	warn "RTK install script finished, but rtk is not on PATH."
-	record_install_failed "RTK installed but not found on PATH"
+	warn "RTK install script finished, but the expected rtk-ai executable was not found on PATH."
+	record_install_failed "RTK installed but expected rtk-ai executable not found"
 	return 1
 }
 
@@ -1215,6 +1360,7 @@ install_global_tools() {
 	if [[ "$SKIP_GLOBAL" == "1" ]]; then
 		log "Skipping global tool installs (--repo-only/--skip-global)."
 		setup_humanizer
+		setup_unlazy
 		setup_impeccable
 		return 0
 	fi
@@ -1236,13 +1382,31 @@ install_global_tools() {
 		fi
 
 		if [[ "$ponytail_installed" == "1" ]]; then
-			log "Ponytail Codex plugin already installed."
-			patch_codex_ponytail_hooks
-			record_install_ok "Ponytail Codex plugin already installed"
+			if [[ "$FORCE" == "1" ]]; then
+				if run codex codex plugin marketplace upgrade ponytail; then
+					patch_codex_ponytail_hooks
+					record_install_ok "Ponytail Codex plugin refreshed"
+				else
+					warn "Ponytail Codex plugin refresh failed."
+					record_install_failed "Ponytail Codex plugin refresh failed"
+				fi
+			else
+				log "Ponytail Codex plugin already installed."
+				patch_codex_ponytail_hooks
+				record_install_ok "Ponytail Codex plugin already installed"
+			fi
 		elif [[ "$ponytail_marketplace_configured" == "1" ]]; then
-			log "Ponytail Codex marketplace already configured."
+			if [[ "$FORCE" == "1" ]]; then
+				if run codex codex plugin marketplace upgrade ponytail; then
+					record_install_ok "Ponytail Codex marketplace refreshed"
+				else
+					record_install_failed "Ponytail Codex marketplace refresh failed"
+				fi
+			else
+				log "Ponytail Codex marketplace already configured."
+				record_install_ok "Ponytail Codex marketplace already configured"
+			fi
 			patch_codex_ponytail_hooks
-			record_install_ok "Ponytail Codex marketplace already configured"
 			record_install_skipped "Ponytail plugin install still requires /plugins and hook trust review"
 		elif confirm "Add Ponytail marketplace to Codex? This does not auto-trust hooks."; then
 			if [[ "$DRY_RUN" == "1" ]]; then
@@ -1288,6 +1452,22 @@ install_global_tools() {
 		warn "Skipping code-review-graph Codex setup because the executable is missing."
 	fi
 
+	if [[ "$FORCE" == "1" ]] && have_cli graphify; then
+		if uv_tool_installed graphifyy; then
+			run_cli uv tool upgrade graphifyy || record_install_failed "graphifyy refresh failed via uv"
+		elif pipx_package_installed graphifyy; then
+			run_cli pipx upgrade graphifyy || record_install_failed "graphifyy refresh failed via pipx"
+		else
+			warn "graphify is installed but is not owned by uv or pipx; leaving the package unchanged."
+			record_install_skipped "graphifyy refresh skipped: unmanaged installation"
+		fi
+		if run_cli graphify install --platform codex; then
+			record_install_ok "Graphify Codex skill refreshed"
+		else
+			record_install_failed "Graphify Codex skill refresh failed"
+		fi
+	fi
+
 	# Semgrep is a repo quality/security tool. This bootstrap only recommends it;
 	# part2.sh handles installation and Makefile wiring.
 	if have_cli semgrep; then
@@ -1309,18 +1489,18 @@ install_global_tools() {
 		fi
 	fi
 
-	# Context7: interactive OAuth, ask in normal interactive runs; require explicit flag in --yes mode.
+	# Context7: hosted OAuth, ask in normal interactive runs; require explicit flag in --yes mode.
 	if [[ "$RUN_CONTEXT7" == "1" || "$YES" != "1" ]]; then
 		if have npx; then
-			if confirm "Run interactive Context7 setup with npx ctx7 setup?"; then
+			if confirm "Configure Context7 MCP for Codex with hosted OAuth?"; then
 				if [[ "$DRY_RUN" == "1" ]]; then
-					run npx npx ctx7 setup
+					run npx npx ctx7 setup --codex --mcp --oauth -y
 					record_install_skipped "Context7 setup would run (dry-run)"
-				elif run npx npx ctx7 setup; then
+				elif run npx npx ctx7 setup --codex --mcp --oauth -y; then
 					record_install_ok "Context7 setup completed"
 				else
-					warn "Context7 setup failed or was cancelled."
-					record_install_failed "Context7 setup failed/cancelled"
+					warn "Context7 setup failed."
+					record_install_failed "Context7 setup failed"
 				fi
 			fi
 		else
@@ -1331,6 +1511,7 @@ install_global_tools() {
 	fi
 
 	setup_humanizer
+	setup_unlazy
 	setup_impeccable
 
 	# LLM Council optional clone, not installed as app dependency.
@@ -1338,8 +1519,16 @@ install_global_tools() {
 		if have git; then
 			local dest="$HOME/.local/share/llm-council"
 			if [[ -d "$dest/.git" ]]; then
-				log "llm-council already cloned at $dest"
-				record_install_ok "llm-council already present at $dest"
+				if [[ "$FORCE" == "1" ]]; then
+					if run git git -C "$dest" pull --ff-only; then
+						record_install_ok "llm-council refreshed at $dest"
+					else
+						record_install_failed "llm-council refresh failed at $dest"
+					fi
+				else
+					log "llm-council already cloned at $dest"
+					record_install_ok "llm-council already present at $dest"
+				fi
 			elif confirm "Clone karpathy/llm-council into $dest?"; then
 				if [[ "$DRY_RUN" != "1" ]]; then mkdir -p "$(dirname "$dest")"; fi
 				if [[ "$DRY_RUN" == "1" ]]; then
@@ -1616,7 +1805,7 @@ codex
 Context7:
 
 ```bash
-npx ctx7 setup
+npx ctx7 setup --codex --mcp --oauth -y
 ```
 
 Use Context7 when work depends on external library, framework, API, setup, or configuration details.
@@ -3816,7 +4005,7 @@ EOF_PONYTAIL_NOT_CONFIGURED
 	cat <<'EOF_NEXT'
 7. Context7
    Run when ready for interactive OAuth/API setup:
-   npx ctx7 setup
+   npx ctx7 setup --codex --mcp --oauth -y
 
 EOF_NEXT
 

@@ -33,9 +33,9 @@ when part 1 succeeds.
 Options:
   --dry-run             Preview both phases without making changes.
   --yes, -y             Accept non-interactive defaults in both phases.
-  --fresh-install       Refresh managed files and install/wire missing tools.
+  --fresh-install       Install missing tools and refresh installed tools/files.
   --cleanup             Remove CodexHelper project files from the target repo.
-  --force               Back up and refresh managed files in both phases.
+  --force               Refresh installed helper-managed tools and managed files.
   --repo PATH           Configure PATH instead of the current repository.
   --repo-only           Skip global and quality-tool installs; wire existing tools.
   --python-index-url URL

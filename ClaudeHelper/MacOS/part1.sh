@@ -1,15 +1,17 @@
 #!/usr/bin/env bash
 # Bootstrap a small Claude Code workflow into the current repository.
 #
-# Version: 2026-07-27-v5
+# Version: 2026-08-24-v7
 
 set -Eeuo pipefail
 IFS=$'\n\t'
 
 SCRIPT_NAME="$(basename "$0")"
-SCRIPT_VERSION="2026-07-27-v5"
+SCRIPT_VERSION="2026-08-24-v7"
 DRY_RUN=0
 FORCE=0
+REFRESH_TOOLS=0
+BREW_UPDATED=0
 RUN_HUMANIZER=1
 RUN_RTK=1
 RUN_GRAPHIFY=1
@@ -35,7 +37,7 @@ Usage: $SCRIPT_NAME [options]
 
 Options:
   --dry-run       Print what would happen, but do not write files.
-  --force         Overwrite managed files after backing them up.
+  --force         Refresh installed helper-managed tools and managed files.
   --no-humanizer  Do not install Humanizer writing skill for Claude Code.
   --no-rtk        Do not install RTK or activate its command-routing hook.
   --no-graphify   Do not install the graphify skill or its proactive guidance.
@@ -66,6 +68,12 @@ while [[ $# -gt 0 ]]; do
 		;;
 	--force)
 		FORCE=1
+		REFRESH_TOOLS=1
+		shift
+		;;
+	--refresh-tools)
+		# Internal unified-installer mode: refresh tools without replacing shared files.
+		REFRESH_TOOLS=1
 		shift
 		;;
 	--no-humanizer)
@@ -455,6 +463,45 @@ append_gitignore_block() {
 	log "Updated .gitignore"
 }
 
+run_tool() {
+	if [[ "$DRY_RUN" -eq 1 ]]; then
+		printf '[claude-bootstrap] Would run:'
+		printf ' %q' "$@"
+		printf '\n'
+		return 0
+	fi
+	"$@"
+}
+
+brew_formula_installed() { command -v brew >/dev/null 2>&1 && HOMEBREW_NO_AUTO_UPDATE=1 brew list --formula --versions "$1" >/dev/null 2>&1; }
+
+refresh_brew_metadata() {
+	[[ "$BREW_UPDATED" -eq 0 ]] || return 0
+	run_tool brew update || return 1
+	BREW_UPDATED=1
+}
+
+uv_tool_installed() {
+	command -v uv >/dev/null 2>&1 && uv tool list 2>/dev/null | awk -v package="$1" '$1 == package { found=1 } END { exit !found }'
+}
+
+pipx_package_installed() {
+	command -v pipx >/dev/null 2>&1 && pipx list --short 2>/dev/null | awk -v package="$1" '$1 == package { found=1 } END { exit !found }'
+}
+
+claude_ponytail_installed() {
+	local output
+	output="$(claude plugin list 2>/dev/null || true)"
+	[[ "$output" == *"ponytail@ponytail"* ]]
+}
+
+rtk_is_expected() {
+	local help
+	command -v rtk >/dev/null 2>&1 || return 1
+	help="$(rtk --help 2>&1 || true)"
+	grep -Ei 'LLM context|token(-| )optimized|token consumption' >/dev/null <<<"$help"
+}
+
 humanizer_installed() {
 	[[ -f "$ROOT/.claude/skills/humanizer/SKILL.md" ]] ||
 		[[ -f "$HOME/.claude/skills/humanizer/SKILL.md" ]]
@@ -464,21 +511,39 @@ install_humanizer() {
 	[[ "$RUN_HUMANIZER" -eq 1 ]] || return 0
 
 	if humanizer_installed; then
-		log "Humanizer is already installed for Claude Code."
-		return 0
+		if [[ "$REFRESH_TOOLS" -eq 0 ]]; then
+			log "Humanizer is already installed for Claude Code."
+			return 0
+		fi
 	fi
 	if ! command -v npx >/dev/null 2>&1; then
 		warn "npx not found; skipping Humanizer install."
 		return 0
 	fi
-	if [[ "$DRY_RUN" -eq 1 ]]; then
-		log "Would run: npx --yes skills add blader/humanizer --agent claude-code --yes"
+	log "Installing or refreshing Humanizer under .claude/skills/."
+	if ! run_tool npx --yes skills add blader/humanizer --agent claude-code --yes; then
+		err "Humanizer installation failed."
+		exit 1
+	fi
+}
+
+unlazy_installed() {
+	[[ -f "$ROOT/.claude/skills/unlazy/SKILL.md" ]] ||
+		[[ -f "$HOME/.claude/skills/unlazy/SKILL.md" ]]
+}
+
+install_unlazy() {
+	if unlazy_installed && [[ "$REFRESH_TOOLS" -eq 0 ]]; then
+		log "Unlazy is already installed for Claude Code."
 		return 0
 	fi
-
-	log "Installing Humanizer under .claude/skills/."
-	if ! npx --yes skills add blader/humanizer --agent claude-code --yes; then
-		err "Humanizer installation failed."
+	if ! command -v npx >/dev/null 2>&1; then
+		warn "npx not found; skipping Unlazy install."
+		return 0
+	fi
+	log "Installing or refreshing Unlazy under .claude/skills/."
+	if ! run_tool npx --yes skills add Leonxlnx/unlazy --agent claude-code --yes; then
+		err "Unlazy installation failed."
 		exit 1
 	fi
 }
@@ -486,55 +551,73 @@ install_humanizer() {
 maybe_install_rtk() {
 	[[ "$RUN_RTK" -eq 1 ]] || return 0
 	if command -v rtk >/dev/null 2>&1; then
-		log "RTK already installed: $(command -v rtk)."
-		return 0
-	fi
-	if [[ "$DRY_RUN" -eq 1 ]]; then
-		if command -v brew >/dev/null 2>&1; then
-			log "Would install RTK via: brew install rtk"
-		else
-			log "Would install RTK via the official install script."
+		if ! rtk_is_expected; then
+			warn "The resolved rtk executable is not rtk-ai: $(command -v rtk)"
+			return 0
 		fi
+		if [[ "$REFRESH_TOOLS" -eq 1 ]]; then
+			if brew_formula_installed rtk; then
+				refresh_brew_metadata || warn "Homebrew metadata refresh failed."
+				run_tool brew upgrade rtk || warn "RTK refresh via Homebrew failed."
+			else
+				warn "RTK is installed but is not owned by Homebrew; leaving it unchanged."
+			fi
+		fi
+		log "RTK already installed: $(command -v rtk)."
 		return 0
 	fi
 	# RTK install failures are non-fatal: the routing hook passes commands through
 	# unchanged until RTK is on PATH.
 	if command -v brew >/dev/null 2>&1; then
 		log "Installing RTK via Homebrew."
-		if brew install rtk; then
-			log "RTK installed."
+		if run_tool brew install rtk; then
+			if [[ "$DRY_RUN" -eq 1 ]] || rtk_is_expected; then
+				log "RTK installed."
+			else
+				warn "Homebrew finished, but the resolved rtk executable is not rtk-ai."
+			fi
 			return 0
 		fi
 		warn "RTK install via Homebrew failed. The routing hook will no-op until RTK is installed."
 		return 0
 	fi
-	if command -v curl >/dev/null 2>&1; then
-		log "Installing RTK via the official install script."
-		if curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/master/install.sh | sh; then
-			log "RTK install script completed."
-			return 0
-		fi
-		warn "RTK install script failed. The routing hook will no-op until RTK is installed."
-		return 0
-	fi
-	warn "Neither brew nor curl is available to install RTK; the routing hook no-ops until you install it."
+	warn "Cannot install RTK with Homebrew because brew is unavailable; the routing hook no-ops until you install it."
 	return 0
 }
 
 install_graphify_skill() {
 	[[ "$RUN_GRAPHIFY" -eq 1 ]] || return 0
 	if [[ -f "$HOME/.claude/skills/graphify/SKILL.md" ]]; then
-		log "graphify skill already installed."
-		return 0
+		if [[ "$REFRESH_TOOLS" -eq 0 ]]; then
+			log "graphify skill already installed."
+			return 0
+		fi
 	fi
 	if [[ "$DRY_RUN" -eq 1 ]]; then
-		log "Would install graphify: 'uv tool install graphifyy' (or pipx/pip), then 'graphify install'."
+		if uv_tool_installed graphifyy; then
+			run_tool uv tool upgrade graphifyy
+		elif pipx_package_installed graphifyy; then
+			run_tool pipx upgrade graphifyy
+		else
+			log "Would install or refresh graphifyy with its current package owner."
+		fi
+		log "Would run: graphify install"
 		return 0
 	fi
 
 	# graphifyy ships the `graphify` CLI; `graphify install` registers the skill for
 	# Claude Code (~/.claude/skills/graphify). See github.com/Graphify-Labs/graphify.
-	if ! command -v graphify >/dev/null 2>&1; then
+	if command -v graphify >/dev/null 2>&1 && [[ "$REFRESH_TOOLS" -eq 1 ]]; then
+		if uv_tool_installed graphifyy; then
+			uv tool upgrade graphifyy || warn "graphifyy refresh via uv failed."
+		elif pipx_package_installed graphifyy; then
+			pipx upgrade graphifyy || warn "graphifyy refresh via pipx failed."
+		elif python3 -m pip show graphifyy >/dev/null 2>&1; then
+			python3 -m pip install --user --upgrade graphifyy || warn "graphifyy refresh via pip failed."
+		else
+			warn "graphify is installed but its package owner is unknown; leaving the package unchanged."
+		fi
+	elif ! command -v graphify >/dev/null 2>&1; then
 		if command -v uv >/dev/null 2>&1; then
 			uv tool install graphifyy || true
 		elif command -v pipx >/dev/null 2>&1; then
@@ -558,7 +641,18 @@ maybe_install_ponytail() {
 		return 0
 	fi
 	if [[ "$DRY_RUN" -eq 1 ]]; then
-		log "Would install Ponytail: 'claude plugin marketplace add DietrichGebert/ponytail' then 'claude plugin install ponytail@ponytail'."
+		if [[ "$REFRESH_TOOLS" -eq 1 ]] && claude_ponytail_installed; then
+			run_tool claude plugin marketplace update ponytail
+			run_tool claude plugin update ponytail@ponytail
+		else
+			log "Would install Ponytail: 'claude plugin marketplace add DietrichGebert/ponytail' then 'claude plugin install ponytail@ponytail'."
+		fi
+		return 0
+	fi
+	if [[ "$REFRESH_TOOLS" -eq 1 ]] && claude_ponytail_installed; then
+		log "Refreshing Ponytail plugin marketplace and installation."
+		claude plugin marketplace update ponytail || warn "Ponytail marketplace refresh failed."
+		claude plugin update ponytail@ponytail || warn "Ponytail plugin refresh failed."
 		return 0
 	fi
 	log "Adding Ponytail plugin marketplace."
@@ -621,6 +715,27 @@ install_graphify_guidance() {
 }
 
 ensure_prereqs() {
+	if [[ "$REFRESH_TOOLS" -eq 1 ]]; then
+		if command -v brew >/dev/null 2>&1; then
+			refresh_brew_metadata || warn "Homebrew metadata refresh failed."
+		fi
+		if command -v uv >/dev/null 2>&1; then
+			if brew_formula_installed uv; then
+				run_tool brew upgrade uv || warn "uv refresh via Homebrew failed."
+			elif pipx_package_installed uv; then
+				run_tool pipx upgrade uv || warn "uv refresh via pipx failed."
+			else
+				run_tool uv self update || warn "uv could not refresh itself; check which package manager owns it."
+			fi
+		fi
+		if command -v pipx >/dev/null 2>&1; then
+			if brew_formula_installed pipx; then
+				run_tool brew upgrade pipx || warn "pipx refresh via Homebrew failed."
+			else
+				warn "pipx is installed outside Homebrew; leaving it unchanged."
+			fi
+		fi
+	fi
 	if command -v uv >/dev/null 2>&1 || command -v pipx >/dev/null 2>&1; then
 		return 0
 	fi
@@ -665,11 +780,26 @@ uv_or_pipx_install() {
 install_crg() {
 	[[ "$RUN_CRG" -eq 1 ]] || return 0
 	if [[ "$DRY_RUN" -eq 1 ]]; then
-		log "Would install code-review-graph and register it: code-review-graph install --platform claude-code -y"
+		if [[ "$REFRESH_TOOLS" -eq 1 ]] && uv_tool_installed code-review-graph; then
+			run_tool uv tool upgrade code-review-graph
+		elif [[ "$REFRESH_TOOLS" -eq 1 ]] && pipx_package_installed code-review-graph; then
+			run_tool pipx upgrade code-review-graph
+		else
+			log "Would install code-review-graph if missing."
+		fi
+		log "Would register it: code-review-graph install --platform claude-code -y"
 		[[ "$RUN_CRG_BUILD" -eq 1 ]] && log "Would build the code-review-graph index for this repo."
 		return 0
 	fi
-	if ! command -v code-review-graph >/dev/null 2>&1; then
+	if command -v code-review-graph >/dev/null 2>&1 && [[ "$REFRESH_TOOLS" -eq 1 ]]; then
+		if uv_tool_installed code-review-graph; then
+			uv tool upgrade code-review-graph || warn "code-review-graph refresh via uv failed."
+		elif pipx_package_installed code-review-graph; then
+			pipx upgrade code-review-graph || warn "code-review-graph refresh via pipx failed."
+		else
+			warn "code-review-graph is installed but is not owned by uv or pipx; leaving it unchanged."
+		fi
+	elif ! command -v code-review-graph >/dev/null 2>&1; then
 		log "Installing code-review-graph."
 		uv_or_pipx_install code-review-graph || warn "code-review-graph install failed."
 	fi
@@ -700,21 +830,19 @@ setup_context7() {
 }
 
 setup_impeccable() {
-	[[ "$RUN_IMPECCABLE" -eq 1 ]] || return 0
+	[[ "$RUN_IMPECCABLE" -eq 1 || "$REFRESH_TOOLS" -eq 1 && -f ".claude/skills/impeccable/SKILL.md" ]] || return 0
 	if [[ -f ".claude/skills/impeccable/SKILL.md" ]]; then
-		log "Impeccable is already installed for Claude Code."
-		return 0
+		if [[ "$REFRESH_TOOLS" -eq 0 ]]; then
+			log "Impeccable is already installed for Claude Code."
+			return 0
+		fi
 	fi
 	if ! command -v npx >/dev/null 2>&1; then
 		warn "npx not found; skipping Impeccable setup."
 		return 0
 	fi
-	if [[ "$DRY_RUN" -eq 1 ]]; then
-		log "Would install Impeccable: npx impeccable skills install -y --providers=claude-code --scope=project"
-		return 0
-	fi
 	log "Installing Impeccable design skill/hooks for Claude Code."
-	npx impeccable skills install -y --providers=claude-code --scope=project ||
+	run_tool npx impeccable skills install -y --providers=claude-code --scope=project ||
 		warn "Impeccable install failed or was cancelled."
 }
 
@@ -722,7 +850,11 @@ clone_llm_council() {
 	[[ "$WITH_LLM_COUNCIL" -eq 1 ]] || return 0
 	local dest="$HOME/.local/share/llm-council"
 	if [[ -d "$dest/.git" ]]; then
-		log "llm-council already cloned at $dest."
+		if [[ "$REFRESH_TOOLS" -eq 1 ]]; then
+			run_tool git -C "$dest" pull --ff-only || warn "llm-council refresh failed."
+		else
+			log "llm-council already cloned at $dest."
+		fi
 		return 0
 	fi
 	if [[ "$DRY_RUN" -eq 1 ]]; then
@@ -2171,6 +2303,7 @@ else
 	install_crg
 	install_graphify_skill
 	install_humanizer
+	install_unlazy
 	setup_context7
 	setup_impeccable
 	clone_llm_council

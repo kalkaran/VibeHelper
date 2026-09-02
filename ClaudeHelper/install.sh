@@ -29,7 +29,7 @@ setup is detected.
 Options:
   --dry-run       Preview both phases without making changes.
   --cleanup       Remove ClaudeHelper project files from the target repo.
-  --force         Back up and refresh managed files (not allowed with Codex).
+  --force         Refresh installed helper-managed tools and managed files.
   --repo PATH     Configure PATH instead of the current repository.
   --wire          Write/update the quality Makefile (default).
   --no-wire       Run part 2 without writing the quality Makefile.
@@ -226,9 +226,7 @@ if codex_setup_present; then
 	CODEX_SETUP=1
 fi
 if [[ "$CODEX_SETUP" -eq 1 && "$FORCE" -eq 1 ]]; then
-	err "--force is unsafe with detected Codex setup because the helpers share managed files."
-	err "Rerun without --force so existing shared files are preserved."
-	exit 2
+	log "Codex project setup detected; --force will refresh tools while preserving shared managed files."
 fi
 
 if [[ "$WIRE_MODE" == "auto" ]]; then
@@ -246,8 +244,12 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
 	PART2_ARGS+=("--dry-run")
 fi
 if [[ "$FORCE" -eq 1 ]]; then
-	PART1_ARGS+=("--force")
-	PART2_ARGS+=("--force")
+	if [[ "$CODEX_SETUP" -eq 1 ]]; then
+		PART1_ARGS+=("--refresh-tools")
+	else
+		PART1_ARGS+=("--force")
+		PART2_ARGS+=("--force")
+	fi
 fi
 if [[ "${#PART1_ONLY_ARGS[@]}" -gt 0 ]]; then
 	PART1_ARGS+=("${PART1_ONLY_ARGS[@]}")

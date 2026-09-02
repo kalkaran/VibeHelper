@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
 # Bootstrap a small Claude Code workflow into the current repository on Ubuntu WSL.
 #
-# Version: 2026-07-27-v5
+# Version: 2026-08-24-v7
 
 set -Eeuo pipefail
 IFS=$'\n\t'
 
 SCRIPT_NAME="$(basename "$0")"
-SCRIPT_VERSION="2026-07-27-v5"
+SCRIPT_VERSION="2026-08-24-v7"
 DRY_RUN=0
 FORCE=0
+REFRESH_TOOLS=0
 RUN_HUMANIZER=1
 RUN_RTK=1
 RUN_GRAPHIFY=1
@@ -38,7 +39,7 @@ Usage: $SCRIPT_NAME [options]
 
 Options:
   --dry-run       Print what would happen, but do not write files.
-  --force         Overwrite managed files after backing them up.
+  --force         Refresh installed helper-managed tools and managed files.
   --no-humanizer  Do not install Humanizer writing skill for Claude Code.
   --no-rtk        Do not install RTK or activate its command-routing hook.
   --no-graphify   Do not install the graphify skill or its proactive guidance.
@@ -71,6 +72,12 @@ while [[ $# -gt 0 ]]; do
 		;;
 	--force)
 		FORCE=1
+		REFRESH_TOOLS=1
+		shift
+		;;
+	--refresh-tools)
+		# Internal unified-installer mode: refresh tools without replacing shared files.
+		REFRESH_TOOLS=1
 		shift
 		;;
 	--no-humanizer)
@@ -193,18 +200,20 @@ early_install_system_packages() {
 		return 0
 	fi
 
-	local missing=()
+	local packages=()
 	local pkg
 	for pkg in "${WSL_BASE_PACKAGES[@]}" "${WSL_OPTIONAL_PACKAGES[@]}"; do
-		dpkg -s "$pkg" >/dev/null 2>&1 || missing+=("$pkg")
+		if [[ "$REFRESH_TOOLS" -eq 1 ]] || ! dpkg -s "$pkg" >/dev/null 2>&1; then
+			packages+=("$pkg")
+		fi
 	done
-	if [[ "${#missing[@]}" -eq 0 ]]; then
+	if [[ "${#packages[@]}" -eq 0 ]]; then
 		log "Base Ubuntu packages already present."
 		return 0
 	fi
 
 	if [[ "$DRY_RUN" -eq 1 ]]; then
-		log "Would install missing Ubuntu packages via apt-get: ${missing[*]}"
+		log "Would install or refresh Ubuntu packages via apt-get: ${packages[*]}"
 		return 0
 	fi
 
@@ -213,7 +222,7 @@ early_install_system_packages() {
 		local sudo_binary
 		sudo_binary="$(early_sudo_prefix || true)"
 		if [[ -z "$sudo_binary" ]]; then
-			warn "Skipping apt install of: ${missing[*]}"
+			warn "Skipping apt install of: ${packages[*]}"
 			return 0
 		fi
 		sudo_cmd=("$sudo_binary")
@@ -224,8 +233,8 @@ early_install_system_packages() {
 		warn "apt-get update failed; continuing with currently available tools."
 		return 0
 	fi
-	for pkg in "${missing[@]}"; do
-		log "Installing Ubuntu package via apt-get: $pkg"
+	for pkg in "${packages[@]}"; do
+		log "Installing or refreshing Ubuntu package via apt-get: $pkg"
 		if ! DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a "${sudo_cmd[@]}" apt-get install -y "$pkg"; then
 			warn "apt-get install failed for package: $pkg. Continuing with remaining packages."
 		fi
@@ -526,6 +535,47 @@ append_gitignore_block() {
 	log "Updated .gitignore"
 }
 
+run_tool() {
+	if [[ "$DRY_RUN" -eq 1 ]]; then
+		printf '[claude-bootstrap] Would run:'
+		printf ' %q' "$@"
+		printf '\n'
+		return 0
+	fi
+	"$@"
+}
+
+uv_tool_installed() {
+	command -v uv >/dev/null 2>&1 && uv tool list 2>/dev/null | awk -v package="$1" '$1 == package { found=1 } END { exit !found }'
+}
+
+pipx_package_installed() {
+	command -v pipx >/dev/null 2>&1 && pipx list --short 2>/dev/null | awk -v package="$1" '$1 == package { found=1 } END { exit !found }'
+}
+
+claude_ponytail_installed() {
+	local output
+	output="$(claude plugin list 2>/dev/null || true)"
+	[[ "$output" == *"ponytail@ponytail"* ]]
+}
+
+apt_package_installed() { command -v dpkg >/dev/null 2>&1 && dpkg -s "$1" >/dev/null 2>&1; }
+
+rtk_is_expected() {
+	local help
+	command -v rtk >/dev/null 2>&1 || return 1
+	help="$(rtk --help 2>&1 || true)"
+	grep -Ei 'LLM context|token(-| )optimized|token consumption' >/dev/null <<<"$help"
+}
+
+run_rtk_installer() {
+	if [[ "$DRY_RUN" -eq 1 ]]; then
+		log "Would run the official RTK installer from rtk-ai/rtk."
+		return 0
+	fi
+	curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/master/install.sh | sh
+}
+
 humanizer_installed() {
 	[[ -f "$ROOT/.claude/skills/humanizer/SKILL.md" ]] ||
 		[[ -f "$HOME/.claude/skills/humanizer/SKILL.md" ]]
@@ -535,20 +585,37 @@ install_humanizer() {
 	[[ "$RUN_HUMANIZER" -eq 1 ]] || return 0
 
 	if humanizer_installed; then
-		log "Humanizer is already installed for Claude Code."
+		if [[ "$REFRESH_TOOLS" -eq 0 ]]; then
+			log "Humanizer is already installed for Claude Code."
+			return 0
+		fi
+	fi
+	if ! npx_ready; then
+		return 0
+	fi
+	log "Installing or refreshing Humanizer under .claude/skills/."
+	if ! run_tool npx --yes skills add blader/humanizer --agent claude-code --yes; then
+		err "Humanizer installation failed."
+		exit 1
+	fi
+}
+
+unlazy_installed() {
+	[[ -f "$ROOT/.claude/skills/unlazy/SKILL.md" ]] ||
+		[[ -f "$HOME/.claude/skills/unlazy/SKILL.md" ]]
+}
+
+install_unlazy() {
+	if unlazy_installed && [[ "$REFRESH_TOOLS" -eq 0 ]]; then
+		log "Unlazy is already installed for Claude Code."
 		return 0
 	fi
 	if ! npx_ready; then
 		return 0
 	fi
-	if [[ "$DRY_RUN" -eq 1 ]]; then
-		log "Would run: npx --yes skills add blader/humanizer --agent claude-code --yes"
-		return 0
-	fi
-
-	log "Installing Humanizer under .claude/skills/."
-	if ! npx --yes skills add blader/humanizer --agent claude-code --yes; then
-		err "Humanizer installation failed."
+	log "Installing or refreshing Unlazy under .claude/skills/."
+	if ! run_tool npx --yes skills add Leonxlnx/unlazy --agent claude-code --yes; then
+		err "Unlazy installation failed."
 		exit 1
 	fi
 }
@@ -556,20 +623,31 @@ install_humanizer() {
 maybe_install_rtk() {
 	[[ "$RUN_RTK" -eq 1 ]] || return 0
 	if command -v rtk >/dev/null 2>&1; then
+		if ! rtk_is_expected; then
+			warn "The resolved rtk executable is not rtk-ai: $(command -v rtk)"
+			return 0
+		fi
+		if [[ "$REFRESH_TOOLS" -eq 1 ]]; then
+			if command -v curl >/dev/null 2>&1; then
+				run_rtk_installer || warn "RTK refresh via the official installer failed."
+			else
+				warn "curl is unavailable; leaving RTK unchanged."
+			fi
+		fi
 		log "RTK already installed: $(command -v rtk)."
-		return 0
-	fi
-	if [[ "$DRY_RUN" -eq 1 ]]; then
-		log "Would install RTK via the official install script."
 		return 0
 	fi
 	# RTK install failures are non-fatal: the routing hook passes commands through
 	# unchanged until RTK is on PATH.
 	if command -v curl >/dev/null 2>&1; then
 		log "Installing RTK via the official install script."
-		if curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/master/install.sh | sh; then
+		if run_rtk_installer; then
 			export PATH="$HOME/.local/bin:$PATH"
-			log "RTK install script completed."
+			if [[ "$DRY_RUN" -eq 1 ]] || rtk_is_expected; then
+				log "RTK install script completed."
+			else
+				warn "RTK installer finished, but the expected rtk-ai executable is not on PATH."
+			fi
 			return 0
 		fi
 		warn "RTK install script failed. The routing hook will no-op until RTK is installed."
@@ -600,17 +678,36 @@ npx_ready() {
 install_graphify_skill() {
 	[[ "$RUN_GRAPHIFY" -eq 1 ]] || return 0
 	if [[ -f "$HOME/.claude/skills/graphify/SKILL.md" ]]; then
-		log "graphify skill already installed."
-		return 0
+		if [[ "$REFRESH_TOOLS" -eq 0 ]]; then
+			log "graphify skill already installed."
+			return 0
+		fi
 	fi
 	if [[ "$DRY_RUN" -eq 1 ]]; then
-		log "Would install graphify: 'uv tool install graphifyy' (or pipx/pip), then 'graphify install'."
+		if uv_tool_installed graphifyy; then
+			run_tool uv tool upgrade graphifyy
+		elif pipx_package_installed graphifyy; then
+			run_tool pipx upgrade graphifyy
+		else
+			log "Would install or refresh graphifyy with its current package owner."
+		fi
+		log "Would run: graphify install"
 		return 0
 	fi
 
 	# graphifyy ships the `graphify` CLI; `graphify install` registers the skill for
 	# Claude Code (~/.claude/skills/graphify). See github.com/Graphify-Labs/graphify.
-	if ! command -v graphify >/dev/null 2>&1; then
+	if command -v graphify >/dev/null 2>&1 && [[ "$REFRESH_TOOLS" -eq 1 ]]; then
+		if uv_tool_installed graphifyy; then
+			uv tool upgrade graphifyy || warn "graphifyy refresh via uv failed."
+		elif pipx_package_installed graphifyy; then
+			pipx upgrade graphifyy || warn "graphifyy refresh via pipx failed."
+		elif python3 -m pip show graphifyy >/dev/null 2>&1; then
+			python3 -m pip install --user --upgrade graphifyy || warn "graphifyy refresh via pip failed."
+		else
+			warn "graphify is installed but its package owner is unknown; leaving the package unchanged."
+		fi
+	elif ! command -v graphify >/dev/null 2>&1; then
 		if command -v uv >/dev/null 2>&1; then
 			uv tool install graphifyy || true
 			export PATH="$HOME/.local/bin:$PATH"
@@ -637,7 +734,18 @@ maybe_install_ponytail() {
 		return 0
 	fi
 	if [[ "$DRY_RUN" -eq 1 ]]; then
-		log "Would install Ponytail: 'claude plugin marketplace add DietrichGebert/ponytail' then 'claude plugin install ponytail@ponytail'."
+		if [[ "$REFRESH_TOOLS" -eq 1 ]] && claude_ponytail_installed; then
+			run_tool claude plugin marketplace update ponytail
+			run_tool claude plugin update ponytail@ponytail
+		else
+			log "Would install Ponytail: 'claude plugin marketplace add DietrichGebert/ponytail' then 'claude plugin install ponytail@ponytail'."
+		fi
+		return 0
+	fi
+	if [[ "$REFRESH_TOOLS" -eq 1 ]] && claude_ponytail_installed; then
+		log "Refreshing Ponytail plugin marketplace and installation."
+		claude plugin marketplace update ponytail || warn "Ponytail marketplace refresh failed."
+		claude plugin update ponytail@ponytail || warn "Ponytail plugin refresh failed."
 		return 0
 	fi
 	log "Adding Ponytail plugin marketplace."
@@ -701,6 +809,18 @@ install_graphify_guidance() {
 
 ensure_prereqs() {
 	export PATH="$HOME/.local/bin:$PATH"
+	if [[ "$REFRESH_TOOLS" -eq 1 ]]; then
+		if command -v uv >/dev/null 2>&1; then
+			if pipx_package_installed uv; then
+				run_tool pipx upgrade uv || warn "uv refresh via pipx failed."
+			else
+				run_tool uv self update || warn "uv could not refresh itself; check which package manager owns it."
+			fi
+		fi
+		if command -v pipx >/dev/null 2>&1 && [[ "$SKIP_SYSTEM_PACKAGES" -eq 1 ]] && apt_package_installed pipx; then
+			warn "pipx refresh skipped with --no-system-packages."
+		fi
+	fi
 	if command -v uv >/dev/null 2>&1 || command -v pipx >/dev/null 2>&1; then
 		return 0
 	fi
@@ -722,11 +842,26 @@ uv_or_pipx_install() {
 install_crg() {
 	[[ "$RUN_CRG" -eq 1 ]] || return 0
 	if [[ "$DRY_RUN" -eq 1 ]]; then
-		log "Would install code-review-graph and register it: code-review-graph install --platform claude-code -y"
+		if [[ "$REFRESH_TOOLS" -eq 1 ]] && uv_tool_installed code-review-graph; then
+			run_tool uv tool upgrade code-review-graph
+		elif [[ "$REFRESH_TOOLS" -eq 1 ]] && pipx_package_installed code-review-graph; then
+			run_tool pipx upgrade code-review-graph
+		else
+			log "Would install code-review-graph if missing."
+		fi
+		log "Would register it: code-review-graph install --platform claude-code -y"
 		[[ "$RUN_CRG_BUILD" -eq 1 ]] && log "Would build the code-review-graph index for this repo."
 		return 0
 	fi
-	if ! command -v code-review-graph >/dev/null 2>&1; then
+	if command -v code-review-graph >/dev/null 2>&1 && [[ "$REFRESH_TOOLS" -eq 1 ]]; then
+		if uv_tool_installed code-review-graph; then
+			uv tool upgrade code-review-graph || warn "code-review-graph refresh via uv failed."
+		elif pipx_package_installed code-review-graph; then
+			pipx upgrade code-review-graph || warn "code-review-graph refresh via pipx failed."
+		else
+			warn "code-review-graph is installed but is not owned by uv or pipx; leaving it unchanged."
+		fi
+	elif ! command -v code-review-graph >/dev/null 2>&1; then
 		log "Installing code-review-graph."
 		uv_or_pipx_install code-review-graph || warn "code-review-graph install failed."
 	fi
@@ -756,20 +891,18 @@ setup_context7() {
 }
 
 setup_impeccable() {
-	[[ "$RUN_IMPECCABLE" -eq 1 ]] || return 0
+	[[ "$RUN_IMPECCABLE" -eq 1 || "$REFRESH_TOOLS" -eq 1 && -f ".claude/skills/impeccable/SKILL.md" ]] || return 0
 	if [[ -f ".claude/skills/impeccable/SKILL.md" ]]; then
-		log "Impeccable is already installed for Claude Code."
-		return 0
+		if [[ "$REFRESH_TOOLS" -eq 0 ]]; then
+			log "Impeccable is already installed for Claude Code."
+			return 0
+		fi
 	fi
 	if ! npx_ready; then
 		return 0
 	fi
-	if [[ "$DRY_RUN" -eq 1 ]]; then
-		log "Would install Impeccable: npx impeccable skills install -y --providers=claude-code --scope=project"
-		return 0
-	fi
 	log "Installing Impeccable design skill/hooks for Claude Code."
-	npx impeccable skills install -y --providers=claude-code --scope=project ||
+	run_tool npx impeccable skills install -y --providers=claude-code --scope=project ||
 		warn "Impeccable install failed or was cancelled."
 }
 
@@ -777,7 +910,11 @@ clone_llm_council() {
 	[[ "$WITH_LLM_COUNCIL" -eq 1 ]] || return 0
 	local dest="$HOME/.local/share/llm-council"
 	if [[ -d "$dest/.git" ]]; then
-		log "llm-council already cloned at $dest."
+		if [[ "$REFRESH_TOOLS" -eq 1 ]]; then
+			run_tool git -C "$dest" pull --ff-only || warn "llm-council refresh failed."
+		else
+			log "llm-council already cloned at $dest."
+		fi
 		return 0
 	fi
 	if [[ "$DRY_RUN" -eq 1 ]]; then
@@ -2226,6 +2363,7 @@ else
 	install_crg
 	install_graphify_skill
 	install_humanizer
+	install_unlazy
 	setup_context7
 	setup_impeccable
 	clone_llm_council
