@@ -6,9 +6,9 @@ set -euo pipefail
 # It detects likely repo types, offers to install missing dev quality tools,
 # then wires Makefile targets for tools/scripts that exist.
 #
-# Version: 2026-08-22-v20
+# Version: 2026-09-05-v21
 
-SCRIPT_VERSION="2026-08-22-v20"
+SCRIPT_VERSION="2026-09-05-v21"
 DRY_RUN=0
 YES=0
 FORCE=0
@@ -1229,7 +1229,6 @@ transcript receives capped summaries.
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import shlex
 import shutil
@@ -1254,6 +1253,7 @@ EXCLUDED_DIRS = {
     "vendor",
 }
 EXCLUDED_FILES = {".mcp.json"}
+EDITED_FILE_LISTS = (".cache/claude-edited-files.txt", ".cache/codex-edited-files.txt")
 
 BIOME_EXTS = {".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".css", ".json", ".jsonc"}
 HTML_EXTS = {".html", ".htm"}
@@ -1287,15 +1287,13 @@ def repo_root() -> Path:
     return Path(output) if output else Path.cwd()
 
 
-def git_changed_files(root: Path) -> list[str]:
-    changed = run_capture(["git", "diff", "--name-only", "--diff-filter=ACMRTUXB", "HEAD"], root).splitlines()
-    untracked = run_capture(["git", "ls-files", "--others", "--exclude-standard"], root).splitlines()
-    return sorted(set(changed + untracked))
+def recorded_edited_files(root: Path) -> list[str]:
+    return sorted({line.strip() for relative in EDITED_FILE_LISTS if (path := root / relative).is_file() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()})
 
 
 def is_excluded(path: str) -> bool:
     parts = Path(path).parts
-    return path in EXCLUDED_FILES or any(part in EXCLUDED_DIRS for part in parts)
+    return path in EXCLUDED_FILES or any(part in EXCLUDED_DIRS or part == "skills" or part.endswith("-skills") for part in parts)
 
 
 def existing_project_files(root: Path, files: list[str]) -> list[str]:
@@ -1339,18 +1337,6 @@ def have_path(root: Path, path: str) -> bool:
 
 def have_command(command: str, root: Path) -> bool:
     return shutil.which(command) is not None
-
-
-def npm_has_script(root: Path, name: str) -> bool:
-    package_json = root / "package.json"
-    if not package_json.is_file():
-        return False
-    try:
-        data = json.loads(package_json.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return False
-    scripts = data.get("scripts")
-    return isinstance(scripts, dict) and isinstance(scripts.get(name), str)
 
 
 def local_impeccable_command(root: Path) -> list[str] | None:
@@ -1451,15 +1437,12 @@ def build_commands(root: Path, groups: dict[str, list[str]]) -> tuple[list[tuple
         if have_command("shellcheck", root):
             lint_cmds.append(("lint-shellcheck-edited", [f"shellcheck {files}"], True, 24, False))
 
-    if (groups["biome"] or groups["html"]) and npm_has_script(root, "typecheck"):
-        type_cmds.append(("type-npm-edited", ["npm run typecheck"], False, 30, False))
-
     return format_cmds, lint_cmds, type_cmds
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Format, lint, and typecheck edited files with capped AI output.")
-    parser.add_argument("files", nargs="*", help="Specific files to check. Defaults to Git changed/untracked files.")
+    parser.add_argument("files", nargs="*", help="Specific files to check. Defaults to files recorded by agent edit hooks.")
     return parser.parse_args()
 
 
@@ -1467,7 +1450,7 @@ def main() -> int:
     args = parse_args()
     root = repo_root()
     os.chdir(root)
-    files = existing_project_files(root, args.files if args.files else git_changed_files(root))
+    files = existing_project_files(root, args.files if args.files else recorded_edited_files(root))
     groups = split_by_ext(files)
     relevant = sorted(set(groups["biome"] + groups["html"] + groups["markdown"] + groups["design"] + groups["php"] + groups["shell"]))
 

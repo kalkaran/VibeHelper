@@ -4,7 +4,7 @@
 # Context7/Impeccable, and repo-local Codex workflow files. Semgrep and project
 # linters are handled by part2.sh.
 #
-# Version: 2026-09-01-v23
+# Version: 2026-09-05-v25
 #
 # Safe defaults:
 # - Prompts before network installs unless --yes is passed.
@@ -16,7 +16,7 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 
 SCRIPT_NAME="$(basename "$0")"
-SCRIPT_VERSION="2026-09-01-v23"
+SCRIPT_VERSION="2026-09-05-v25"
 YES=0
 DRY_RUN=0
 FORCE=0
@@ -62,7 +62,9 @@ Options:
   --skip-global         Alias for --repo-only.
   --with-llm-council    Clone Karpathy llm-council into ~/.local/share/llm-council.
   --context7            Configure Context7 MCP for Codex with hosted OAuth.
+                        Included by --fresh-install.
   --impeccable          Install Impeccable design skill/hooks for Codex.
+                        Included by --fresh-install.
   --no-humanizer        Do not install Humanizer writing skill for Codex.
   --codex-hooks         Create local Codex hooks for edited-file checks and Git blocking. Enabled by default.
   --no-codex-hooks      Do not create Codex hook files/config.
@@ -95,8 +97,8 @@ Repo scaffolding only:
 
 Notes:
   - Ponytail for Codex requires an interactive /plugins and /hooks step after marketplace add.
-  - Context7 setup uses the hosted OAuth endpoint; in --yes mode it only runs with --context7.
-  - Impeccable setup is optional and only runs with --impeccable. Codex hook trust still requires /hooks.
+  - Context7 setup uses the hosted OAuth endpoint; in --yes mode it runs with --context7 or --fresh-install.
+  - Impeccable runs with --impeccable or --fresh-install. Codex hook trust still requires /hooks.
   - Humanizer is installed for this project by default; use --no-humanizer to skip it.
   - RTK and its shell-command rewriting hook are installed by default with Codex hooks.
   - Use --no-rtk-hook to skip RTK installation and hook creation. --repo-only skips the global install.
@@ -118,6 +120,8 @@ for arg in "$@"; do
 		INSTALL_BREW=1
 		INSTALL_UV=1
 		INSTALL_PIPX=1
+		RUN_CONTEXT7=1
+		RUN_IMPECCABLE=1
 		;;
 	--skip-global | --repo-only) SKIP_GLOBAL=1 ;;
 	--with-llm-council) WITH_LLM_COUNCIL=1 ;;
@@ -1206,6 +1210,8 @@ install_with_uv_or_pipx() {
 }
 
 setup_impeccable() {
+	local impeccable_args=(impeccable skills install -y --providers=codex --scope=project)
+	[[ "$FORCE" == "1" ]] && impeccable_args+=(--force)
 	if [[ -f ".agents/skills/impeccable/SKILL.md" ]]; then
 		if [[ "$FORCE" != "1" ]]; then
 			log "Impeccable is already installed for Codex."
@@ -1222,9 +1228,9 @@ setup_impeccable() {
 			warn "Codex still requires opening /hooks and approving the Impeccable project hook before it runs automatically."
 			if [[ "$FORCE" == "1" ]] || confirm "Install Impeccable design skill/hooks for Codex?"; then
 				if [[ "$DRY_RUN" == "1" ]]; then
-					run npx npx impeccable install -y --providers=codex --scope=project
+					run npx npx "${impeccable_args[@]}"
 					record_install_skipped "Impeccable install would run (dry-run)"
-				elif run npx npx impeccable install -y --providers=codex --scope=project && [[ -f ".agents/skills/impeccable/SKILL.md" ]]; then
+				elif run npx npx "${impeccable_args[@]}" && [[ -f ".agents/skills/impeccable/SKILL.md" ]]; then
 					patch_codex_impeccable_stop_hook
 					record_install_ok "Impeccable install completed"
 					record_install_skipped "Impeccable still needs /impeccable init and Codex /hooks approval"
@@ -1828,7 +1834,7 @@ The generated Codex RTK hook rewrites eligible literal read-only/noisy Bash comm
 Impeccable for frontend design:
 
 ```bash
-npx impeccable install -y --providers=codex --scope=project
+npx impeccable skills install -y --providers=codex --scope=project
 /impeccable init
 /impeccable polish the page or component
 /impeccable audit the frontend area
@@ -2781,7 +2787,6 @@ create_edited_check_script() {
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import shlex
 import shutil
@@ -2792,6 +2797,7 @@ from pathlib import Path
 
 EXCLUDED_DIRS = {".agents", ".cache", ".claude", ".codex", ".git", ".venv", "build", "coverage", "dist", "graphify-out", "node_modules", "obsidian", "vendor"}
 EXCLUDED_FILES = {".mcp.json"}
+EDITED_FILE_LISTS = (".cache/claude-edited-files.txt", ".cache/codex-edited-files.txt")
 BIOME_EXTS = {".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".css", ".json", ".jsonc"}
 HTML_EXTS = {".html", ".htm"}
 MARKDOWN_EXTS = {".md", ".markdown"}
@@ -2824,15 +2830,13 @@ def repo_root() -> Path:
     return Path(output) if output else Path.cwd()
 
 
-def git_changed_files(root: Path) -> list[str]:
-    changed = run_capture(["git", "diff", "--name-only", "--diff-filter=ACMRTUXB", "HEAD"], root).splitlines()
-    untracked = run_capture(["git", "ls-files", "--others", "--exclude-standard"], root).splitlines()
-    return sorted(set(changed + untracked))
+def recorded_edited_files(root: Path) -> list[str]:
+    return sorted({line.strip() for relative in EDITED_FILE_LISTS if (path := root / relative).is_file() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()})
 
 
 def is_excluded(path: str) -> bool:
     parts = Path(path).parts
-    return path in EXCLUDED_FILES or any(part in EXCLUDED_DIRS for part in parts)
+    return path in EXCLUDED_FILES or any(part in EXCLUDED_DIRS or part == "skills" or part.endswith("-skills") for part in parts)
 
 
 def existing_project_files(root: Path, files: list[str]) -> list[str]:
@@ -2876,18 +2880,6 @@ def have_path(root: Path, path: str) -> bool:
 
 def have_command(command: str, root: Path) -> bool:
     return shutil.which(command) is not None
-
-
-def npm_has_script(root: Path, name: str) -> bool:
-    package_json = root / "package.json"
-    if not package_json.is_file():
-        return False
-    try:
-        data = json.loads(package_json.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return False
-    scripts = data.get("scripts")
-    return isinstance(scripts, dict) and isinstance(scripts.get(name), str)
 
 
 def local_impeccable_command(root: Path) -> list[str] | None:
@@ -2977,18 +2969,16 @@ def build_commands(root: Path, groups: dict[str, list[str]]) -> tuple[list[tuple
             format_cmds.append(("format-shfmt-edited", [f"shfmt -w {files}"], True, 20, False))
         if have_command("shellcheck", root):
             lint_cmds.append(("lint-shellcheck-edited", [f"shellcheck {files}"], True, 24, False))
-    if (groups["biome"] or groups["html"]) and npm_has_script(root, "typecheck"):
-        type_cmds.append(("type-npm-edited", ["npm run typecheck"], False, 30, False))
     return format_cmds, lint_cmds, type_cmds
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Format, lint, and typecheck edited files with capped AI output.")
-    parser.add_argument("files", nargs="*", help="Specific files to check. Defaults to Git changed/untracked files.")
+    parser.add_argument("files", nargs="*", help="Specific files to check. Defaults to files recorded by agent edit hooks.")
     args = parser.parse_args()
     root = repo_root()
     os.chdir(root)
-    files = existing_project_files(root, args.files if args.files else git_changed_files(root))
+    files = existing_project_files(root, args.files if args.files else recorded_edited_files(root))
     groups = split_by_ext(files)
     relevant = sorted(set(groups["biome"] + groups["html"] + groups["markdown"] + groups["design"] + groups["php"] + groups["shell"]))
     print(f"[edited-check] root: {root}")

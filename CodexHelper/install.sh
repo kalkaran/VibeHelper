@@ -33,7 +33,7 @@ when part 1 succeeds.
 Options:
   --dry-run             Preview both phases without making changes.
   --yes, -y             Accept non-interactive defaults in both phases.
-  --fresh-install       Install missing tools and refresh installed tools/files.
+  --fresh-install       Install missing tools and replace managed skill/tool files.
   --cleanup             Remove CodexHelper project files from the target repo.
   --force               Refresh installed helper-managed tools and managed files.
   --repo PATH           Configure PATH instead of the current repository.
@@ -52,8 +52,8 @@ Options:
   --no-codex-hooks      Do not create project Codex hooks.
   --no-rtk-hook         Do not install RTK or create its project hook.
   --install-prereqs     Install/check platform prerequisites in part 1.
-  --context7            Run the optional interactive Context7 setup in part 1.
-  --impeccable          Install the optional Impeccable integration in part 1.
+  --context7            Run Context7 setup in part 1 (included by fresh install).
+  --impeccable          Install Impeccable in part 1 (included by fresh install).
   --no-humanizer        Do not install the Humanizer writing skill in part 1.
   --with-llm-council    Install the optional LLM Council integration in part 1.
   --security-scan       Run Semgrep after part 1 when Semgrep is available.

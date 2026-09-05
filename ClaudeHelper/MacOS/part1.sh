@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # Bootstrap a small Claude Code workflow into the current repository.
 #
-# Version: 2026-08-24-v7
+# Version: 2026-09-05-v10
 
 set -Eeuo pipefail
 IFS=$'\n\t'
 
 SCRIPT_NAME="$(basename "$0")"
-SCRIPT_VERSION="2026-08-24-v7"
+SCRIPT_VERSION="2026-09-05-v10"
 DRY_RUN=0
 FORCE=0
 REFRESH_TOOLS=0
@@ -38,6 +38,7 @@ Usage: $SCRIPT_NAME [options]
 Options:
   --dry-run       Print what would happen, but do not write files.
   --force         Refresh installed helper-managed tools and managed files.
+  --fresh-install Install missing tools and replace managed skill/tool files.
   --no-humanizer  Do not install Humanizer writing skill for Claude Code.
   --no-rtk        Do not install RTK or activate its command-routing hook.
   --no-graphify   Do not install the graphify skill or its proactive guidance.
@@ -45,7 +46,7 @@ Options:
   --no-crg        Do not install/register code-review-graph.
   --crg-build     Build the code-review-graph index for this repo after install.
   --no-context7   Do not run Context7 setup (npx ctx7 setup).
-  --impeccable    Install the Impeccable design skill/hooks for Claude Code.
+  --impeccable    Install Impeccable for Claude Code (included by fresh install).
   --with-llm-council
                   Clone karpathy/llm-council into ~/.local/share/llm-council.
   --repo-only     Only write repo files; skip all global tool installs.
@@ -69,6 +70,12 @@ while [[ $# -gt 0 ]]; do
 	--force)
 		FORCE=1
 		REFRESH_TOOLS=1
+		shift
+		;;
+	--fresh-install)
+		FORCE=1
+		REFRESH_TOOLS=1
+		RUN_IMPECCABLE=1
 		shift
 		;;
 	--refresh-tools)
@@ -842,8 +849,13 @@ setup_impeccable() {
 		return 0
 	fi
 	log "Installing Impeccable design skill/hooks for Claude Code."
-	run_tool npx impeccable skills install -y --providers=claude-code --scope=project ||
-		warn "Impeccable install failed or was cancelled."
+	if [[ "$REFRESH_TOOLS" -eq 1 ]]; then
+		run_tool npx impeccable skills install -y --providers=claude-code --scope=project --force ||
+			warn "Impeccable install failed or was cancelled."
+	else
+		run_tool npx impeccable skills install -y --providers=claude-code --scope=project ||
+			warn "Impeccable install failed or was cancelled."
+	fi
 }
 
 clone_llm_council() {

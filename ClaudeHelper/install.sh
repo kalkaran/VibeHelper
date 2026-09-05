@@ -30,6 +30,7 @@ Options:
   --dry-run       Preview both phases without making changes.
   --cleanup       Remove ClaudeHelper project files from the target repo.
   --force         Refresh installed helper-managed tools and managed files.
+  --fresh-install Install missing tools and replace managed skill/tool files.
   --repo PATH     Configure PATH instead of the current repository.
   --wire          Write/update the quality Makefile (default).
   --no-wire       Run part 2 without writing the quality Makefile.
@@ -41,7 +42,7 @@ Options:
   --no-system-packages  On WSL, skip the apt-get bootstrap of base packages.
   --crg-build     Build the code-review-graph index for the repo after install.
   --no-context7   Do not run Context7 setup (npx ctx7 setup).
-  --impeccable    Install the Impeccable design skill/hooks.
+  --impeccable    Install Impeccable design skill/hooks (included by fresh install).
   --with-llm-council  Clone karpathy/llm-council locally.
   --repo-only     Only write repo files; skip all global tool installs.
   -h, --help      Show this help.
@@ -51,6 +52,7 @@ Examples:
   bash /path/to/ClaudeHelper/install.sh
   bash /path/to/ClaudeHelper/install.sh --repo /path/to/project
   bash /path/to/ClaudeHelper/install.sh --force --no-humanizer
+  bash /path/to/ClaudeHelper/install.sh --fresh-install --yes
 USAGE
 }
 
@@ -80,6 +82,11 @@ while [[ $# -gt 0 ]]; do
 		;;
 	--force)
 		FORCE=1
+		shift
+		;;
+	--fresh-install)
+		FORCE=1
+		PART1_ONLY_ARGS+=("--impeccable")
 		shift
 		;;
 	--repo)

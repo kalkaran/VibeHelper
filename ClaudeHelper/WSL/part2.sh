@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Wire AI-safe quality targets for a repository already bootstrapped by WSL/part1.sh.
 #
-# Version: 2026-07-27-v4
+# Version: 2026-09-05-v5
 
 set -Eeuo pipefail
 IFS=$'\n\t'
@@ -24,6 +24,7 @@ Options:
   --dry-run       Show what would happen without writing files.
   --wire          Write/update the managed Makefile block.
   --force         Replace an existing ClaudeHelper managed Makefile block.
+  --fresh-install Replace the managed Makefile block and enable wiring.
   --repo PATH     Run against a specific repo/path.
   -h, --help      Show this help.
 USAGE
@@ -41,6 +42,11 @@ while [[ $# -gt 0 ]]; do
 		;;
 	--force)
 		FORCE=1
+		shift
+		;;
+	--fresh-install)
+		FORCE=1
+		WIRE=1
 		shift
 		;;
 	--repo)
@@ -204,7 +210,7 @@ fi
 
 block_start="# >>> ClaudeHelper managed targets"
 block_end="# <<< ClaudeHelper managed targets"
-block="$block_start"$'\n'"# ClaudeHelper-Version: 2026-07-27-v4"$'\n\n'
+block="$block_start"$'\n'"# ClaudeHelper-Version: 2026-09-05-v5"$'\n\n'
 for target in "${targets[@]}"; do
 	block+="$target"$'\n\n'
 done

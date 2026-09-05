@@ -73,11 +73,14 @@ unchanged. Managed files are backed up before replacement. If ClaudeHelper
 finds an existing Codex setup, it preserves shared workflow files and the
 Makefile while refreshing ClaudeHelper-managed tools.
 
-Codex also has a non-interactive fresh setup that installs missing tools and
-refreshes existing managed tools:
+Both helpers have a non-interactive fresh setup that installs missing tools and
+replaces existing helper-managed skill and tool files. Codex fresh installs
+explicitly target Codex, including Humanizer, Unlazy, Graphify, Context7, and
+Impeccable:
 
 ```sh
 bash /path/to/VibeHelper/CodexHelper/install.sh --fresh-install --yes
+bash /path/to/VibeHelper/ClaudeHelper/install.sh --fresh-install --yes
 ```
 
 When RTK is installed, the generated command-routing hook can trim eligible
