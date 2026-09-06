@@ -1,15 +1,17 @@
 #!/usr/bin/env bash
 # Bootstrap a small Claude Code workflow into the current repository on Ubuntu WSL.
 #
-# Version: 2026-09-05-v10
+# Version: 2026-09-06-v11
 
 set -Eeuo pipefail
 IFS=$'\n\t'
 
 SCRIPT_NAME="$(basename "$0")"
-SCRIPT_VERSION="2026-09-05-v10"
+SCRIPT_VERSION="2026-09-06-v11"
 DRY_RUN=0
 FORCE=0
+FRESH_INSTALL="${CLAUDE_HELPER_FRESH_INSTALL:-0}"
+UPDATE_INSTRUCTIONS="${CLAUDE_HELPER_UPDATE_INSTRUCTIONS:-0}"
 REFRESH_TOOLS=0
 RUN_HUMANIZER=1
 RUN_RTK=1
@@ -18,7 +20,7 @@ RUN_PONYTAIL=1
 RUN_CRG=1
 RUN_CRG_BUILD=0
 RUN_CONTEXT7=1
-RUN_IMPECCABLE=0
+RUN_IMPECCABLE="$FRESH_INSTALL"
 WITH_LLM_COUNCIL=0
 SKIP_GLOBAL=0
 SKIP_SYSTEM_PACKAGES=0
@@ -78,6 +80,7 @@ while [[ $# -gt 0 ]]; do
 		;;
 	--fresh-install)
 		FORCE=1
+		FRESH_INSTALL=1
 		REFRESH_TOOLS=1
 		RUN_IMPECCABLE=1
 		shift
@@ -183,6 +186,10 @@ PLATFORM_LABEL="${CLAUDE_HELPER_PLATFORM_LABEL:-WSL}"
 TEMPLATE_ROOT="$HELPER_ROOT/templates"
 ROOT="$(repo_root)"
 cd "$ROOT"
+EXISTING_HELPER_INSTALL=0
+if [[ -f CLAUDE.md ]] && grep -Fq "ClaudeHelper-Version:" CLAUDE.md; then
+	EXISTING_HELPER_INSTALL=1
+fi
 export PATH="$HOME/.local/bin:$PATH"
 
 early_sudo_prefix() {
@@ -441,6 +448,10 @@ PY
 	)"; then
 		warn "Failed to merge required hooks into $rel; leaving it unchanged."
 		return 1
+	fi
+	if cmp -s "$dest" <(printf '%s\n' "$merged"); then
+		log "$rel already contains the required hooks; leaving it unchanged."
+		return 0
 	fi
 
 	backup_file "$dest"
@@ -848,33 +859,58 @@ uv_or_pipx_install() {
 
 install_crg() {
 	[[ "$RUN_CRG" -eq 1 ]] || return 0
+	local crg_version_before crg_version_after
+	crg_version_before="$(code-review-graph --version 2>/dev/null | head -n 1 || true)"
 	if [[ "$DRY_RUN" -eq 1 ]]; then
 		if [[ "$REFRESH_TOOLS" -eq 1 ]] && uv_tool_installed code-review-graph; then
 			run_tool uv tool upgrade code-review-graph
 		elif [[ "$REFRESH_TOOLS" -eq 1 ]] && pipx_package_installed code-review-graph; then
 			run_tool pipx upgrade code-review-graph
+		elif ! command -v code-review-graph >/dev/null 2>&1; then
+			log "Would install code-review-graph."
 		else
-			log "Would install code-review-graph if missing."
+			log "code-review-graph package would remain unchanged."
 		fi
-		log "Would register it: code-review-graph install --platform claude-code -y"
+		if [[ "$EXISTING_HELPER_INSTALL" != "1" || "$FRESH_INSTALL" -eq 1 || -z "$crg_version_before" ]]; then
+			log "Would register it: code-review-graph install --platform claude-code --no-instructions -y"
+		elif [[ "$REFRESH_TOOLS" -eq 1 ]]; then
+			if uv_tool_installed code-review-graph || pipx_package_installed code-review-graph; then
+				log "Would register code-review-graph only if its version changes during the upgrade."
+			else
+				log "Would keep the existing code-review-graph Claude Code MCP configuration."
+			fi
+		else
+			log "Would keep the existing code-review-graph Claude Code MCP configuration."
+		fi
 		[[ "$RUN_CRG_BUILD" -eq 1 ]] && log "Would build the code-review-graph index for this repo."
 		return 0
 	fi
 	if command -v code-review-graph >/dev/null 2>&1 && [[ "$REFRESH_TOOLS" -eq 1 ]]; then
 		if uv_tool_installed code-review-graph; then
-			uv tool upgrade code-review-graph || warn "code-review-graph refresh via uv failed."
+			if ! uv tool upgrade code-review-graph; then
+				warn "code-review-graph refresh via uv failed."
+			fi
 		elif pipx_package_installed code-review-graph; then
-			pipx upgrade code-review-graph || warn "code-review-graph refresh via pipx failed."
+			if ! pipx upgrade code-review-graph; then
+				warn "code-review-graph refresh via pipx failed."
+			fi
 		else
 			warn "code-review-graph is installed but is not owned by uv or pipx; leaving it unchanged."
 		fi
 	elif ! command -v code-review-graph >/dev/null 2>&1; then
 		log "Installing code-review-graph."
-		uv_or_pipx_install code-review-graph || warn "code-review-graph install failed."
+		if ! uv_or_pipx_install code-review-graph; then
+			warn "code-review-graph install failed."
+		fi
 	fi
+	crg_version_after="$(code-review-graph --version 2>/dev/null | head -n 1 || true)"
 	if command -v code-review-graph >/dev/null 2>&1; then
-		log "Registering code-review-graph for Claude Code."
-		code-review-graph install --platform claude-code -y || warn "code-review-graph Claude Code registration failed."
+		if [[ "$EXISTING_HELPER_INSTALL" != "1" || "$FRESH_INSTALL" -eq 1 || (-n "$crg_version_after" && "$crg_version_before" != "$crg_version_after") ]]; then
+			log "Registering code-review-graph for Claude Code."
+			code-review-graph install --platform claude-code --no-instructions -y || warn "code-review-graph Claude Code registration failed."
+		else
+			log "code-review-graph package unchanged; keeping the existing Claude Code MCP configuration."
+		fi
 		if [[ "$RUN_CRG_BUILD" -eq 1 ]]; then
 			log "Building code-review-graph index for this repo."
 			code-review-graph build || warn "code-review-graph build failed."
@@ -886,6 +922,10 @@ install_crg() {
 
 setup_context7() {
 	[[ "$RUN_CONTEXT7" -eq 1 ]] || return 0
+	if [[ "$EXISTING_HELPER_INSTALL" -eq 1 && "$REFRESH_TOOLS" -eq 1 && "$FRESH_INSTALL" -ne 1 ]]; then
+		log "Skipping unchanged Context7 MCP setup during update."
+		return 0
+	fi
 	if ! npx_ready; then
 		return 0
 	fi
@@ -1995,7 +2035,7 @@ AGENTVERIFY_EOF
 }
 
 install_agent_scaffold_files() {
-	local content
+	local content original_force="$FORCE"
 
 	content="$(
 		cat <<'CLAUDEMD_EOF'
@@ -2064,6 +2104,7 @@ Implementation rules:
 - Write or update tests for behavior changes.
 
 Before final answer:
+- After substantive coding, always spawn a separate reviewer agent to inspect the final implementation for breaking changes, scope creep, and alignment with the user request. Address its findings before replying.
 - Run the relevant verification command.
 - Summarize files changed.
 - Summarize tests/checks run.
@@ -2074,7 +2115,11 @@ Session logging:
 - Append each user query and assistant reply to `notes/conversation-log.md` with the current date and keep prior entries intact.
 CLAUDEMD_EOF
 	)"
+	if [[ "$UPDATE_INSTRUCTIONS" -eq 1 && "$EXISTING_HELPER_INSTALL" -eq 1 ]]; then
+		FORCE=1
+	fi
 	write_file "CLAUDE.md" "$content" 0644
+	FORCE="$original_force"
 
 	content="$(
 		cat <<'AGENTIDX_EOF'

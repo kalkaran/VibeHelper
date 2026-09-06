@@ -60,7 +60,11 @@ bash /path/to/VibeHelper/ClaudeHelper/install.sh --repo /path/to/project
 Both installers also support `--repo-only` when you want project files without
 global tool installs.
 
-To refresh managed files and installed helper-managed tools, use `--force`:
+Use the default command for a first install. On a rerun, versioned managed
+files stay in place unless you request an update.
+
+For an existing installation, `--force` is the in-place update path. It refreshes
+managed files and installed helper-managed tools:
 
 ```sh
 bash /path/to/VibeHelper/CodexHelper/install.sh --force
@@ -71,7 +75,9 @@ Refreshes use the detected package owner, such as Homebrew, apt, uv, pipx, npm,
 or Composer. Unknown or unrelated installations are reported and left
 unchanged. Managed files are backed up before replacement. If ClaudeHelper
 finds an existing Codex setup, it preserves shared workflow files and the
-Makefile while refreshing ClaudeHelper-managed tools.
+Makefile while refreshing ClaudeHelper-managed tools. Ordinary `--force`
+updates skip Context7 setup. They also keep the existing code-review-graph MCP
+configuration unless the code-review-graph package version changes.
 
 Both helpers have a non-interactive fresh setup that installs missing tools and
 replaces existing helper-managed skill and tool files. Codex fresh installs
@@ -82,6 +88,11 @@ Impeccable:
 bash /path/to/VibeHelper/CodexHelper/install.sh --fresh-install --yes
 bash /path/to/VibeHelper/ClaudeHelper/install.sh --fresh-install --yes
 ```
+
+Fresh installs configure the code-review-graph MCP integration. The generated
+Codex and Claude instructions require a separate reviewer agent after
+substantive coding to check for breaking changes, scope creep, and drift from
+the request.
 
 When RTK is installed, the generated command-routing hook can trim eligible
 read-only output before the assistant sees it. Shell expansions and potentially

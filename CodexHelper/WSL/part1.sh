@@ -4,7 +4,7 @@
 # repo-local Codex workflow files. Semgrep and project linters are handled by
 # part2.sh.
 #
-# Version: 2026-09-05-v25
+# Version: 2026-09-06-v26
 #
 # Safe defaults:
 # - Prompts before network installs unless --yes is passed.
@@ -16,7 +16,7 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 
 SCRIPT_NAME="$(basename "$0")"
-SCRIPT_VERSION="2026-09-05-v25"
+SCRIPT_VERSION="2026-09-06-v26"
 YES=0
 DRY_RUN=0
 FORCE=0
@@ -460,6 +460,10 @@ repo_root() {
 
 ROOT="$(repo_root)"
 cd "$ROOT"
+EXISTING_HELPER_INSTALL=0
+if [[ -f AGENTS.md ]] && grep -Fq "CodexHelper-Version:" AGENTS.md; then
+	EXISTING_HELPER_INSTALL=1
+fi
 log "Working in repo/root: $ROOT"
 
 if [[ "$DRY_RUN" == "1" ]]; then
@@ -1142,6 +1146,13 @@ install_with_uv_or_pipx() {
 	fi
 }
 
+code_review_graph_version() {
+	local path
+	path="$(resolve_binary code-review-graph 2>/dev/null || true)"
+	[[ -n "$path" ]] && "$path" --version 2>/dev/null | head -n 1
+	return 0
+}
+
 setup_impeccable() {
 	local impeccable_args=(impeccable skills install -y --providers=codex --scope=project)
 	[[ "$FORCE" == "1" ]] && impeccable_args+=(--force)
@@ -1432,19 +1443,37 @@ install_global_tools() {
 	fi
 
 	# code-review-graph is a core part of this bootstrap. Do not silently continue if it is missing.
+	local crg_version_before crg_version_after configure_crg=0
+	crg_version_before="$(code_review_graph_version)"
 	install_with_uv_or_pipx "code-review-graph" "code-review-graph" || true
+	crg_version_after="$(code_review_graph_version)"
+	if [[ -n "$crg_version_after" && "$crg_version_before" != "$crg_version_after" ]]; then
+		configure_crg=1
+	fi
 	require_cli_available "code-review-graph" "Install it with: uv tool install code-review-graph" || true
 
 	if have_cli code-review-graph && ! binary_in_active_venv code-review-graph; then
 		ensure_current_script_path code-review-graph || true
 		log "Verified code-review-graph executable: $(resolve_binary code-review-graph)"
-		if confirm "Configure code-review-graph for Codex MCP?"; then
-			if run_cli code-review-graph install --platform codex; then
-				record_install_ok "code-review-graph Codex integration configured"
+		if [[ "$EXISTING_HELPER_INSTALL" != "1" || "$FRESH_INSTALL" == "1" || "$configure_crg" == "1" ]]; then
+			if confirm "Configure code-review-graph for Codex MCP?"; then
+				if run_cli code-review-graph install --platform codex --no-instructions; then
+					record_install_ok "code-review-graph Codex integration configured"
+				else
+					warn "code-review-graph Codex install failed."
+					record_install_failed "code-review-graph Codex integration failed"
+				fi
 			else
-				warn "code-review-graph Codex install failed."
-				record_install_failed "code-review-graph Codex integration failed"
+				record_install_skipped "code-review-graph Codex integration skipped by user"
 			fi
+		elif [[ "$DRY_RUN" == "1" && "$FORCE" == "1" ]]; then
+			if uv_tool_installed code-review-graph || pipx_package_installed code-review-graph; then
+				log "Would configure code-review-graph only if its version changes during the upgrade."
+			else
+				log "code-review-graph package unchanged; keeping the existing Codex MCP configuration."
+			fi
+		else
+			log "code-review-graph package unchanged; keeping the existing Codex MCP configuration."
 		fi
 		if [[ "$RUN_CRG_BUILD" == "1" ]] && confirm "Build code-review-graph index for this repo now?"; then
 			if run_cli code-review-graph build; then
@@ -1496,7 +1525,9 @@ install_global_tools() {
 	fi
 
 	# Context7: hosted OAuth, ask in normal interactive runs; require explicit flag in --yes mode.
-	if [[ "$RUN_CONTEXT7" == "1" || "$YES" != "1" ]]; then
+	if [[ "$EXISTING_HELPER_INSTALL" == "1" && "$FORCE" == "1" && "$FRESH_INSTALL" != "1" && "$RUN_CONTEXT7" != "1" ]]; then
+		log "Skipping unchanged Context7 MCP setup during update."
+	elif [[ "$RUN_CONTEXT7" == "1" || "$YES" != "1" ]]; then
 		if have npx; then
 			if confirm "Configure Context7 MCP for Codex with hosted OAuth?"; then
 				if [[ "$DRY_RUN" == "1" ]]; then
@@ -1711,6 +1742,7 @@ Implementation rules:
 - When touching frontend files, apply the frontend design touch gate in `/agent/coding-rules.md` even if no design skill is invoked.
 
 Before final answer:
+- After substantive coding, always spawn a separate reviewer agent to inspect the final implementation for breaking changes, scope creep, and alignment with the user request. Address its findings before replying.
 - Run the relevant verification command.
 - Summarize files changed.
 - Summarize tests/checks run.

@@ -10,6 +10,8 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 DRY_RUN=0
 YES=0
 FORCE=0
+FRESH_INSTALL=0
+UPDATE_INSTRUCTIONS=0
 CLEANUP=0
 REPO_ROOT=""
 WIRE_MODE="auto"
@@ -86,7 +88,7 @@ while [[ $# -gt 0 ]]; do
 		;;
 	--fresh-install)
 		FORCE=1
-		PART1_ONLY_ARGS+=("--impeccable")
+		FRESH_INSTALL=1
 		shift
 		;;
 	--repo)
@@ -233,6 +235,7 @@ if codex_setup_present; then
 	CODEX_SETUP=1
 fi
 if [[ "$CODEX_SETUP" -eq 1 && "$FORCE" -eq 1 ]]; then
+	UPDATE_INSTRUCTIONS=1
 	log "Codex project setup detected; --force will refresh tools while preserving shared managed files."
 fi
 
@@ -253,6 +256,9 @@ fi
 if [[ "$FORCE" -eq 1 ]]; then
 	if [[ "$CODEX_SETUP" -eq 1 ]]; then
 		PART1_ARGS+=("--refresh-tools")
+	elif [[ "$FRESH_INSTALL" -eq 1 ]]; then
+		PART1_ARGS+=("--fresh-install")
+		PART2_ARGS+=("--fresh-install")
 	else
 		PART1_ARGS+=("--force")
 		PART2_ARGS+=("--force")
@@ -267,9 +273,9 @@ fi
 
 run_part1() {
 	if [[ "${#PART1_ARGS[@]}" -gt 0 ]]; then
-		CLAUDE_HELPER_ORCHESTRATED=1 bash "$PART1" "${PART1_ARGS[@]}"
+		CLAUDE_HELPER_FRESH_INSTALL="$FRESH_INSTALL" CLAUDE_HELPER_UPDATE_INSTRUCTIONS="$UPDATE_INSTRUCTIONS" CLAUDE_HELPER_ORCHESTRATED=1 bash "$PART1" "${PART1_ARGS[@]}"
 	else
-		CLAUDE_HELPER_ORCHESTRATED=1 bash "$PART1"
+		CLAUDE_HELPER_FRESH_INSTALL="$FRESH_INSTALL" CLAUDE_HELPER_UPDATE_INSTRUCTIONS="$UPDATE_INSTRUCTIONS" CLAUDE_HELPER_ORCHESTRATED=1 bash "$PART1"
 	fi
 }
 

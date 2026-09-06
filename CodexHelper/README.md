@@ -35,6 +35,16 @@ bash /path/to/CodexHelper/install.sh
 
 The installer selects macOS or Ubuntu WSL, runs part 1, and then runs part 2 only if part 1 succeeds. It asks before installing tools or changing existing files. Use `--repo /path/to/project` if you are not running it from the target repository.
 
+Rerun the installer with `--force` to update an existing installation in place:
+
+```sh
+bash /path/to/CodexHelper/install.sh --force
+```
+
+Ordinary `--force` updates skip Context7 setup and keep the existing
+code-review-graph MCP configuration unless the code-review-graph package
+version changes. New and fresh installs configure the MCP integration.
+
 For a non-interactive fresh setup that replaces helper-managed skill/tool
 files, use:
 
@@ -73,11 +83,14 @@ enabled. Use `--no-rtk-hook` to skip RTK installation and hook creation.
 
 If you only want repository files and no global tool installs, add `--repo-only`.
 
-To refresh installed helper-managed tools and regenerate managed files after backups are made, add `--force`:
+To run the same update through part 1 only, add `--force`:
 
 ```sh
 bash /path/to/CodexHelper/MacOS/part1.sh --force --no-apply-codex-config
 ```
+
+Generated `AGENTS.md` files require a separate reviewer agent after substantive
+coding to check for breaking changes, scope creep, and drift from the request.
 
 To install missing tools and replace helper-managed skill/tool files, including
 Impeccable and Context7 configured for Codex, use `--fresh-install`:

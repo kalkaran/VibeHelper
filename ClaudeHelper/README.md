@@ -34,13 +34,13 @@ bash /path/to/ClaudeHelper/install.sh
 
 The installer selects macOS or Ubuntu WSL, runs part 1, and then runs part 2 only if part 1 succeeds. Makefile wiring is enabled by default, even when an existing Codex project setup is detected; pass `--no-wire` when ClaudeHelper should leave shared Makefile ownership unchanged. Use `--repo /path/to/project` when running it outside the target repository.
 
-To refresh installed helper-managed tools and update managed files after backups are made, add `--force`:
+For an existing installation, `--force` is the in-place update path:
 
 ```sh
 bash /path/to/ClaudeHelper/install.sh --force
 ```
 
-When Codex project setup is detected, `--force` refreshes ClaudeHelper-managed tools but preserves shared workflow files and the Makefile. Without Codex setup, it refreshes both tools and managed files. Package refreshes use the detected owner; unknown owners are reported and left unchanged.
+When Codex project setup is detected, `--force` refreshes ClaudeHelper-managed tools but preserves shared workflow files and the Makefile. Without Codex setup, it refreshes both tools and managed files. Package refreshes use the detected owner; unknown owners are reported and left unchanged. Ordinary `--force` updates skip Context7 setup and keep the existing code-review-graph MCP configuration unless the code-review-graph package version changes. New and fresh installs configure the MCP integration.
 
 To install missing tools and replace installed helper-managed skill/tool files
 in one run, use `--fresh-install`. This includes a forced Impeccable reinstall
@@ -49,6 +49,9 @@ for Claude Code:
 ```sh
 bash /path/to/ClaudeHelper/install.sh --fresh-install --yes
 ```
+
+Generated `CLAUDE.md` files require a separate reviewer agent after substantive
+coding to check for breaking changes, scope creep, and drift from the request.
 
 Humanizer and Context7 are installed by default. To skip them, use `--no-humanizer` / `--no-context7`:
 
