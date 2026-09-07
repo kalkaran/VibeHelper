@@ -4,7 +4,7 @@
 # repo-local Codex workflow files. Semgrep and project linters are handled by
 # part2.sh.
 #
-# Version: 2026-09-06-v26
+# Version: 2026-09-07-v28
 #
 # Safe defaults:
 # - Prompts before network installs unless --yes is passed.
@@ -16,7 +16,7 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 
 SCRIPT_NAME="$(basename "$0")"
-SCRIPT_VERSION="2026-09-06-v26"
+SCRIPT_VERSION="2026-09-07-v28"
 YES=0
 DRY_RUN=0
 FORCE=0
@@ -24,6 +24,7 @@ FRESH_INSTALL=0
 SKIP_GLOBAL=0
 WITH_LLM_COUNCIL=0
 RUN_CONTEXT7=0
+CONTEXT7_EXPLICIT=0
 RUN_IMPECCABLE=0
 RUN_HUMANIZER=1
 RUN_SECURITY_SCAN=0
@@ -127,7 +128,10 @@ for arg in "$@"; do
 		;;
 	--skip-global | --repo-only) SKIP_GLOBAL=1 ;;
 	--with-llm-council) WITH_LLM_COUNCIL=1 ;;
-	--context7) RUN_CONTEXT7=1 ;;
+	--context7)
+		RUN_CONTEXT7=1
+		CONTEXT7_EXPLICIT=1
+		;;
 	--impeccable) RUN_IMPECCABLE=1 ;;
 	--no-humanizer) RUN_HUMANIZER=0 ;;
 	--codex-hooks) CREATE_CODEX_HOOKS=1 ;;
@@ -642,7 +646,7 @@ patch_codex_ponytail_hooks() {
 		log "Would patch Ponytail Codex hook path diagnostics."
 		return 0
 	fi
-	if ! python3 - "${manifests[@]}" <<'PY'; then
+	if ! python3 - "${manifests[@]}" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -690,6 +694,7 @@ for arg in sys.argv[1:]:
 for path in patched:
     print(path)
 PY
+	then
 		warn "Could not patch Ponytail Codex hook path diagnostics."
 		return 0
 	fi
@@ -1153,6 +1158,14 @@ code_review_graph_version() {
 	return 0
 }
 
+context7_codex_configured() {
+	have codex || return 1
+	local output
+	output="$(codex mcp get context7 2>/dev/null)" || return 1
+	grep -Eq '^[[:space:]]*enabled:[[:space:]]*true[[:space:]]*$' <<<"$output" &&
+		grep -Eq '^[[:space:]]*url:[[:space:]]*https://mcp\.context7\.com/mcp/oauth[[:space:]]*$' <<<"$output"
+}
+
 setup_impeccable() {
 	local impeccable_args=(impeccable skills install -y --providers=codex --scope=project)
 	[[ "$FORCE" == "1" ]] && impeccable_args+=(--force)
@@ -1202,7 +1215,7 @@ patch_codex_impeccable_stop_hook() {
 		log "Would patch Impeccable Codex hook compatibility."
 		return 0
 	fi
-	if ! python3 - "$hook_lib" "$hooks_file" <<'PY'; then
+	if ! python3 - "$hook_lib" "$hooks_file" <<'PY'
 import json
 from pathlib import Path
 import sys
@@ -1235,6 +1248,7 @@ if hooks_file.is_file():
     if changed:
         hooks_file.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 PY
+	then
 		warn "Could not patch Impeccable Codex hook compatibility."
 		return 0
 	fi
@@ -1470,12 +1484,14 @@ install_global_tools() {
 			if uv_tool_installed code-review-graph || pipx_package_installed code-review-graph; then
 				log "Would configure code-review-graph only if its version changes during the upgrade."
 			else
-				log "code-review-graph package unchanged; keeping the existing Codex MCP configuration."
+				log "code-review-graph package unchanged; MCP registration not rerun."
 			fi
 		else
-			log "code-review-graph package unchanged; keeping the existing Codex MCP configuration."
+			log "code-review-graph package unchanged; MCP registration not rerun."
 		fi
-		if [[ "$RUN_CRG_BUILD" == "1" ]] && confirm "Build code-review-graph index for this repo now?"; then
+		if [[ "$RUN_CRG_BUILD" == "1" && "$FRESH_INSTALL" != "1" && -s "$ROOT/.code-review-graph/graph.db" ]]; then
+			log "code-review-graph repo index already exists; skipping rebuild."
+		elif [[ "$RUN_CRG_BUILD" == "1" ]] && confirm "Build code-review-graph index for this repo now?"; then
 			if run_cli code-review-graph build; then
 				record_install_ok "code-review-graph repo index built"
 			else
@@ -1524,9 +1540,10 @@ install_global_tools() {
 		fi
 	fi
 
-	# Context7: hosted OAuth, ask in normal interactive runs; require explicit flag in --yes mode.
-	if [[ "$EXISTING_HELPER_INSTALL" == "1" && "$FORCE" == "1" && "$FRESH_INSTALL" != "1" && "$RUN_CONTEXT7" != "1" ]]; then
-		log "Skipping unchanged Context7 MCP setup during update."
+	# Context7: hosted OAuth, ask only when the exact enabled registration is absent or explicitly requested.
+	if [[ "$CONTEXT7_EXPLICIT" != "1" ]] && context7_codex_configured; then
+		log "Context7 MCP is already enabled at https://mcp.context7.com/mcp/oauth; skipping setup."
+		record_install_ok "Context7 MCP already configured"
 	elif [[ "$RUN_CONTEXT7" == "1" || "$YES" != "1" ]]; then
 		if have npx; then
 			if confirm "Configure Context7 MCP for Codex with hosted OAuth?"; then
@@ -1718,6 +1735,7 @@ Before editing:
 - Use Graphify if available for broad repo discovery, unfamiliar areas, architecture decisions, or high-risk changes.
 - Use code-review-graph for affected files, callers, dependents, tests, and blast radius.
 - Before writing code, state the change plan and check that it directly solves the issue without creating broader side effects.
+- Before any coding task makes its first repository edit, including edits to tests, configuration, hooks, wrappers, or Make targets, spawn one separate read-only sentinel agent. Read-only and report-only tasks do not require a sentinel. Give the sentinel the original request, proposed plan, and protected quality files. Reuse that same agent to challenge material scope changes and review the final diff and verification evidence. If no sentinel can be spawned, stop and tell the user.
 - Apply Ponytail discipline: skip unnecessary work, reuse existing code, prefer stdlib/native features, avoid new dependencies, and make the smallest safe change.
 - Use Context7 for library/API/framework docs, setup, configuration, or unfamiliar APIs.
 - Use Humanizer before finalizing user-facing prose, docs, README copy, PR descriptions, release notes, or other natural-language text when the skill is available.
@@ -1739,10 +1757,13 @@ Implementation rules:
 - Do not rewrite architecture unless explicitly asked.
 - Do not remove validation, error handling, security checks, accessibility, or data-loss protection to make code shorter.
 - Write or update tests for behavior changes.
+- Run agent quality checks only through `make edited-ai`, `make lint-ai`, `make typecheck-ai`, `make test-ai`, `make security-ai`, `make verify-ai`, or `vibe_scripts/agent-verify.sh`. Never invoke the underlying formatter, linter, analyzer, test runner, security scanner, or raw quality Make target when a controlled route exists.
+- Formatting is available only through `make edited-ai`; never add or use a `format-ai` target.
+- Never weaken or change tests, quality configuration, analyzed paths, ignore rules, baselines, hooks, wrappers, or controlled Make targets merely to make a check pass. Fix the implementation instead. Change quality infrastructure only when explicitly required by the user, and call out every such change to the sentinel.
 - When touching frontend files, apply the frontend design touch gate in `/agent/coding-rules.md` even if no design skill is invoked.
 
 Before final answer:
-- After substantive coding, always spawn a separate reviewer agent to inspect the final implementation for breaking changes, scope creep, and alignment with the user request. Address its findings before replying.
+- Re-engage the same sentinel to review the final diff and evidence for breaking changes, bypasses, scope creep, and request drift. Resolve its findings before replying, with special attention to PHPStan levels, paths, ignores, configuration, and baselines.
 - Run the relevant verification command.
 - Summarize files changed.
 - Summarize tests/checks run.
@@ -1776,15 +1797,17 @@ Read order for non-trivial tasks:
 Default workflow:
 1. Understand the task and expected behavior.
 2. Read the relevant `/codebase-wiki/` page for durable repo memory.
-3. Use Graphify and/or code-review-graph to identify the smallest affected area when the task is broad or unfamiliar.
-4. Use Context7 for framework/library/API details.
-5. Use `$impeccable` for frontend design tasks when available; run `/impeccable init` first when PRODUCT.md or DESIGN.md is missing.
-6. Before writing code, state the planned files/behavior change and why it should solve the issue without broadening scope or creating new risk.
-7. Apply Ponytail: reuse existing code, prefer stdlib/native capabilities, avoid new dependencies, and make the smallest safe change.
-8. Add or update tests when behavior changes.
-9. Run `make edited-ai` after edits so changed files are formatted, linted, and typechecked. Use `make verify-ai` for broader AI-safe repo checks when risk warrants it.
-10. Run `make wiki-ai` when Graphify/session work reveals durable knowledge, then review the generated wiki sections.
-11. Run `make skills-check` after helper upgrades or when managed skills/plugins may be stale; run `make skills-update` only on explicit refresh requests.
+3. Before the first repository edit of any coding task, spawn the required read-only sentinel and keep that same agent for plan and final review.
+4. Use Graphify and/or code-review-graph to identify the smallest affected area when the task is broad or unfamiliar.
+5. Use Context7 for framework/library/API details.
+6. Use `$impeccable` for frontend design tasks when available; run `/impeccable init` first when PRODUCT.md or DESIGN.md is missing.
+7. Before writing code, state the planned files/behavior change and why it should solve the issue without broadening scope or creating new risk.
+8. Apply Ponytail: reuse existing code, prefer stdlib/native capabilities, avoid new dependencies, and make the smallest safe change.
+9. Add or update tests when behavior changes.
+10. Run controlled quality routes only. Formatting belongs exclusively to `make edited-ai`; use `make verify-ai` for broader AI-safe checks when risk warrants it.
+11. Re-engage the sentinel on the final diff and verification evidence and resolve its findings.
+12. Run `make wiki-ai` when Graphify/session work reveals durable knowledge, then review the generated wiki sections.
+13. Run `make skills-check` after helper upgrades or when managed skills/plugins may be stale; run `make skills-update` only on explicit refresh requests.
 EOF_AGENT_INDEX
 	)
 	write_file "agent/index.md" "$agent_index"
@@ -1801,13 +1824,15 @@ make setup
 make edited-ai
 make wiki-ai
 make lint-ai
-make typecheck
-make test
-make security
+make typecheck-ai
+make test-ai
+make security-ai
 make verify-ai
 make skills-check
 make skills-update
 ```
+
+Agents must use these controlled targets or `vibe_scripts/agent-verify.sh`, not underlying quality tools or raw quality targets. Formatting is intentionally bundled into `make edited-ai`; there is no separate agent formatting target.
 
 Useful AI tooling commands:
 
@@ -1894,9 +1919,10 @@ make edited-ai
 Security-sensitive changes:
 
 ```bash
-make security
 make security-ai
 ```
+
+Do not invoke underlying quality tools or raw quality Make targets. Do not weaken tests, analyzer configuration, paths, ignores, or baselines to make a check pass.
 
 If a check is unavailable, say exactly which check was unavailable and why. Do not claim success without running or explaining the relevant checks.
 EOF_VERIFY
@@ -2681,7 +2707,7 @@ elif [[ "$MODE" == "lint" ]]; then
 elif [[ "$MODE" == "typecheck" ]]; then
   make typecheck-ai
 elif [[ "$MODE" == "test" ]]; then
-  make test
+  make test-ai
 elif [[ "$MODE" == "security" ]]; then
   make security-ai
 elif [[ "$MODE" == "graph" ]]; then
@@ -2712,11 +2738,27 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
+
+
+RTK_FILTERS = {
+    "rtk:cargo-test": "cargo-test",
+    "rtk:go-test": "go-test",
+    "rtk:mypy": "mypy",
+    "rtk:pytest": "pytest",
+    "rtk:ruff-check": "ruff-check",
+    "rtk:ruff-format": "ruff-format",
+}
+
+FAILURE_PATTERN = re.compile(
+    r"\b(?:error|fatal|fail(?:ed|ure)?|exception|panic)\b", re.IGNORECASE
+)
 
 
 def slugify(value: str) -> str:
@@ -2725,27 +2767,485 @@ def slugify(value: str) -> str:
     return value.strip("-") or "quality-command"
 
 
-def trim_lines(text: str, max_lines: int) -> tuple[list[str], bool]:
-    lines = [line.rstrip() for line in text.splitlines() if line.strip()]
+def clip_line(line: str, max_chars: int = 500) -> str:
+    line = line.rstrip()
+    if len(line) <= max_chars:
+        return line
+    return f"{line[:max_chars]}... {len(line) - max_chars} chars omitted"
+
+
+def trim_lines(
+    text: str, max_lines: int, *, preserve_failures: bool = False
+) -> tuple[list[str], int]:
+    lines = [clip_line(line) for line in text.splitlines() if line.strip()]
     if len(lines) <= max_lines:
-        return lines, False
-    head_count = max_lines // 2
-    tail_count = max_lines - head_count
-    return lines[:head_count] + ["... output truncated ..."] + lines[-tail_count:], True
+        return lines, 0
+    shown = max_lines - 1
+    baseline_head = shown // 2
+    baseline_tail = shown - baseline_head
+    anchor_indexes: list[int] = []
+    if preserve_failures:
+        anchor_limit = min(2, max(0, shown - 2))
+        omitted_end = len(lines) - baseline_tail
+        for index in range(baseline_head, omitted_end):
+            line = lines[index]
+            if FAILURE_PATTERN.search(line):
+                anchor_indexes.append(index)
+                if len(anchor_indexes) == anchor_limit:
+                    break
+
+    remaining = shown - len(anchor_indexes)
+    head_count = remaining // 2
+    tail_count = remaining - head_count
+    omitted = len(lines) - shown
+    return (
+        lines[:head_count]
+        + [f"... {omitted} output lines omitted ..."]
+        + [lines[index] for index in anchor_indexes]
+        + lines[-tail_count:],
+        omitted,
+    )
 
 
 def summarize_known_success(output: str, returncode: int) -> list[str] | None:
     if returncode != 0:
         return None
     lines = [line.rstrip() for line in output.splitlines() if line.strip()]
-    if lines and all(line.startswith("No syntax errors detected in ") for line in lines):
+    if lines and all(
+        line.startswith("No syntax errors detected in ") for line in lines
+    ):
         return [f"PHP syntax check passed for {len(lines)} files."]
     return None
 
 
+def json_documents(output: str) -> tuple[list[object], list[str]]:
+    decoder = json.JSONDecoder()
+    documents: list[object] = []
+    spans: list[tuple[int, int]] = []
+    cursor = 0
+    while cursor < len(output):
+        while cursor < len(output) and output[cursor].isspace():
+            cursor += 1
+        if cursor < len(output) and output[cursor] in "[{":
+            start = cursor
+        else:
+            match = re.search(r"(?m)^[ \t]*(?=[\[{])", output[cursor:])
+            if match is None:
+                break
+            start = cursor + match.end()
+        try:
+            document, end = decoder.raw_decode(output, start)
+        except json.JSONDecodeError:
+            newline = output.find("\n", start)
+            cursor = len(output) if newline < 0 else newline + 1
+            continue
+        documents.append(document)
+        spans.append((start, end))
+        cursor = end
+
+    residue_parts: list[str] = []
+    previous = 0
+    for start, end in spans:
+        residue_parts.append(output[previous:start])
+        previous = end
+    residue_parts.append(output[previous:])
+    residue = [
+        clip_line(line)
+        for part in residue_parts
+        for line in part.splitlines()
+        if line.strip()
+    ]
+    return documents, residue
+
+
+def integer(value: object) -> int:
+    try:
+        return int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0
+
+
+def one_line(value: object) -> str:
+    return " ".join(str(value).split())
+
+
+def text_value(value: object) -> str:
+    if isinstance(value, str):
+        return one_line(value)
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def diagnostic(
+    path: object,
+    line: object,
+    column: object,
+    severity: object,
+    code: object,
+    message: object,
+    detail: str = "",
+) -> str:
+    location = one_line(path or "<unknown>")
+    if line is not None:
+        location += f":{one_line(line)}"
+        if column is not None:
+            location += f":{one_line(column)}"
+    metadata = " ".join(
+        part
+        for part in (
+            one_line(severity or "issue").lower(),
+            one_line(code or ""),
+            one_line(detail),
+        )
+        if part
+    )
+    return clip_line(f"{location} [{metadata}] {text_value(message)}")
+
+
+def parse_phpcs(documents: list[object]) -> tuple[str, list[str]] | None:
+    errors = warnings = fixable = 0
+    files_seen = 0
+    diagnostics: list[str] = []
+    for document in documents:
+        if not isinstance(document, dict):
+            return None
+        totals = document.get("totals")
+        files = document.get("files")
+        if not isinstance(totals, dict) or not isinstance(files, dict):
+            return None
+        errors += integer(totals.get("errors"))
+        warnings += integer(totals.get("warnings"))
+        fixable += integer(totals.get("fixable"))
+        files_seen += len(files)
+        for path, report in sorted(files.items()):
+            if not isinstance(report, dict) or not isinstance(report.get("messages", []), list):
+                return None
+            for item in report.get("messages", []):
+                if not isinstance(item, dict):
+                    return None
+                detail = f"severity={item.get('severity', 0)}"
+                if item.get("fixable"):
+                    detail += " fixable"
+                diagnostics.append(
+                    diagnostic(
+                        path,
+                        item.get("line"),
+                        item.get("column"),
+                        item.get("type"),
+                        item.get("source"),
+                        item.get("message", "PHPCS issue"),
+                        detail,
+                    )
+                )
+    return (
+        f"PHPCS: {errors} errors, {warnings} warnings, {fixable} fixable across {files_seen} files.",
+        diagnostics,
+    )
+
+
+def parse_phpstan(documents: list[object]) -> tuple[str, list[str]] | None:
+    global_errors = file_errors = files_seen = 0
+    diagnostics: list[str] = []
+    for document in documents:
+        if not isinstance(document, dict):
+            return None
+        totals = document.get("totals")
+        files = document.get("files")
+        errors = document.get("errors", [])
+        if (
+            not isinstance(totals, dict)
+            or not isinstance(files, dict)
+            or not isinstance(errors, list)
+        ):
+            return None
+        global_errors += integer(totals.get("errors"))
+        file_errors += integer(totals.get("file_errors"))
+        for error in errors:
+            diagnostics.append(
+                diagnostic("<phpstan>", None, None, "error", "global", error)
+            )
+        files_seen += len(files)
+        for path, report in sorted(files.items()):
+            if not isinstance(report, dict) or not isinstance(
+                report.get("messages", []), list
+            ):
+                return None
+            for item in report.get("messages", []):
+                if not isinstance(item, dict):
+                    return None
+                diagnostics.append(
+                    diagnostic(
+                        path,
+                        item.get("line"),
+                        None,
+                        "error",
+                        item.get("identifier") or "phpstan",
+                        item.get("message", "PHPStan error"),
+                    )
+                )
+    return (
+        f"PHPStan: {global_errors} global errors, {file_errors} file errors across {files_seen} files.",
+        diagnostics,
+    )
+
+
+def parse_semgrep(documents: list[object]) -> tuple[str, list[str]] | None:
+    findings = tool_errors = 0
+    levels: dict[str, int] = {}
+    finding_diagnostics: list[str] = []
+    error_diagnostics: list[str] = []
+    for document in documents:
+        if not isinstance(document, dict) or not isinstance(document.get("results"), list):
+            return None
+        errors = document.get("errors", [])
+        if not isinstance(errors, list):
+            return None
+        for item in document["results"]:
+            if not isinstance(item, dict):
+                return None
+            start = item.get("start", {})
+            extra = item.get("extra", {})
+            if not isinstance(start, dict) or not isinstance(extra, dict):
+                return None
+            findings += 1
+            level = str(extra.get("severity") or "issue").lower()
+            levels[level] = levels.get(level, 0) + 1
+            finding_diagnostics.append(
+                diagnostic(
+                    item.get("path"),
+                    start.get("line"),
+                    start.get("col"),
+                    level,
+                    item.get("check_id"),
+                    extra.get("message", "Semgrep finding"),
+                )
+            )
+        for item in errors:
+            if not isinstance(item, dict):
+                return None
+            tool_errors += 1
+            location = item.get("location", {})
+            if not isinstance(location, dict):
+                location = {}
+            start = location.get("start", {})
+            if not isinstance(start, dict):
+                start = {}
+            error_diagnostics.append(
+                diagnostic(
+                    item.get("path") or location.get("path") or "<semgrep>",
+                    item.get("line") or start.get("line"),
+                    item.get("column") or start.get("col"),
+                    "error",
+                    item.get("type") or item.get("code") or "tool-error",
+                    item.get("message") or item,
+                )
+            )
+    counts = ", ".join(f"{count} {level}" for level, count in sorted(levels.items()))
+    return (
+        f"Semgrep: {findings} findings{f' ({counts})' if counts else ''}, {tool_errors} tool errors.",
+        error_diagnostics + finding_diagnostics,
+    )
+
+
+def parse_shellcheck(documents: list[object]) -> tuple[str, list[str]] | None:
+    diagnostics: list[str] = []
+    levels: dict[str, int] = {}
+    for document in documents:
+        if isinstance(document, list):
+            comments = document
+        elif isinstance(document, dict) and isinstance(document.get("comments"), list):
+            comments = document["comments"]
+        else:
+            return None
+        for item in comments:
+            if not isinstance(item, dict):
+                return None
+            level = str(item.get("level") or "issue").lower()
+            levels[level] = levels.get(level, 0) + 1
+            code = item.get("code")
+            diagnostics.append(
+                diagnostic(
+                    item.get("file"),
+                    item.get("line"),
+                    item.get("column"),
+                    level,
+                    f"SC{code}" if code is not None else "shellcheck",
+                    item.get("message", "ShellCheck issue"),
+                )
+            )
+    counts = ", ".join(f"{count} {level}" for level, count in sorted(levels.items()))
+    return f"ShellCheck: {len(diagnostics)} issues{f' ({counts})' if counts else ''}.", diagnostics
+
+
+def parse_pyright(documents: list[object]) -> tuple[str, list[str]] | None:
+    diagnostics: list[str] = []
+    errors = warnings = information = files = 0
+    fatal_flags = 0
+    for document in documents:
+        if not isinstance(document, dict) or not isinstance(
+            document.get("generalDiagnostics"), list
+        ):
+            return None
+        summary = document.get("summary", {})
+        if not isinstance(summary, dict):
+            return None
+        errors += integer(summary.get("errorCount"))
+        warnings += integer(summary.get("warningCount"))
+        information += integer(summary.get("informationCount"))
+        files += integer(summary.get("filesAnalyzed"))
+        for flag, message in (
+            ("fatalErrorOccurred", "Pyright reported a fatal error"),
+            ("configParseErrorOccurred", "Pyright could not parse its configuration"),
+        ):
+            if document.get(flag):
+                fatal_flags += 1
+                diagnostics.append(
+                    diagnostic("<pyright>", None, None, "error", flag, message)
+                )
+        for item in document["generalDiagnostics"]:
+            if not isinstance(item, dict):
+                return None
+            location = item.get("range", {})
+            if not isinstance(location, dict):
+                location = {}
+            start = location.get("start", {})
+            if not isinstance(start, dict):
+                start = {}
+            line = integer(start.get("line")) + 1
+            column = integer(start.get("character")) + 1
+            diagnostics.append(
+                diagnostic(
+                    item.get("file"),
+                    line,
+                    column,
+                    item.get("severity"),
+                    item.get("rule") or "pyright",
+                    item.get("message", "Pyright issue"),
+                )
+            )
+    return (
+        f"Pyright: {errors} errors, {warnings} warnings, {information} informational across {files} files; {fatal_flags} fatal/config errors.",
+        diagnostics,
+    )
+
+
+NATIVE_ADAPTERS = {
+    "native:phpcs-json": parse_phpcs,
+    "native:phpstan-json": parse_phpstan,
+    "native:pyright-json": parse_pyright,
+    "native:semgrep-json": parse_semgrep,
+    "native:shellcheck-json1": parse_shellcheck,
+}
+
+
+def diagnostic_priority(line: str) -> int:
+    match = re.search(r" \[([a-z]+)\b", line, re.IGNORECASE)
+    level = match.group(1).lower() if match else ""
+    if "fatal" in level:
+        return 0
+    return {
+        "error": 1,
+        "warning": 2,
+        "information": 3,
+        "info": 3,
+        "style": 3,
+    }.get(level, 4)
+
+
+def render_native(
+    summary: str, diagnostics: list[str], residue: list[str], max_lines: int
+) -> list[str]:
+    if residue:
+        summary += f" {len(residue)} non-JSON output lines also emitted."
+    lines = [clip_line(summary)]
+    diagnostics = sorted(diagnostics, key=diagnostic_priority)
+    detail_slots = max_lines - 1
+    residue_slots = 0
+    if residue:
+        residue_slots = min(3, detail_slots if not diagnostics else max(1, detail_slots - 2))
+    diagnostic_slots = detail_slots - residue_slots
+    if len(diagnostics) > diagnostic_slots:
+        shown = max(0, diagnostic_slots - 1)
+        lines.extend(diagnostics[:shown])
+        lines.append(f"... {len(diagnostics) - shown} diagnostics omitted ...")
+    else:
+        lines.extend(diagnostics)
+    if residue_slots:
+        shown = min(len(residue), residue_slots)
+        if len(residue) > residue_slots and residue_slots > 1:
+            shown -= 1
+        for index, line in enumerate(residue[:shown], start=1):
+            lines.append(f"[tool output {index}/{len(residue)}] {line}")
+        omitted = len(residue) - shown
+        if omitted:
+            if residue_slots == 1:
+                lines[-1] += f" (... {omitted} non-JSON lines omitted)"
+            else:
+                lines.append(f"... {omitted} non-JSON output lines omitted ...")
+    return lines
+
+
+def adapter_summary(
+    adapter: str, output: str, returncode: int, max_lines: int
+) -> tuple[list[str] | None, str | None]:
+    if adapter in RTK_FILTERS:
+        if not output:
+            return None, "the tool produced no output"
+        rtk = shutil.which("rtk")
+        if not rtk:
+            return None, "rtk is not installed"
+        try:
+            completed = subprocess.run(
+                [rtk, "pipe", "--filter", RTK_FILTERS[adapter]],
+                input=output,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=5,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            return None, "rtk timed out after 5 seconds"
+        except OSError as error:
+            return None, f"rtk could not run ({one_line(error)})"
+        if completed.returncode != 0:
+            return None, f"rtk exited {completed.returncode}"
+        if not completed.stdout.strip():
+            return None, "rtk returned no summary"
+        if adapter == "rtk:go-test" and returncode != 0 and re.fullmatch(
+            r"\s*(?:go test:\s*)?no tests found[.!]?\s*",
+            completed.stdout,
+            re.IGNORECASE,
+        ):
+            return None, "rtk reported no tests for a failed Go test run"
+        return trim_lines(completed.stdout, max_lines)[0], None
+
+    parser = NATIVE_ADAPTERS.get(adapter)
+    if parser is not None:
+        try:
+            documents, residue = json_documents(output)
+            if not documents:
+                return None, "no complete JSON document was found"
+            parsed = parser(documents)
+        except Exception as error:
+            return None, f"adapter parser failed ({type(error).__name__})"
+        if parsed is None:
+            return None, "the JSON schema was not recognized"
+        summary, diagnostics = parsed
+        if returncode != 0 and not diagnostics:
+            return None, "the tool failed without any parsed diagnostics"
+        return render_native(summary, diagnostics, residue, max_lines), None
+
+    if adapter == "generic":
+        return None, None
+    return None, f"unknown adapter {adapter!r}"
+
+
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run a command and print a capped AI-safe summary.")
+    parser = argparse.ArgumentParser(
+        description="Run a command and print a capped AI-safe summary."
+    )
     parser.add_argument("--label", required=True)
+    parser.add_argument("--adapter", default="generic")
     parser.add_argument("--log-dir", default=".cache/ai-quality")
     parser.add_argument("--max-lines", type=int, default=30)
     parser.add_argument("--shell", action="store_true")
@@ -2764,7 +3264,13 @@ def main() -> int:
     args = parse_args()
     log_dir = Path(args.log_dir)
     log_dir.mkdir(parents=True, exist_ok=True)
-    log_path = log_dir / f"{dt.datetime.now().strftime('%Y%m%d-%H%M%S')}-{slugify(args.label)}.log"
+    log_path = (
+        log_dir
+        / (
+            f"{dt.datetime.now().strftime('%Y%m%d-%H%M%S-%f')}-"
+            f"{os.getpid()}-{slugify(args.label)}.log"
+        )
+    )
     if args.shell:
         command_display = args.command[0]
         run_command: str | list[str] = args.command[0]
@@ -2773,27 +3279,57 @@ def main() -> int:
         run_command = args.command
     env = os.environ.copy()
     env.setdefault("NO_COLOR", "1")
-    completed = subprocess.run(run_command, shell=args.shell, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env, check=False)
+    completed = subprocess.run(
+        run_command,
+        shell=args.shell,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        env=env,
+        check=False,
+    )
     output = completed.stdout or ""
-    log_path.write_text(f"$ {command_display}\nexit_code={completed.returncode}\n\n{output}", encoding="utf-8")
+    log_path.write_text(
+        f"$ {command_display}\nexit_code={completed.returncode}\n\n{output}",
+        encoding="utf-8",
+    )
     status = "ok" if completed.returncode == 0 else f"failed ({completed.returncode})"
     print(f"[ai-quality] {args.label}: {status}")
     print(f"[ai-quality] full log: {log_path}")
-    known_success = summarize_known_success(output, completed.returncode)
-    if known_success is not None:
-        print("[ai-quality] summary:")
-        for line in known_success:
+
+    if args.adapter == "generic":
+        known_success = summarize_known_success(output, completed.returncode)
+        if known_success is not None:
+            print("[ai-quality] summary:")
+            for line in known_success:
+                print(line)
+            return completed.returncode
+
+    parsed, fallback_reason = adapter_summary(
+        args.adapter, output, completed.returncode, args.max_lines
+    )
+    if parsed is not None:
+        print(f"[ai-quality] {args.adapter} output ({len(parsed)} lines):")
+        for line in parsed:
             print(line)
         return completed.returncode
-    summary_lines, truncated = trim_lines(output, args.max_lines)
+    if fallback_reason:
+        print(
+            f"[ai-quality] adapter fallback: {fallback_reason}; showing capped raw output."
+        )
+    summary_lines, omitted = trim_lines(
+        output, args.max_lines, preserve_failures=completed.returncode != 0
+    )
     if summary_lines:
         print(f"[ai-quality] capped output ({len(summary_lines)} lines):")
         for line in summary_lines:
             print(line)
     else:
         print("[ai-quality] no output")
-    if truncated:
-        print(f"[ai-quality] output was truncated for the AI transcript; inspect {log_path} for the full output.")
+    if omitted:
+        print(
+            f"[ai-quality] output was truncated for the AI transcript; inspect {log_path} for the full output."
+        )
     return completed.returncode
 
 
@@ -2822,12 +3358,31 @@ import sys
 from pathlib import Path
 
 
-EXCLUDED_DIRS = {".agents", ".cache", ".claude", ".codex", ".git", ".venv", "build", "coverage", "dist", "graphify-out", "node_modules", "obsidian", "vendor"}
+EXCLUDED_DIRS = {
+    ".agents",
+    ".cache",
+    ".claude",
+    ".codex",
+    ".git",
+    ".venv",
+    "build",
+    "coverage",
+    "dist",
+    "graphify-out",
+    "node_modules",
+    "obsidian",
+    "vendor",
+}
 EXCLUDED_FILES = {".mcp.json"}
-EDITED_FILE_LISTS = (".cache/claude-edited-files.txt", ".cache/codex-edited-files.txt")
+EDITED_FILE_LISTS = (
+    ".cache/claude-edited-files.txt",
+    ".cache/codex-edited-files.txt",
+)
 BIOME_EXTS = {".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".css", ".json", ".jsonc"}
 HTML_EXTS = {".html", ".htm"}
 MARKDOWN_EXTS = {".md", ".markdown"}
+PYTHON_EXTS = {".py", ".pyi"}
+GO_EXTS = {".go"}
 FRONTEND_DESIGN_EXTS = {
     ".astro",
     ".css",
@@ -2848,7 +3403,14 @@ SHELL_EXTS = {".sh", ".bash", ".zsh"}
 
 
 def run_capture(args: list[str], cwd: Path) -> str:
-    completed = subprocess.run(args, cwd=cwd, text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False)
+    completed = subprocess.run(
+        args,
+        cwd=cwd,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
     return completed.stdout
 
 
@@ -2858,12 +3420,23 @@ def repo_root() -> Path:
 
 
 def recorded_edited_files(root: Path) -> list[str]:
-    return sorted({line.strip() for relative in EDITED_FILE_LISTS if (path := root / relative).is_file() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()})
+    return sorted(
+        {
+            line.strip()
+            for relative in EDITED_FILE_LISTS
+            if (path := root / relative).is_file()
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        }
+    )
 
 
 def is_excluded(path: str) -> bool:
     parts = Path(path).parts
-    return path in EXCLUDED_FILES or any(part in EXCLUDED_DIRS or part == "skills" or part.endswith("-skills") for part in parts)
+    return path in EXCLUDED_FILES or any(
+        part in EXCLUDED_DIRS or part == "skills" or part.endswith("-skills")
+        for part in parts
+    )
 
 
 def existing_project_files(root: Path, files: list[str]) -> list[str]:
@@ -2883,11 +3456,22 @@ def existing_project_files(root: Path, files: list[str]) -> list[str]:
 
 
 def split_by_ext(files: list[str]) -> dict[str, list[str]]:
-    groups = {"biome": [], "html": [], "markdown": [], "design": [], "php": [], "shell": []}
+    groups = {
+        "biome": [],
+        "go": [],
+        "html": [],
+        "markdown": [],
+        "design": [],
+        "php": [],
+        "python": [],
+        "shell": [],
+    }
     for file in files:
         suffix = Path(file).suffix.lower()
         if suffix in BIOME_EXTS:
             groups["biome"].append(file)
+        if suffix in GO_EXTS:
+            groups["go"].append(file)
         if suffix in HTML_EXTS:
             groups["html"].append(file)
         if suffix in MARKDOWN_EXTS:
@@ -2896,6 +3480,8 @@ def split_by_ext(files: list[str]) -> dict[str, list[str]]:
             groups["design"].append(file)
         if suffix in PHP_EXTS:
             groups["php"].append(file)
+        if suffix in PYTHON_EXTS:
+            groups["python"].append(file)
         if suffix in SHELL_EXTS:
             groups["shell"].append(file)
     return groups
@@ -2933,9 +3519,26 @@ def quote_files(files: list[str]) -> str:
     return " ".join(shlex.quote(file) for file in files)
 
 
-def run_wrapped(root: Path, label: str, command: list[str], *, shell: bool = False, max_lines: int = 24) -> int:
+def run_wrapped(
+    root: Path,
+    label: str,
+    command: list[str],
+    *,
+    adapter: str = "generic",
+    shell: bool = False,
+    max_lines: int = 24,
+) -> int:
     wrapper = root / "vibe_scripts" / "ai-quality-wrapper.py"
-    args = [sys.executable, str(wrapper), "--label", label, "--max-lines", str(max_lines)]
+    args = [
+        sys.executable,
+        str(wrapper),
+        "--label",
+        label,
+        "--max-lines",
+        str(max_lines),
+        "--adapter",
+        adapter,
+    ]
     if shell:
         args.append("--shell")
     args.append("--")
@@ -2943,74 +3546,197 @@ def run_wrapped(root: Path, label: str, command: list[str], *, shell: bool = Fal
     return subprocess.run(args, cwd=root, check=False).returncode
 
 
-def run_phase(root: Path, phase: str, commands: list[tuple[str, list[str], bool, int, bool]]) -> int:
+def run_phase(
+    root: Path, phase: str, commands: list[tuple[str, list[str], bool, int, str]]
+) -> int:
     if not commands:
         print(f"[edited-check] {phase}: no applicable commands")
         return 0
     print(f"[edited-check] {phase}")
     sys.stdout.flush()
     failed = 0
-    for label, command, shell, max_lines, allow_failure in commands:
-        code = run_wrapped(root, label, command, shell=shell, max_lines=max_lines)
-        if code != 0 and not allow_failure:
+    for label, command, shell, max_lines, adapter in commands:
+        code = run_wrapped(
+            root, label, command, adapter=adapter, shell=shell, max_lines=max_lines
+        )
+        if code != 0:
             failed = 1
     return failed
 
 
-def build_commands(root: Path, groups: dict[str, list[str]]) -> tuple[list[tuple[str, list[str], bool, int, bool]], list[tuple[str, list[str], bool, int, bool]], list[tuple[str, list[str], bool, int, bool]]]:
-    format_cmds: list[tuple[str, list[str], bool, int, bool]] = []
-    lint_cmds: list[tuple[str, list[str], bool, int, bool]] = []
-    type_cmds: list[tuple[str, list[str], bool, int, bool]] = []
+def build_commands(
+    root: Path, groups: dict[str, list[str]]
+) -> tuple[
+    list[tuple[str, list[str], bool, int, str]],
+    list[tuple[str, list[str], bool, int, str]],
+    list[tuple[str, list[str], bool, int, str]],
+]:
+    format_cmds: list[tuple[str, list[str], bool, int, str]] = []
+    lint_cmds: list[tuple[str, list[str], bool, int, str]] = []
+    type_cmds: list[tuple[str, list[str], bool, int, str]] = []
 
     if groups["biome"] and have_path(root, "node_modules/.bin/biome"):
         files = quote_files(groups["biome"])
-        format_cmds.append(("format-biome-edited", [f"npx biome check --write {files}"], True, 20, False))
-        lint_cmds.append(("lint-biome-edited", [f"npx biome check --colors=off --max-diagnostics=20 {files}"], True, 24, False))
+        format_cmds.append(
+            (
+                "format-biome-edited",
+                [f"npx biome check --write --max-diagnostics=none {files}"],
+                True,
+                20,
+                "generic",
+            )
+        )
+        lint_cmds.append(
+            (
+                "lint-biome-edited",
+                [f"npx biome check --colors=off --max-diagnostics=none {files}"],
+                True,
+                24,
+                "generic",
+            )
+        )
     if groups["html"] and have_path(root, "node_modules/.bin/htmlhint"):
         files = quote_files(groups["html"])
-        lint_cmds.append(("lint-html-edited", [f"npx htmlhint --nocolor --format compact {files}"], True, 24, False))
+        lint_cmds.append(
+            (
+                "lint-html-edited",
+                [f"npx htmlhint --nocolor --format compact {files}"],
+                True,
+                24,
+                "generic",
+            )
+        )
     markdownlint = markdownlint_command(root)
     if groups["markdown"] and markdownlint:
         files = quote_files(groups["markdown"])
         command = " ".join(shlex.quote(part) for part in markdownlint)
-        format_cmds.append(("format-markdownlint-edited", [f"{command} --fix {files}"], True, 20, False))
-        lint_cmds.append(("lint-markdown-edited", [f"{command} {files}"], True, 24, False))
+        format_cmds.append(
+            (
+                "format-markdownlint-edited",
+                [f"{command} --fix {files}"],
+                True,
+                20,
+                "generic",
+            )
+        )
+        lint_cmds.append(
+            ("lint-markdown-edited", [f"{command} {files}"], True, 24, "generic")
+        )
     impeccable = local_impeccable_command(root)
     if groups["design"] and impeccable:
-        detector_args = " ".join(shlex.quote(part) for part in impeccable + ["detect", *groups["design"]])
-        lint_cmds.append(("design-impeccable-edited", [detector_args], True, 30, False))
+        detector_args = " ".join(
+            shlex.quote(part) for part in impeccable + ["detect", *groups["design"]]
+        )
+        lint_cmds.append(("design-impeccable-edited", [detector_args], True, 30, "generic"))
     if groups["php"]:
         files = quote_files(groups["php"])
-        syntax_loop = "for file in " + files + "; do php -l \"$file\"; done"
+        syntax_loop = "for file in " + files + '; do php -l "$file" || exit; done'
         if have_command("php", root):
-            lint_cmds.append(("lint-php-syntax-edited", [syntax_loop], True, 20, False))
+            lint_cmds.append(("lint-php-syntax-edited", [syntax_loop], True, 20, "generic"))
         if have_path(root, "vendor/bin/phpcbf"):
-            format_cmds.append(("format-phpcbf-edited", [f"vendor/bin/phpcbf --standard=PSR12 --extensions=php {files} || true"], True, 20, True))
+            format_cmds.append(
+                (
+                    "format-phpcbf-edited",
+                    [
+                        f"vendor/bin/phpcbf --standard=PSR12 --extensions=php {files}"
+                    ],
+                    True,
+                    20,
+                    "generic",
+                )
+            )
         if have_path(root, "vendor/bin/phpcs"):
-            lint_cmds.append(("lint-phpcs-edited", [f"vendor/bin/phpcs --standard=PSR12 --extensions=php --report=summary -q {files}"], True, 24, False))
+            lint_cmds.append(
+                (
+                    "lint-phpcs-edited",
+                    [
+                        f"vendor/bin/phpcs --standard=PSR12 --extensions=php --report=json -q {files}"
+                    ],
+                    True,
+                    24,
+                    "native:phpcs-json",
+                )
+            )
         if have_path(root, "vendor/bin/phpstan"):
-            type_cmds.append(("type-phpstan-edited", [f"vendor/bin/phpstan analyse --memory-limit=1G --no-progress --error-format=table -- {files}"], True, 30, False))
+            type_cmds.append(
+                (
+                    "type-phpstan-edited",
+                    [
+                        f"vendor/bin/phpstan analyse --memory-limit=1G --no-progress --error-format=json -- {files}"
+                    ],
+                    True,
+                    30,
+                    "native:phpstan-json",
+                )
+            )
+    if groups["python"] and have_command("ruff", root):
+        files = quote_files(groups["python"])
+        format_cmds.append(
+            ("format-ruff-edited", [f"ruff format {files}"], True, 20, "rtk:ruff-format")
+        )
+        lint_cmds.append(
+            ("lint-ruff-edited", [f"ruff check {files}"], True, 24, "rtk:ruff-check")
+        )
+    if groups["go"] and have_command("gofmt", root):
+        files = quote_files(groups["go"])
+        format_cmds.append(
+            ("format-gofmt-edited", [f"gofmt -w {files}"], True, 20, "generic")
+        )
     if groups["shell"]:
         files = quote_files(groups["shell"])
         if have_command("shfmt", root):
-            format_cmds.append(("format-shfmt-edited", [f"shfmt -w {files}"], True, 20, False))
+            format_cmds.append(
+                ("format-shfmt-edited", [f"shfmt -w {files}"], True, 20, "generic")
+            )
         if have_command("shellcheck", root):
-            lint_cmds.append(("lint-shellcheck-edited", [f"shellcheck {files}"], True, 24, False))
+            lint_cmds.append(
+                (
+                    "lint-shellcheck-edited",
+                    [f"shellcheck -f json1 {files}"],
+                    True,
+                    24,
+                    "native:shellcheck-json1",
+                )
+            )
     return format_cmds, lint_cmds, type_cmds
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Format, lint, and typecheck edited files with capped AI output.")
-    parser.add_argument("files", nargs="*", help="Specific files to check. Defaults to files recorded by agent edit hooks.")
+    parser = argparse.ArgumentParser(
+        description="Format, lint, and typecheck edited files with capped AI output."
+    )
+    parser.add_argument(
+        "files",
+        nargs="*",
+        help="Specific files to check. Defaults to files recorded by agent edit hooks.",
+    )
     args = parser.parse_args()
     root = repo_root()
     os.chdir(root)
-    files = existing_project_files(root, args.files if args.files else recorded_edited_files(root))
-    groups = split_by_ext(files)
-    relevant = sorted(set(groups["biome"] + groups["html"] + groups["markdown"] + groups["design"] + groups["php"] + groups["shell"]))
+    selected = args.files if args.files else recorded_edited_files(root)
     print(f"[edited-check] root: {root}")
+    if not selected:
+        print("[edited-check] no explicit or recorded edited files; refusing an empty quality pass")
+        return 2
+    files = existing_project_files(root, selected)
+    if not files:
+        print("[edited-check] selected files are missing or excluded; no applicable files")
+        return 0
+    groups = split_by_ext(files)
+    relevant = sorted(
+        set(
+            groups["biome"]
+            + groups["go"]
+            + groups["html"]
+            + groups["markdown"]
+            + groups["design"]
+            + groups["php"]
+            + groups["python"]
+            + groups["shell"]
+        )
+    )
     if not relevant:
-        print("[edited-check] no edited frontend/Markdown/PHP/shell files to check")
+        print("[edited-check] selected files have no applicable edited-file checks")
         return 0
     print(f"[edited-check] files: {len(relevant)}")
     for file in relevant[:30]:
@@ -3024,7 +3750,9 @@ def main() -> int:
     failed |= run_phase(root, "lint edited files", lint_cmds)
     failed |= run_phase(root, "typecheck edited files", type_cmds)
     if failed:
-        print("[edited-check] errors found after formatting/linting/typechecking edited files")
+        print(
+            "[edited-check] errors found after formatting/linting/typechecking edited files"
+        )
         return 1
     print("[edited-check] edited-file checks passed")
     return 0
@@ -3036,14 +3764,13 @@ EOF_EDITED_CHECK
 	)
 	write_file "vibe_scripts/agent-check-edited.py" "$script" "0755"
 }
-
 create_codex_hooks_templates() {
 	if [[ "$CREATE_CODEX_HOOKS" != "1" ]]; then
 		log "Skipping Codex hook templates (--no-codex-hooks)."
 		return 0
 	fi
 
-	log "Creating Codex hook templates with Git-writing command blockers"
+	log "Creating Codex hook templates with quality-route, Git-writing, and destructive-command blockers"
 	if [[ "$CREATE_RTK_HOOK" == "1" ]]; then
 		warn "RTK PreToolUse hook is enabled by default. It rewrites eligible literal read-only/noisy Bash commands through 'rtk' when RTK is installed."
 		warn "Use --no-rtk-hook to skip it. Codex still requires /hooks review/trust before project hooks run."
@@ -3070,11 +3797,394 @@ Scope:
 - It does not replace OS permissions, containers, read-only mounts, or manual review.
 """
 import json
+import os
 import re
+import shlex
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+
+ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=.*$")
+CONTROL_TOKENS = {"&", "&&", "(", ")", ";", "<", ">", "|", "||", "\n"}
+CONTROLLED_MAKE_TARGETS = {
+    "agent-verify",
+    "edited-ai",
+    "lint-ai",
+    "security-ai",
+    "skills-check",
+    "skills-update",
+    "test-ai",
+    "typecheck-ai",
+    "verify-ai",
+    "wiki-ai",
+}
+RAW_MAKE_TARGETS = {
+    "fix",
+    "format",
+    "format-ai",
+    "lint",
+    "security",
+    "test",
+    "typecheck",
+    "verify",
+}
+QUALITY_EXECUTABLES = {
+    "biome",
+    "black",
+    "eslint",
+    "gofmt",
+    "golangci-lint",
+    "htmlhint",
+    "isort",
+    "markdownlint",
+    "markdownlint-cli2",
+    "mypy",
+    "phpcbf",
+    "phpcs",
+    "phpstan",
+    "phpstan.phar",
+    "phpunit",
+    "prettier",
+    "pylint",
+    "pyright",
+    "pytest",
+    "ruff",
+    "semgrep",
+    "shellcheck",
+    "shfmt",
+    "staticcheck",
+}
+QUALITY_SCRIPT_NAMES = {
+    "lint",
+    "lint:fix",
+    "format",
+    "fix",
+    "security",
+    "test",
+    "typecheck",
+    "verify",
+}
+MAKE_OPTIONS_WITH_VALUES = {
+    "-C",
+    "-f",
+    "-I",
+    "-o",
+    "-W",
+    "--directory",
+    "--eval",
+    "--file",
+    "--include-dir",
+    "--makefile",
+    "--new-file",
+    "--old-file",
+}
+UNSAFE_MAKE_OPTIONS = {
+    "-C",
+    "-e",
+    "-f",
+    "-I",
+    "-o",
+    "-R",
+    "-r",
+    "-W",
+    "--directory",
+    "--environment-overrides",
+    "--eval",
+    "--file",
+    "--include-dir",
+    "--makefile",
+    "--new-file",
+    "--no-builtin-rules",
+    "--no-builtin-variables",
+    "--old-file",
+}
+ENV_OPTIONS_WITH_VALUES = {"-C", "-S", "-u", "--chdir", "--split-string", "--unset"}
+SUDO_OPTIONS_WITH_VALUES = {
+    "-C",
+    "-D",
+    "-g",
+    "-h",
+    "-p",
+    "-r",
+    "-R",
+    "-t",
+    "-T",
+    "-u",
+    "--chdir",
+    "--close-from",
+    "--group",
+    "--host",
+    "--other-user",
+    "--prompt",
+    "--role",
+    "--type",
+    "--user",
+}
+XARGS_OPTIONS_WITH_VALUES = {
+    "-E",
+    "-I",
+    "-L",
+    "-n",
+    "-P",
+    "-s",
+    "--eof",
+    "--max-args",
+    "--max-chars",
+    "--max-lines",
+    "--max-procs",
+    "--replace",
+}
+
+
+def command_name(value: str) -> str:
+    return os.path.basename(value.rstrip("/"))
+
+
+def shell_segments(command: str) -> list[list[str]]:
+    try:
+        lexer = shlex.shlex(command, posix=True, punctuation_chars="|&;()<>\n")
+        lexer.whitespace = " \t\r"
+        lexer.whitespace_split = True
+        lexer.commenters = ""
+        tokens = list(lexer)
+    except ValueError:
+        return []
+
+    segments: list[list[str]] = []
+    current: list[str] = []
+    for token in tokens:
+        if token in CONTROL_TOKENS:
+            if current:
+                segments.append(current)
+                current = []
+        else:
+            current.append(token)
+    if current:
+        segments.append(current)
+    return segments
+
+
+def strip_prefixes(parts: list[str]) -> list[str]:
+    remaining = list(parts)
+    while remaining and ASSIGNMENT.match(remaining[0]):
+        remaining.pop(0)
+    if not remaining:
+        return []
+
+    head = command_name(remaining[0])
+    if head == "env":
+        remaining = remaining[1:]
+        while remaining:
+            if ASSIGNMENT.match(remaining[0]):
+                remaining.pop(0)
+                continue
+            if not remaining[0].startswith("-"):
+                break
+            option = remaining.pop(0)
+            if option.split("=", 1)[0] in ENV_OPTIONS_WITH_VALUES and "=" not in option and remaining:
+                remaining.pop(0)
+        return strip_prefixes(remaining)
+
+    if head == "sudo":
+        remaining = remaining[1:]
+        while remaining and remaining[0].startswith("-"):
+            option = remaining.pop(0)
+            if option.split("=", 1)[0] in SUDO_OPTIONS_WITH_VALUES and "=" not in option and remaining:
+                remaining.pop(0)
+        return strip_prefixes(remaining)
+
+    if head in {"command", "nohup", "time"}:
+        remaining = remaining[1:]
+        while remaining and remaining[0].startswith("-"):
+            remaining.pop(0)
+        return strip_prefixes(remaining)
+
+    return remaining
+
+
+def make_violation(parts: list[str]) -> str:
+    targets: list[str] = []
+    unsafe_override = False
+    index = 1
+    while index < len(parts):
+        value = parts[index]
+        option = value.split("=", 1)[0]
+        if ASSIGNMENT.match(value):
+            unsafe_override = True
+        elif option in UNSAFE_MAKE_OPTIONS or (
+            value.startswith("-")
+            and not value.startswith("--")
+            and any(flag in value[1:] for flag in "CefIoRrW")
+        ):
+            unsafe_override = True
+        elif value.startswith("-"):
+            if option in MAKE_OPTIONS_WITH_VALUES and "=" not in value:
+                index += 1
+        else:
+            targets.append(value)
+        index += 1
+
+    raw = next((target for target in targets if target in RAW_MAKE_TARGETS), "")
+    if raw:
+        replacement = "make edited-ai" if raw in {"fix", "format", "format-ai"} else f"make {raw}-ai"
+        return f"Direct 'make {raw}' is blocked for agents; use '{replacement}'."
+    if unsafe_override and any(target in CONTROLLED_MAKE_TARGETS for target in targets):
+        return "Makefile, directory, environment, and rule overrides are blocked for controlled AI quality targets."
+    return ""
+
+
+def child_command(parts: list[str], start: int) -> list[str]:
+    child = parts[start:]
+    while child and child[0] == "--":
+        child.pop(0)
+    return child
+
+
+def xargs_child(parts: list[str]) -> list[str]:
+    index = 1
+    while index < len(parts):
+        value = parts[index]
+        if value == "--":
+            return parts[index + 1 :]
+        if not value.startswith("-"):
+            return parts[index:]
+        option = value.split("=", 1)[0]
+        if option in XARGS_OPTIONS_WITH_VALUES and "=" not in value:
+            index += 1
+        index += 1
+    return []
+
+
+def quality_violation_for_parts(parts: list[str]) -> str:
+    original_parts = list(parts)
+    parts = strip_prefixes(parts)
+    if not parts:
+        return ""
+    head = command_name(parts[0])
+
+    if head in {"agent-check-edited.py", "agent-verify.sh"}:
+        if command_name(original_parts[0]) != head or any(
+            ASSIGNMENT.match(part) for part in original_parts
+        ):
+            return "Environment and command wrappers are blocked for controlled AI quality scripts."
+        return ""
+    if head in {"make", "gmake"}:
+        reason = make_violation(parts)
+        if reason:
+            return reason
+        if any(part in CONTROLLED_MAKE_TARGETS for part in parts[1:]) and (
+            command_name(original_parts[0]) not in {"make", "gmake"}
+            or any(ASSIGNMENT.match(part) for part in original_parts)
+        ):
+            return "Environment and command wrappers are blocked for controlled AI quality targets."
+        return ""
+    if head in QUALITY_EXECUTABLES:
+        detail = ""
+        if head == "phpstan" and any(
+            value in {"-c", "-l", "--configuration", "--generate-baseline", "--level"}
+            or value.startswith(("--configuration=", "--level="))
+            for value in parts[1:]
+        ):
+            detail = " Configuration, level, and baseline overrides are forbidden."
+        replacement = "make edited-ai" if head in {"biome", "black", "gofmt", "isort", "phpcbf", "prettier", "ruff", "shfmt"} else "the matching *-ai target"
+        return f"Direct {head} is blocked for agents; use {replacement}.{detail}"
+    if head == "php" and len(parts) > 1 and (
+        "-l" in parts[1:]
+        or any(
+            command_name(value) in {"phpstan", "phpstan.phar"}
+            for value in parts[1:]
+        )
+    ):
+        return "Direct PHP/PHPStan quality checks are blocked; use make edited-ai or make typecheck-ai."
+    if head in {"bash", "dash", "sh", "zsh"}:
+        index = next(
+            (
+                index
+                for index, option in enumerate(parts[1:], 1)
+                if option == "-c"
+                or (option.startswith("-") and not option.startswith("--") and "c" in option[1:])
+            ),
+            -1,
+        )
+        if index != -1:
+            return quality_violation(parts[index + 1]) if index + 1 < len(parts) else ""
+    if head == "eval" and len(parts) > 1:
+        return quality_violation(" ".join(parts[1:]))
+    if head == "xargs":
+        return quality_violation_for_parts(xargs_child(parts))
+    if head == "find":
+        for marker in ("-exec", "-execdir", "-ok", "-okdir"):
+            if marker in parts:
+                return quality_violation_for_parts(parts[parts.index(marker) + 1 :])
+        return ""
+    if head == "rtk" and len(parts) > 1:
+        if parts[1] == "pipe":
+            return ""
+        start = 2 if parts[1] in {"proxy", "run"} else 1
+        return quality_violation_for_parts(child_command(parts, start))
+    if head in {"npx", "bunx"} and len(parts) > 1:
+        return quality_violation_for_parts(child_command(parts, 1))
+    if head in {"uv", "pipx"} and "run" in parts[1:]:
+        index = parts.index("run", 1)
+        return quality_violation_for_parts(child_command(parts, index + 1))
+    if head in {"python", "python3", "py"}:
+        if len(parts) > 1 and command_name(parts[1]) == "ai-quality-wrapper.py":
+            return "Run quality checks through Make targets or vibe_scripts/agent-verify.sh, not ai-quality-wrapper.py directly."
+        if len(parts) > 1 and command_name(parts[1]) == "agent-check-edited.py":
+            if command_name(original_parts[0]) != head or any(
+                ASSIGNMENT.match(part) for part in original_parts
+            ):
+                return "Environment and command wrappers are blocked for controlled AI quality scripts."
+            return ""
+        if "-m" in parts[1:]:
+            index = parts.index("-m", 1)
+            if index + 1 < len(parts):
+                return quality_violation_for_parts(parts[index + 1 :])
+        return ""
+    if head == "composer" and len(parts) > 1:
+        verb_index = next(
+            (
+                index
+                for index, value in enumerate(parts[1:], 1)
+                if value in {"exec", "run", "run-script"}
+            ),
+            0,
+        )
+        child = parts[verb_index + 1 :] if verb_index else parts[1:]
+        for index, value in enumerate(child):
+            if command_name(value) in QUALITY_EXECUTABLES:
+                return quality_violation_for_parts(child[index:])
+            if value in QUALITY_SCRIPT_NAMES:
+                return "Direct Composer quality scripts are blocked; use the matching *-ai target."
+    if head in {"npm", "pnpm", "yarn", "bun"} and len(parts) > 1:
+        if parts[1] in {"dlx", "exec", "x"}:
+            for index, value in enumerate(parts[2:], 2):
+                if command_name(value) in QUALITY_EXECUTABLES:
+                    return quality_violation_for_parts(parts[index:])
+        script = parts[2] if parts[1] in {"run", "run-script"} and len(parts) > 2 else parts[1]
+        if script in QUALITY_SCRIPT_NAMES or script.startswith(tuple(f"{name}:" for name in QUALITY_SCRIPT_NAMES)):
+            return f"Direct {head} quality scripts are blocked; use the matching *-ai target."
+    if head == "go" and len(parts) > 1 and parts[1] in {"fmt", "test", "vet"}:
+        return "Direct Go quality commands are blocked; use make edited-ai or the matching *-ai target."
+    if head == "cargo" and len(parts) > 1 and parts[1] in {"check", "clippy", "fmt", "test"}:
+        return "Direct Cargo quality commands are blocked; use make edited-ai or the matching *-ai target."
+    if head == "dotnet" and len(parts) > 1 and parts[1] in {"build", "format", "test"}:
+        return "Direct dotnet quality commands are blocked; use make edited-ai or the matching *-ai target."
+    if head in {"nice", "stdbuf", "timeout"}:
+        for index, value in enumerate(parts[1:], 1):
+            if command_name(value) in QUALITY_EXECUTABLES or command_name(value) in {"make", "gmake"}:
+                return quality_violation_for_parts(parts[index:])
+    return ""
+
+
+def quality_violation(command: str) -> str:
+    for parts in shell_segments(command):
+        reason = quality_violation_for_parts(parts)
+        if reason:
+            return reason
+    return ""
 
 
 def log_hook_error(reason: str, *, raw: str = "", error: Exception | None = None) -> None:
@@ -3137,6 +4247,21 @@ def find_command(obj: Any) -> str:
 cmd = find_command(payload)
 raw = json.dumps(payload)
 search_text = cmd if cmd else raw
+
+quality_reason = quality_violation(cmd)
+if quality_reason:
+    print(
+        json.dumps(
+            {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "deny",
+                    "permissionDecisionReason": quality_reason,
+                }
+            }
+        )
+    )
+    sys.exit(0)
 
 blocked = [
     # Git staging, committing, pushing, branch/history/worktree mutations.
@@ -3591,8 +4716,8 @@ EOF_RTK_CONFIG
 EOF_CODEX_CONFIG_HEAD
 			[[ -n "$rtk_warning" ]] && printf '%s\n' "$rtk_warning"
 			cat <<'EOF_CODEX_CONFIG_HEAD'
-# This blocks Codex Bash tool calls that try to stage, commit, push, rewrite history,
-# change branches, or run obviously destructive commands.
+# This blocks direct quality-tool bypasses plus Codex Bash tool calls that try to
+# stage, commit, push, rewrite history, change branches, or run destructive commands.
 
 [features]
 hooks = true
@@ -3607,7 +4732,7 @@ matcher = "^Bash$"
 type = "command"
 command = 'root="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0; hook="$root/.codex/hooks/pre_tool_use_policy.py"; [ -f "$hook" ] || exit 0; exec python3 "$hook"'
 timeout = 30
-statusMessage = "Blocking Git-writing/destructive commands"
+statusMessage = "Blocking uncontrolled quality, Git-writing, and destructive commands"
 
 [[hooks.PostToolUse]]
 matcher = "^Bash$"
@@ -3803,7 +4928,7 @@ matcher = "^Bash$"
 type = "command"
 command = '/usr/bin/env python3 "{hook_path}"'
 timeout = 30
-statusMessage = "Blocking Git-writing/destructive commands"
+statusMessage = "Blocking uncontrolled quality, Git-writing, and destructive commands"
 {marker_end}
 """
 
@@ -4119,7 +5244,6 @@ EOF_NEXT
 }
 
 main() {
-	check_prereqs
 	ensure_existing_user_tool_paths
 	bootstrap_prereqs
 	check_prereqs
