@@ -6,9 +6,9 @@ set -euo pipefail
 # It detects likely repo types, offers to install missing dev quality tools,
 # then wires Makefile targets for tools/scripts that exist.
 #
-# Version: 2026-09-07-v23
+# Version: 2026-09-07-v24
 
-SCRIPT_VERSION="2026-09-07-v23"
+SCRIPT_VERSION="2026-09-07-v24"
 DRY_RUN=0
 YES=0
 FORCE=0
@@ -2348,6 +2348,12 @@ write_makefile() {
 			echo "edited-ai:"
 			echo "	@python3 vibe_scripts/agent-check-edited.py"
 		fi
+		if [[ -f .codex/hooks/post_tool_use.py ]]; then
+			echo
+			echo ".PHONY: savings-ai"
+			echo "savings-ai:"
+			echo "	@python3 .codex/hooks/post_tool_use.py --report"
+		fi
 		if [[ -f vibe_scripts/update-codebase-wiki.py || -d codebase-wiki || "$helper_expected" -eq 1 ]]; then
 			echo
 			echo ".PHONY: wiki-ai"
@@ -2600,6 +2606,9 @@ if [[ "$DRY_RUN" -eq 0 ]]; then
 	log "Final checks:"
 	log "  make edited-ai   # format/lint/typecheck edited files with capped AI output"
 	log "  make verify-ai   # broader AI-safe quality/security checks"
+	if [[ -f .codex/hooks/post_tool_use.py ]]; then
+		log "  make savings-ai  # show the latest Codex session's context-reduction estimates"
+	fi
 	if [[ -f vibe_scripts/update-codebase-wiki.py || -d codebase-wiki ]]; then
 		log "  make wiki-ai     # refresh generated codebase-wiki sections"
 	fi

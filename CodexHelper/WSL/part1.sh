@@ -4,7 +4,7 @@
 # repo-local Codex workflow files. Semgrep and project linters are handled by
 # part2.sh.
 #
-# Version: 2026-09-07-v28
+# Version: 2026-09-07-v29
 #
 # Safe defaults:
 # - Prompts before network installs unless --yes is passed.
@@ -16,7 +16,7 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 
 SCRIPT_NAME="$(basename "$0")"
-SCRIPT_VERSION="2026-09-07-v28"
+SCRIPT_VERSION="2026-09-07-v29"
 YES=0
 DRY_RUN=0
 FORCE=0
@@ -1822,6 +1822,7 @@ Prefer existing project commands. These standard targets should exist after boot
 ```bash
 make setup
 make edited-ai
+make savings-ai
 make wiki-ai
 make lint-ai
 make typecheck-ai
@@ -4458,11 +4459,236 @@ EOF_RTK_HOOK
 	post_hook=$(
 		cat <<'EOF_POST_HOOK'
 #!/usr/bin/env python3
-"""Codex PostToolUse hook placeholder.
-It currently does not block anything; use it for future logging/verification context.
-"""
+"""Track low-overhead, session-scoped token-reduction estimates."""
 
-# Successful command hooks may exit 0 without writing a JSON response.
+from __future__ import annotations
+
+import fcntl
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Callable
+
+
+CRG_NAME = re.compile(r"code[-_]review[-_]graph")
+SAVED_LINE = re.compile(
+    r"(?im)^\s*(?:[|│]\s*)?(?:saved|estimated savings):\s*([\d,]+)\s+tokens\b"
+)
+
+
+def read_payload() -> dict[str, Any]:
+    try:
+        value = json.load(sys.stdin)
+    except (json.JSONDecodeError, OSError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def repo_root() -> Path:
+    return Path(__file__).resolve().parents[2]
+
+
+def now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def safe_session_id(value: Any) -> str:
+    if not isinstance(value, str):
+        return ""
+    return "".join(char if char.isalnum() or char in "-_" else "_" for char in value)
+
+
+def state_dir(root: Path) -> Path:
+    return root / ".cache" / "session-token-savings"
+
+
+def rtk_summary(root: Path) -> dict[str, int] | None:
+    rtk = shutil.which("rtk")
+    if not rtk:
+        return None
+    try:
+        completed = subprocess.run(
+            [rtk, "gain", "--project", "--format", "json"],
+            cwd=root,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+            check=False,
+        )
+        document = json.loads(completed.stdout) if completed.returncode == 0 else {}
+        summary = document.get("summary", {})
+        if not isinstance(summary, dict):
+            return None
+        return {
+            key: max(0, int(summary.get(key, 0)))
+            for key in ("total_commands", "total_input", "total_output", "total_saved")
+        }
+    except (OSError, ValueError, TypeError, subprocess.TimeoutExpired):
+        return None
+
+
+def new_state(root: Path, session_id: str) -> dict[str, Any]:
+    return {
+        "session_id": session_id,
+        "started_at": now(),
+        "updated_at": now(),
+        "rtk_start": rtk_summary(root),
+        "crg_calls": 0,
+        "crg_saved": 0,
+        "seen_tool_ids": [],
+    }
+
+
+def update_state(
+    root: Path,
+    session_id: str,
+    change: Callable[[dict[str, Any]], None],
+) -> dict[str, Any]:
+    directory = state_dir(root)
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"{session_id}.json"
+    lock_path = directory / f"{session_id}.lock"
+    with lock_path.open("a+", encoding="utf-8") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            state = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else new_state(root, session_id)
+        except (json.JSONDecodeError, OSError):
+            state = new_state(root, session_id)
+        change(state)
+        state["updated_at"] = now()
+        temporary = path.with_suffix(f".{os.getpid()}.tmp")
+        temporary.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        temporary.replace(path)
+        return state
+
+
+def find_savings(value: Any) -> int | None:
+    if isinstance(value, dict):
+        estimate = value.get("context_savings")
+        if isinstance(estimate, dict):
+            saved = estimate.get("saved_tokens")
+            if isinstance(saved, (int, float)) and not isinstance(saved, bool):
+                return max(0, int(saved))
+        for nested in value.values():
+            found = find_savings(nested)
+            if found is not None:
+                return found
+    elif isinstance(value, list):
+        for nested in value:
+            found = find_savings(nested)
+            if found is not None:
+                return found
+    elif isinstance(value, str):
+        if "Full context would be:" in value and "Graph context used:" in value:
+            match = SAVED_LINE.search(value)
+            if match:
+                return int(match.group(1).replace(",", ""))
+        if "context_savings" in value and value.lstrip().startswith(("{", "[")):
+            try:
+                return find_savings(json.loads(value))
+            except json.JSONDecodeError:
+                pass
+    return None
+
+
+def latest_state(root: Path) -> tuple[Path, dict[str, Any]] | None:
+    directory = state_dir(root)
+    candidates = list(directory.glob("*.json")) if directory.is_dir() else []
+    dated: list[tuple[float, Path]] = []
+    for path in candidates:
+        try:
+            dated.append((path.stat().st_mtime, path))
+        except OSError:
+            continue
+    for _, path in sorted(dated, reverse=True):
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        if isinstance(value, dict):
+            return path, value
+    return None
+
+
+def report(root: Path, state: dict[str, Any]) -> str:
+    start = state.get("rtk_start")
+    current = state.get("rtk_end") if state.get("ended_at") else rtk_summary(root)
+    rtk_line = "RTK output reduction: unavailable"
+    if isinstance(start, dict) and isinstance(current, dict):
+        saved = max(0, current["total_saved"] - int(start.get("total_saved", 0)))
+        commands = max(0, current["total_commands"] - int(start.get("total_commands", 0)))
+        rtk_line = f"RTK output reduction: ~{saved:,} tokens across {commands} command(s)"
+    crg_saved = max(0, int(state.get("crg_saved", 0)))
+    crg_calls = max(0, int(state.get("crg_calls", 0)))
+    return "\n".join(
+        (
+            "Session context reductions (estimated)",
+            rtk_line,
+            f"Code-review-graph context estimate: ~{crg_saved:,} tokens across {crg_calls} call(s)",
+            "Combined total: not reported because the two estimates use different baselines.",
+            "Unmeasured: quality caps, wiki reuse, instructions, and skill effects.",
+        )
+    )
+
+
+def main() -> int:
+    if "--report" in sys.argv[1:]:
+        root = repo_root()
+        latest = latest_state(root)
+        print(report(root, latest[1]) if latest else "No Codex session savings have been recorded yet.")
+        return 0
+
+    payload = read_payload()
+    root = repo_root()
+    session_id = safe_session_id(payload.get("session_id"))
+    if not session_id:
+        return 0
+    event = payload.get("hook_event_name", "")
+    if event == "SessionStart":
+        def activate(state: dict[str, Any]) -> None:
+            state.pop("ended_at", None)
+            state.pop("rtk_end", None)
+
+        update_state(root, session_id, activate)
+        return 0
+    if event == "PostToolUse":
+        tool_name = str(payload.get("tool_name", ""))
+        if tool_name != "Bash" and not CRG_NAME.search(tool_name):
+            return 0
+        saved = find_savings(payload.get("tool_response"))
+        if saved is None:
+            return 0
+        tool_id = str(payload.get("tool_use_id", ""))
+
+        def record(state: dict[str, Any]) -> None:
+            seen = [str(value) for value in state.get("seen_tool_ids", [])]
+            if tool_id and tool_id in seen:
+                return
+            state["crg_calls"] = max(0, int(state.get("crg_calls", 0))) + 1
+            state["crg_saved"] = max(0, int(state.get("crg_saved", 0))) + saved
+            if tool_id:
+                state["seen_tool_ids"] = (seen + [tool_id])[-512:]
+
+        update_state(root, session_id, record)
+        return 0
+    if event == "SessionEnd":
+        endpoint = rtk_summary(root)
+        update_state(
+            root,
+            session_id,
+            lambda value: value.update({"ended_at": now(), "rtk_end": endpoint}),
+        )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
 EOF_POST_HOOK
 	)
 	write_file ".codex/hooks/post_tool_use.py" "$post_hook" "0755"
@@ -4734,14 +4960,23 @@ command = 'root="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0; hook="
 timeout = 30
 statusMessage = "Blocking uncontrolled quality, Git-writing, and destructive commands"
 
+[[hooks.SessionStart]]
+matcher = "^(startup|resume|clear|compact)$"
+
+[[hooks.SessionStart.hooks]]
+type = "command"
+command = 'root="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0; hook="$root/.codex/hooks/post_tool_use.py"; [ -f "$hook" ] || exit 0; exec python3 "$hook"'
+timeout = 15
+statusMessage = "Starting session savings tracker"
+
 [[hooks.PostToolUse]]
-matcher = "^Bash$"
+matcher = "^(Bash|mcp__code[-_]review[-_]graph__.*)$"
 
 [[hooks.PostToolUse.hooks]]
 type = "command"
 command = 'root="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0; hook="$root/.codex/hooks/post_tool_use.py"; [ -f "$hook" ] || exit 0; exec python3 "$hook"'
 timeout = 30
-statusMessage = "Recording command result"
+statusMessage = "Recording session context estimates"
 
 [[hooks.PostToolUse]]
 matcher = "^(apply_patch|Edit|Write)$"
@@ -4759,6 +4994,15 @@ type = "command"
 command = 'root="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0; hook="$root/.codex/hooks/stop_edited_check.py"; [ -f "$hook" ] || exit 0; exec python3 "$hook"'
 timeout = 300
 statusMessage = "Running edited-file quality gate"
+
+[[hooks.SessionEnd]]
+matcher = "^other$"
+
+[[hooks.SessionEnd.hooks]]
+type = "command"
+command = 'root="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0; hook="$root/.codex/hooks/post_tool_use.py"; [ -f "$hook" ] || exit 0; exec python3 "$hook"'
+timeout = 15
+statusMessage = "Finalizing session context estimates"
 EOF_CODEX_CONFIG_TAIL
 		}
 	)
@@ -5099,6 +5343,9 @@ print_next_steps() {
    make verify-ai
    ./vibe_scripts/agent-verify.sh
 
+   View the latest session's reduction estimates with:
+   make savings-ai
+
 3. Populate the repo memory wiki
    make wiki-ai
    Review codebase-wiki/ before relying on generated sections.
@@ -5111,8 +5358,9 @@ print_next_steps() {
    Unless --no-codex-hooks was used, this bootstrap writes project hooks under .codex/ that make Codex run the
    formatter, linter, and typechecker on edited files:
    - PreToolUse routes eligible shell output through RTK when that hook is enabled and RTK is installed.
+   - SessionStart/PostToolUse record RTK and code-review-graph estimates without printing into the model context.
    - PostToolUse for apply_patch/Edit/Write checks each edited file.
-   - Stop rechecks recorded edited files before Codex finishes a turn.
+   - Stop rechecks recorded edited files before Codex finishes a turn; SessionEnd quietly finalizes the session record.
 
    Restart Codex in this repo, open /hooks, review/trust the project hooks,
    then start a new thread. Codex will skip changed non-managed hooks until

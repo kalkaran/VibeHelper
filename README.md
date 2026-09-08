@@ -96,15 +96,15 @@ the request.
 
 When RTK is installed, the generated command-routing hook can trim eligible
 read-only output before the assistant sees it. Shell expansions and potentially
-mutating commands pass through unchanged. Savings depend on the command, but
-these are reasonable estimates:
+mutating commands pass through unchanged. RTK records the raw and filtered
+output sizes for routed commands and estimates tokens from those sizes. The
+result is useful for comparing output reduction, but it is not a model-provider
+usage or billing count.
 
-- `git status` or a short `ls`: about 50-150 tokens saved when the raw output
-  includes untracked files or repeated metadata.
-- `git diff`, `git log`, `grep`, or `rg` output across several files: often
-  500-2,000 tokens saved.
-- Very large diffs, logs, or search results: commonly 5,000+ tokens saved because
-  RTK keeps the useful summary instead of sending the whole dump.
+CodexHelper records RTK's project-counter change during a Codex session and
+code-review-graph's own context estimate. Run `make savings-ai` for the latest
+report. The figures stay separate because they measure different baselines;
+VibeHelper does not claim a combined total for features that cannot be measured.
 
 ## What gets added
 
@@ -117,7 +117,7 @@ Depending on the helper and options you choose, VibeHelper can add:
 - `notes/` session logs
 - helper scripts for edited-file checks
 - Makefile commands such as `make edited-ai`, `make lint-ai`, `make verify-ai`,
-  `make wiki-ai`, `make skills-check`, and `make skills-update`
+  `make savings-ai`, `make wiki-ai`, `make skills-check`, and `make skills-update`
 
 ## What it can install
 
