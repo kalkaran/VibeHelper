@@ -4,7 +4,7 @@
 # repo-local Codex workflow files. Semgrep and project linters are handled by
 # part2.sh.
 #
-# Version: 2026-09-07-v29
+# Version: 2026-09-08-v30
 #
 # Safe defaults:
 # - Prompts before network installs unless --yes is passed.
@@ -16,7 +16,7 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 
 SCRIPT_NAME="$(basename "$0")"
-SCRIPT_VERSION="2026-09-07-v29"
+SCRIPT_VERSION="2026-09-08-v30"
 YES=0
 DRY_RUN=0
 FORCE=0
@@ -1166,6 +1166,25 @@ context7_codex_configured() {
 		grep -Eq '^[[:space:]]*url:[[:space:]]*https://mcp\.context7\.com/mcp/oauth[[:space:]]*$' <<<"$output"
 }
 
+context7_codex_login() {
+	if ! have codex; then
+		warn "Cannot start Context7 OAuth login because codex was not found."
+		record_install_failed "Context7 OAuth login failed: codex missing"
+		return 1
+	fi
+	if run codex codex mcp login context7; then
+		if [[ "$DRY_RUN" == "1" ]]; then
+			record_install_skipped "Context7 OAuth login would run (dry-run)"
+		else
+			record_install_ok "Context7 OAuth login completed"
+		fi
+		return 0
+	fi
+	warn "Context7 OAuth login failed."
+	record_install_failed "Context7 OAuth login failed"
+	return 1
+}
+
 setup_impeccable() {
 	local impeccable_args=(impeccable skills install -y --providers=codex --scope=project)
 	[[ "$FORCE" == "1" ]] && impeccable_args+=(--force)
@@ -1540,18 +1559,25 @@ install_global_tools() {
 		fi
 	fi
 
-	# Context7: hosted OAuth, ask only when the exact enabled registration is absent or explicitly requested.
-	if [[ "$CONTEXT7_EXPLICIT" != "1" ]] && context7_codex_configured; then
-		log "Context7 MCP is already enabled at https://mcp.context7.com/mcp/oauth; skipping setup."
-		record_install_ok "Context7 MCP already configured"
+	# Context7: keep a correct registration, but let fresh/explicit runs complete OAuth.
+	if context7_codex_configured; then
+		record_install_ok "Context7 MCP already registered"
+		if [[ "$FRESH_INSTALL" == "1" || "$CONTEXT7_EXPLICIT" == "1" ]]; then
+			log "Context7 MCP is already registered; starting OAuth login."
+			context7_codex_login || true
+		else
+			log "Context7 MCP is already registered at https://mcp.context7.com/mcp/oauth; skipping setup. Use --context7 to rerun OAuth login."
+		fi
 	elif [[ "$RUN_CONTEXT7" == "1" || "$YES" != "1" ]]; then
 		if have npx; then
 			if confirm "Configure Context7 MCP for Codex with hosted OAuth?"; then
 				if [[ "$DRY_RUN" == "1" ]]; then
 					run npx npx ctx7 setup --codex --mcp --oauth -y
 					record_install_skipped "Context7 setup would run (dry-run)"
+					context7_codex_login || true
 				elif run npx npx ctx7 setup --codex --mcp --oauth -y; then
 					record_install_ok "Context7 setup completed"
+					context7_codex_login || true
 				else
 					warn "Context7 setup failed."
 					record_install_failed "Context7 setup failed"
@@ -1870,6 +1896,7 @@ Context7:
 
 ```bash
 npx ctx7 setup --codex --mcp --oauth -y
+codex mcp login context7
 ```
 
 Use Context7 when work depends on external library, framework, API, setup, or configuration details.
@@ -5399,8 +5426,9 @@ EOF_PONYTAIL_NOT_CONFIGURED
 
 	cat <<'EOF_NEXT'
 7. Context7
-   Run when ready for interactive OAuth/API setup:
+   To register and authenticate Context7 manually:
    npx ctx7 setup --codex --mcp --oauth -y
+   codex mcp login context7
 
 EOF_NEXT
 
