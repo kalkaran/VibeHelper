@@ -51,6 +51,16 @@ Ordinary `--force` updates skip Context7 setup and keep the existing
 code-review-graph MCP configuration unless the code-review-graph package
 version changes. New and fresh installs configure the MCP integration.
 
+Chrome DevTools MCP is configured by default with
+`npx chrome-devtools-mcp@latest`. The installer checks the effective Codex MCP
+registration first, preserves correct registrations and custom launch options,
+and prompts before adding missing or replacing stale settings. `--yes` adds a
+missing registration non-interactively; `--force` or explicit `--chrome-mcp`
+replaces stale settings non-interactively. Use `--no-chrome-mcp` to skip it.
+The installer requires a package-supported Node.js version (currently
+`^20.19.0 || ^22.12.0 || >=23`), npm, and current stable Chrome. On WSL,
+install Linux Chrome or configure an explicit browser connection.
+
 For a non-interactive fresh setup that replaces helper-managed skill/tool
 files, use:
 
@@ -105,7 +115,8 @@ Generated `AGENTS.md` files require a separate reviewer agent after substantive
 coding to check for breaking changes, scope creep, and drift from the request.
 
 To install missing tools and replace helper-managed skill/tool files, including
-Impeccable and Context7 configured for Codex, use `--fresh-install`:
+Impeccable, Context7, and Chrome DevTools MCP configured for Codex, use
+`--fresh-install`:
 
 ```sh
 bash /path/to/CodexHelper/MacOS/part1.sh --fresh-install --no-apply-codex-config

@@ -44,6 +44,8 @@ Options:
   --no-system-packages  On WSL, skip the apt-get bootstrap of base packages.
   --crg-build     Build the code-review-graph index for the repo after install.
   --no-context7   Do not run Context7 setup (npx ctx7 setup).
+  --chrome-mcp    Configure or repair Chrome DevTools MCP in part 1.
+  --no-chrome-mcp Do not configure Chrome DevTools MCP.
   --impeccable    Install Impeccable design skill/hooks (included by fresh install).
   --with-llm-council  Clone karpathy/llm-council locally.
   --repo-only     Only write repo files; skip all global tool installs.
@@ -104,7 +106,7 @@ while [[ $# -gt 0 ]]; do
 		WIRE_MODE="no-wire"
 		shift
 		;;
-	--no-humanizer | --no-rtk | --no-graphify | --no-ponytail | --no-crg | --crg-build | --no-context7 | --impeccable | --with-llm-council | --repo-only | --skip-global | --no-system-packages)
+	--no-humanizer | --no-rtk | --no-graphify | --no-ponytail | --no-crg | --crg-build | --no-context7 | --chrome-mcp | --no-chrome-mcp | --impeccable | --with-llm-council | --repo-only | --skip-global | --no-system-packages)
 		PART1_ONLY_ARGS+=("$1")
 		shift
 		;;
@@ -134,7 +136,7 @@ remove_gitignore_block() {
 	tmp="$(mktemp)"
 	awk '
 		$0 == "# VibeHelper local AI/dev tooling" { skip = 1; next }
-		skip && ($0 == "*.bak" || $0 == "*.bak.*" || $0 == ".cache/" || $0 == ".agents/" || $0 == ".claude/" || $0 == ".codex/" || $0 == ".mcp.json" || $0 == "AGENTS.md" || $0 == "CLAUDE.md" || $0 == "Makefile" || $0 == "agent/" || $0 == "agents/" || $0 == "codebase-wiki/" || $0 == "graphify-out/" || $0 == "node_modules/" || $0 == "notes/" || $0 == "obsidian/" || $0 == "vendor/" || $0 == "vibe_scripts/" || $0 == "skills-lock.json" || $0 == "biome.json") { next }
+		skip && ($0 == "*.bak" || $0 == "*.bak.*" || $0 == ".cache/" || $0 == ".agents/" || $0 == ".claude/" || $0 == ".codex/" || $0 == ".mcp.json" || $0 == "AGENTS.md" || $0 == "CLAUDE.md" || $0 == "Makefile" || $0 == "agent/" || $0 == "agents/" || $0 == "codebase-wiki/" || $0 == "graphify-out/" || $0 == "node_modules/" || $0 == "notes/" || $0 == "obsidian/" || $0 == "vendor/" || $0 == "vibe_scripts/" || $0 == "/vibe_scripts/" || $0 == "skills-lock.json" || $0 == "/skills-lock.json" || $0 == "biome.json") { next }
 		{ skip = 0; print }
 	' .gitignore >"$tmp"
 	if cmp -s "$tmp" .gitignore; then

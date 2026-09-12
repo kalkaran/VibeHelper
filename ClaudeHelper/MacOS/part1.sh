@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # Bootstrap a small Claude Code workflow into the current repository.
 #
-# Version: 2026-09-06-v11
+# Version: 2026-09-11-v12
 
 set -Eeuo pipefail
 IFS=$'\n\t'
 
 SCRIPT_NAME="$(basename "$0")"
-SCRIPT_VERSION="2026-09-06-v11"
+SCRIPT_VERSION="2026-09-11-v12"
 DRY_RUN=0
 FORCE=0
 FRESH_INSTALL="${CLAUDE_HELPER_FRESH_INSTALL:-0}"
@@ -21,6 +21,8 @@ RUN_PONYTAIL=1
 RUN_CRG=1
 RUN_CRG_BUILD=0
 RUN_CONTEXT7=1
+RUN_CHROME_MCP=1
+CHROME_MCP_EXPLICIT=0
 RUN_IMPECCABLE="$FRESH_INSTALL"
 WITH_LLM_COUNCIL=0
 SKIP_GLOBAL=0
@@ -48,6 +50,8 @@ Options:
   --no-crg        Do not install/register code-review-graph.
   --crg-build     Build the code-review-graph index for this repo after install.
   --no-context7   Do not run Context7 setup (npx ctx7 setup).
+  --chrome-mcp    Configure or repair Chrome DevTools MCP for Claude Code.
+  --no-chrome-mcp Do not configure Chrome DevTools MCP.
   --impeccable    Install Impeccable for Claude Code (included by fresh install).
   --with-llm-council
                   Clone karpathy/llm-council into ~/.local/share/llm-council.
@@ -112,6 +116,15 @@ while [[ $# -gt 0 ]]; do
 		;;
 	--no-context7)
 		RUN_CONTEXT7=0
+		shift
+		;;
+	--chrome-mcp)
+		RUN_CHROME_MCP=1
+		CHROME_MCP_EXPLICIT=1
+		shift
+		;;
+	--no-chrome-mcp)
+		RUN_CHROME_MCP=0
 		shift
 		;;
 	--impeccable)
@@ -465,7 +478,7 @@ append_gitignore_block() {
 	local marker="# VibeHelper local AI/dev tooling"
 	local block
 	local existed=0
-	block=$'# VibeHelper local AI/dev tooling\n*.bak\n*.bak.*\n.cache/\n.agents/\n.claude/\n.codex/\n.mcp.json\nAGENTS.md\nCLAUDE.md\nMakefile\nagent/\nagents/\ncodebase-wiki/\ngraphify-out/\nnode_modules/\nnotes/\nobsidian/\nvendor/\nvibe_scripts/\nskills-lock.json\nbiome.json\n'
+	block=$'# VibeHelper local AI/dev tooling\n*.bak\n*.bak.*\n.cache/\n.agents/\n.claude/\n.codex/\n.mcp.json\nAGENTS.md\nCLAUDE.md\nMakefile\nagent/\nagents/\ncodebase-wiki/\ngraphify-out/\nnode_modules/\nnotes/\nobsidian/\nvendor/\n/vibe_scripts/\n/skills-lock.json\nbiome.json\n'
 	if [[ "$DRY_RUN" -eq 1 ]]; then
 		log "Would ensure .gitignore has VibeHelper local-file entries"
 		return 0
@@ -874,6 +887,187 @@ setup_context7() {
 	fi
 	log "Running Context7 setup for this project."
 	npx ctx7 setup --claude --mcp -p -y || warn "Context7 setup failed; run 'npx ctx7 setup' manually to finish it interactively."
+}
+
+chrome_mcp_claude_state() {
+	python3 - "$HOME/.claude.json" "$ROOT/.mcp.json" "$ROOT" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+user_path, project_path, root = map(Path, sys.argv[1:])
+
+
+def load(path):
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        print(f"invalid||{path}")
+        raise SystemExit
+    return data if isinstance(data, dict) else {}
+
+
+user = load(user_path)
+project = load(project_path)
+projects = user.get("projects", {})
+projects = projects if isinstance(projects, dict) else {}
+local = projects.get(str(root.resolve()), {})
+local = local if isinstance(local, dict) else {}
+sources = (
+    ("local", user_path, local.get("mcpServers", {})),
+    ("project", project_path, project.get("mcpServers", {})),
+    ("user", user_path, user.get("mcpServers", {})),
+)
+for scope, path, servers in sources:
+    server = servers.get("chrome-devtools") if isinstance(servers, dict) else None
+    if server is None:
+        continue
+    args = server.get("args", []) if isinstance(server, dict) else []
+    args = args if isinstance(args, list) else []
+    command = server.get("command", "") if isinstance(server, dict) else ""
+    if args[:1] in (["-y"], ["--yes"]):
+        args = args[1:]
+    current = (
+        isinstance(server, dict)
+        and server.get("type", "stdio") == "stdio"
+        and isinstance(command, str)
+        and Path(command).name in {"npx", "npx.cmd"}
+        and args[:1] == ["chrome-devtools-mcp@latest"]
+    )
+    print(f"{'current' if current else 'stale'}|{scope}|{path}")
+    break
+else:
+    print("missing||")
+PY
+}
+
+chrome_mcp_claude_plugin_installed() {
+	local output
+	output="$(claude plugin list --json 2>/dev/null || true)"
+	python3 -c 'import json, sys
+try:
+    plugins = json.load(sys.stdin)
+except (json.JSONDecodeError, OSError):
+    raise SystemExit(1)
+raise SystemExit(not any(
+    isinstance(item, dict)
+    and item.get("id") == "chrome-devtools-mcp@chrome-devtools-plugins"
+    and item.get("enabled", True)
+    for item in plugins if isinstance(plugins, list)
+))' <<<"$output"
+}
+
+chrome_mcp_node_ready() {
+	local version major minor
+	version="$(node --version 2>/dev/null || true)"
+	version="${version#v}"
+	IFS=. read -r major minor _ <<<"$version"
+	if [[ "$major" =~ ^[0-9]+$ && "$minor" =~ ^[0-9]+$ ]] &&
+		((major == 20 && minor >= 19 || major == 22 && minor >= 12 || major >= 23)); then
+		return 0
+	fi
+	warn "Chrome DevTools MCP requires a package-supported Node.js version (^20.19.0 || ^22.12.0 || >=23); found ${version:-no usable Node.js}. Skipping registration."
+	return 1
+}
+
+chrome_browser_available() {
+	command -v google-chrome >/dev/null 2>&1 || command -v google-chrome-stable >/dev/null 2>&1 ||
+		[[ -d "/Applications/Google Chrome.app" || -d "$HOME/Applications/Google Chrome.app" ]]
+}
+
+update_chrome_mcp_registration() {
+	local scope="$1" config_path="$2" backup
+	if [[ "$DRY_RUN" -eq 1 ]]; then
+		run_tool claude mcp remove chrome-devtools --scope "$scope"
+		run_tool claude mcp add chrome-devtools --scope "$scope" -- npx chrome-devtools-mcp@latest
+		return 0
+	fi
+	backup="$(mktemp)"
+	if ! cp "$config_path" "$backup"; then
+		warn "Could not back up the existing Chrome DevTools MCP configuration; leaving it unchanged."
+		rm -f "$backup"
+		return 1
+	fi
+	if run_tool claude mcp remove chrome-devtools --scope "$scope" &&
+		run_tool claude mcp add chrome-devtools --scope "$scope" -- npx chrome-devtools-mcp@latest; then
+		rm -f "$backup"
+		return 0
+	fi
+	if cp "$backup" "$config_path"; then
+		warn "Chrome DevTools MCP update failed; restored the previous $scope configuration."
+	else
+		err "Chrome DevTools MCP update failed and the previous configuration could not be restored from $backup."
+		return 1
+	fi
+	rm -f "$backup"
+	return 1
+}
+
+setup_chrome_mcp() {
+	[[ "$RUN_CHROME_MCP" -eq 1 ]] || return 0
+	if ! command -v claude >/dev/null 2>&1; then
+		warn "claude was not found; skipping Chrome DevTools MCP setup."
+		return 0
+	fi
+
+	local state scope config_path configured=0
+	IFS='|' read -r state scope config_path <<<"$(chrome_mcp_claude_state)"
+	if [[ "$state" == "missing" ]] && chrome_mcp_claude_plugin_installed; then
+		log "Chrome DevTools MCP is already installed as an enabled Claude plugin; leaving it unchanged."
+		if ! chrome_browser_available; then
+			warn "Chrome was not detected. Chrome DevTools MCP requires current stable Chrome before use."
+		fi
+		return 0
+	fi
+	if ! chrome_mcp_node_ready; then
+		return 0
+	fi
+	if ! command -v npx >/dev/null 2>&1; then
+		warn "npx was not found; install Node.js LTS and npm, then rerun to configure Chrome DevTools MCP."
+		return 0
+	fi
+
+	case "$state" in
+	current)
+		log "Chrome DevTools MCP is already registered with @latest; npx will resolve updates when it starts."
+		configured=1
+		;;
+	missing)
+		if run_tool claude mcp add chrome-devtools --scope user -- npx chrome-devtools-mcp@latest; then
+			if [[ "$DRY_RUN" -eq 1 ]]; then
+				log "Would register Chrome DevTools MCP for Claude Code."
+			else
+				log "Registered Chrome DevTools MCP for Claude Code."
+			fi
+			configured=1
+		else
+			warn "Chrome DevTools MCP registration failed."
+		fi
+		;;
+	stale)
+		if [[ "$REFRESH_TOOLS" -eq 1 || "$CHROME_MCP_EXPLICIT" -eq 1 ]]; then
+			if update_chrome_mcp_registration "$scope" "$config_path"; then
+				if [[ "$DRY_RUN" -eq 1 ]]; then
+					log "Would update the existing $scope Chrome DevTools MCP registration."
+				else
+					log "Updated the existing $scope Chrome DevTools MCP registration."
+				fi
+				configured=1
+			fi
+		else
+			warn "Chrome DevTools MCP is registered at $scope scope with different settings; rerun with --force or --chrome-mcp to update it."
+		fi
+		;;
+	*)
+		warn "Could not safely read the existing Claude MCP configuration at $config_path; leaving it unchanged."
+		;;
+	esac
+
+	if [[ "$configured" -eq 1 ]] && ! chrome_browser_available; then
+		warn "Chrome was not detected. Chrome DevTools MCP requires current stable Chrome before use."
+	fi
 }
 
 setup_impeccable() {
@@ -2362,6 +2556,7 @@ else
 	install_humanizer
 	install_unlazy
 	setup_context7
+	setup_chrome_mcp
 	setup_impeccable
 	clone_llm_council
 fi

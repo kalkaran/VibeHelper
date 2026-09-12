@@ -79,10 +79,19 @@ Makefile while refreshing ClaudeHelper-managed tools. Ordinary `--force`
 updates skip Context7 setup. They also keep the existing code-review-graph MCP
 configuration unless the code-review-graph package version changes.
 
+Both installers configure Chrome DevTools MCP through
+`npx chrome-devtools-mcp@latest`. A correct existing registration is left
+unchanged on normal, force, and fresh runs because `@latest` resolves updates
+when the server starts. `--force` repairs stale registrations; use
+`--no-chrome-mcp` to skip setup. Chrome itself is not installed: use current
+stable Chrome and a package-supported Node.js version (currently
+`^20.19.0 || ^22.12.0 || >=23`). Inside WSL, install Linux Chrome or configure
+an explicit connection to Chrome running outside WSL.
+
 Both helpers have a non-interactive fresh setup that installs missing tools and
 replaces existing helper-managed skill and tool files. Codex fresh installs
-explicitly target Codex, including Humanizer, Unlazy, Graphify, Context7, and
-Impeccable:
+explicitly target Codex, including Humanizer, Unlazy, Graphify, Context7,
+Chrome DevTools MCP, and Impeccable:
 
 ```sh
 bash /path/to/VibeHelper/CodexHelper/install.sh --fresh-install --yes
@@ -131,6 +140,8 @@ Defaults and opt-in tools differ between the two helpers. They can install:
   less stiff.
 - Context7: gives agents current library and framework docs when they need API
   details.
+- Chrome DevTools MCP: lets Codex or Claude Code inspect and control Chrome for
+  browser debugging.
 - Ponytail: pushes agents toward smaller changes and less overbuilt code.
 - Unlazy: keeps long or multi-part tasks moving until their acceptance checks
   pass.

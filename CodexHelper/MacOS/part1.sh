@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Bootstrap a token-efficient, quality-focused AI coding workflow for Codex.
-# Installs/configures: RTK, Ponytail, Humanizer, code-review-graph, optional
-# Context7/Impeccable, and repo-local Codex workflow files. Semgrep and project
+# Installs/configures: RTK, Ponytail, Humanizer, code-review-graph, Chrome
+# DevTools MCP, optional Context7/Impeccable, and repo-local Codex workflow files. Semgrep and project
 # linters are handled by part2.sh.
 #
-# Version: 2026-09-08-v30
+# Version: 2026-09-11-v31
 #
 # Safe defaults:
 # - Prompts before network installs unless --yes is passed.
@@ -16,7 +16,7 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 
 SCRIPT_NAME="$(basename "$0")"
-SCRIPT_VERSION="2026-09-08-v30"
+SCRIPT_VERSION="2026-09-11-v31"
 YES=0
 DRY_RUN=0
 FORCE=0
@@ -25,6 +25,8 @@ SKIP_GLOBAL=0
 WITH_LLM_COUNCIL=0
 RUN_CONTEXT7=0
 CONTEXT7_EXPLICIT=0
+RUN_CHROME_MCP=1
+CHROME_MCP_EXPLICIT=0
 RUN_IMPECCABLE=0
 RUN_HUMANIZER=1
 RUN_SECURITY_SCAN=0
@@ -64,6 +66,8 @@ Options:
   --with-llm-council    Clone Karpathy llm-council into ~/.local/share/llm-council.
   --context7            Configure Context7 MCP for Codex with hosted OAuth.
                         Included by --fresh-install.
+  --chrome-mcp          Configure or repair Chrome DevTools MCP for Codex.
+  --no-chrome-mcp       Do not configure Chrome DevTools MCP.
   --impeccable          Install Impeccable design skill/hooks for Codex.
                         Included by --fresh-install.
   --no-humanizer        Do not install Humanizer writing skill for Codex.
@@ -130,6 +134,11 @@ for arg in "$@"; do
 		RUN_CONTEXT7=1
 		CONTEXT7_EXPLICIT=1
 		;;
+	--chrome-mcp)
+		RUN_CHROME_MCP=1
+		CHROME_MCP_EXPLICIT=1
+		;;
+	--no-chrome-mcp) RUN_CHROME_MCP=0 ;;
 	--impeccable) RUN_IMPECCABLE=1 ;;
 	--no-humanizer) RUN_HUMANIZER=0 ;;
 	--codex-hooks) CREATE_CODEX_HOOKS=1 ;;
@@ -1252,6 +1261,107 @@ context7_codex_login() {
 	return 1
 }
 
+chrome_mcp_codex_state() {
+	local output
+	output="$(codex mcp get chrome-devtools --json 2>/dev/null)" || {
+		printf '%s\n' missing
+		return 0
+	}
+	node -e 'const path = require("path");
+let config;
+try { config = JSON.parse(require("fs").readFileSync(0, "utf8")); }
+catch { console.log("stale"); process.exit(); }
+const transport = config && typeof config === "object" ? config.transport : null;
+let args = transport && Array.isArray(transport.args) ? transport.args : [];
+if (args[0] === "-y" || args[0] === "--yes") args = args.slice(1);
+const command = transport && typeof transport.command === "string" ? transport.command : "";
+const current = config && config.enabled === true && transport && transport.type === "stdio"
+  && ["npx", "npx.cmd"].includes(path.basename(command).toLowerCase())
+  && args[0] === "chrome-devtools-mcp@latest";
+console.log(current ? "current" : "stale");' <<<"$output"
+}
+
+chrome_mcp_node_ready() {
+	local version major minor
+	version="$(node --version 2>/dev/null || true)"
+	version="${version#v}"
+	IFS=. read -r major minor _ <<<"$version"
+	if [[ "$major" =~ ^[0-9]+$ && "$minor" =~ ^[0-9]+$ ]] &&
+		((major == 20 && minor >= 19 || major == 22 && minor >= 12 || major >= 23)); then
+		return 0
+	fi
+	warn "Chrome DevTools MCP requires a package-supported Node.js version (^20.19.0 || ^22.12.0 || >=23); found ${version:-no usable Node.js}. Skipping registration."
+	return 1
+}
+
+chrome_browser_available() {
+	have google-chrome || have google-chrome-stable ||
+		[[ -d "/Applications/Google Chrome.app" || -d "$HOME/Applications/Google Chrome.app" ]]
+}
+
+setup_chrome_mcp() {
+	if [[ "$RUN_CHROME_MCP" != "1" ]]; then
+		record_install_skipped "Chrome DevTools MCP skipped by user"
+		return 0
+	fi
+	if ! have codex; then
+		warn "Cannot configure Chrome DevTools MCP because codex was not found."
+		record_install_skipped "Chrome DevTools MCP skipped: codex unavailable"
+		return 0
+	fi
+	if ! chrome_mcp_node_ready; then
+		record_install_skipped "Chrome DevTools MCP skipped: unsupported Node.js"
+		return 0
+	fi
+	if ! have npx; then
+		warn "Cannot configure Chrome DevTools MCP because npx was not found. Install Node.js LTS and npm, then rerun."
+		record_install_skipped "Chrome DevTools MCP skipped: npx unavailable"
+		return 0
+	fi
+
+	local state configured=0
+	state="$(chrome_mcp_codex_state)"
+	if [[ "$state" == "current" ]]; then
+		log "Chrome DevTools MCP is already registered with @latest; npx will resolve updates when it starts."
+		record_install_ok "Chrome DevTools MCP already registered"
+		configured=1
+	elif [[ "$state" == "missing" ]]; then
+		if confirm "Configure Chrome DevTools MCP for Codex?"; then
+			if run codex codex mcp add chrome-devtools -- npx chrome-devtools-mcp@latest; then
+				if [[ "$DRY_RUN" == "1" ]]; then
+					record_install_skipped "Chrome DevTools MCP registration would run (dry-run)"
+				else
+					record_install_ok "Chrome DevTools MCP registered"
+				fi
+				configured=1
+			else
+				warn "Chrome DevTools MCP registration failed."
+				record_install_failed "Chrome DevTools MCP registration failed"
+			fi
+		else
+			record_install_skipped "Chrome DevTools MCP registration skipped by user"
+		fi
+	elif [[ "$FORCE" == "1" || "$CHROME_MCP_EXPLICIT" == "1" ]] || confirm "Chrome DevTools MCP is registered with different settings. Replace them with npx chrome-devtools-mcp@latest?"; then
+		if run codex codex mcp add chrome-devtools -- npx chrome-devtools-mcp@latest; then
+			if [[ "$DRY_RUN" == "1" ]]; then
+				record_install_skipped "Chrome DevTools MCP update would run (dry-run)"
+			else
+				record_install_ok "Chrome DevTools MCP registration updated"
+			fi
+			configured=1
+		else
+			warn "Chrome DevTools MCP registration update failed."
+			record_install_failed "Chrome DevTools MCP registration update failed"
+		fi
+	else
+		record_install_skipped "Chrome DevTools MCP update skipped; existing settings preserved"
+	fi
+
+	if [[ "$configured" == "1" ]] && ! chrome_browser_available; then
+		warn "Chrome was not detected. Chrome DevTools MCP requires current stable Chrome before use."
+	fi
+}
+
 setup_impeccable() {
 	local impeccable_args=(impeccable skills install -y --providers=codex --scope=project)
 	[[ "$FORCE" == "1" ]] && impeccable_args+=(--force)
@@ -1594,6 +1704,8 @@ install_global_tools() {
 	else
 		warn "Context7 setup not run in --yes mode. Use --context7 to approve it non-interactively."
 	fi
+
+	setup_chrome_mcp
 
 	setup_humanizer
 	setup_unlazy
@@ -2144,7 +2256,7 @@ EOF_CONVERSATION_HEADER
 ensure_cache_gitignored() {
 	local marker="# VibeHelper local AI/dev tooling"
 	local block
-	block=$'# VibeHelper local AI/dev tooling\n*.bak\n*.bak.*\n.cache/\n.agents/\n.claude/\n.codex/\n.mcp.json\nAGENTS.md\nCLAUDE.md\nMakefile\nagent/\nagents/\ncodebase-wiki/\ngraphify-out/\nnode_modules/\nnotes/\nobsidian/\nvendor/\nvibe_scripts/\nskills-lock.json\nbiome.json\n'
+	block=$'# VibeHelper local AI/dev tooling\n*.bak\n*.bak.*\n.cache/\n.agents/\n.claude/\n.codex/\n.mcp.json\nAGENTS.md\nCLAUDE.md\nMakefile\nagent/\nagents/\ncodebase-wiki/\ngraphify-out/\nnode_modules/\nnotes/\nobsidian/\nvendor/\n/vibe_scripts/\n/skills-lock.json\nbiome.json\n'
 	if [[ "$DRY_RUN" == "1" ]]; then
 		log "Would ensure .gitignore has VibeHelper local-file entries"
 		return 0
