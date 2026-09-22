@@ -1,0 +1,30 @@
+{
+  "version": 2,
+  "skills": {
+    "humanizer": {
+      "source": "blader/humanizer",
+      "sourceType": "github",
+      "skillPath": "SKILL.md",
+      "updatePolicy": "manual"
+    },
+    "graphify": {
+      "source": "graphifyy",
+      "sourceType": "python-cli",
+      "skillPath": "SKILL.md",
+      "updatePolicy": "on-helper-upgrade"
+    },
+    "impeccable": {
+      "source": "impeccable",
+      "sourceType": "npm-cli",
+      "skillPath": "SKILL.md",
+      "updatePolicy": "manual"
+    }
+  },
+  "plugins": {
+    "ponytail": {
+      "source": "DietrichGebert/ponytail",
+      "sourceType": "plugin-marketplace",
+      "updatePolicy": "manual"
+    }
+  }
+}
