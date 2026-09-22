@@ -726,7 +726,8 @@ detect_file_signals() {
 		-o -name '.mypy_cache' \
 		-o -name '.pytest_cache' \
 		-o -name '.ruff_cache' \
-		-o -name 'obsidian' \) -prune \
+		-o -name 'obsidian' \
+		-o \( -type d -exec test -f '{}/pyvenv.cfg' \; \) \) -prune \
 		-o -type f -print0 2>/dev/null)
 
 	[[ "$PY_FILES" -gt 0 || "$PY_NOTEBOOKS" -gt 0 || "$PY_CONFIGS" -gt 0 ]] && PYTHON=1

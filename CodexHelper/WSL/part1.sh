@@ -1748,7 +1748,8 @@ has_source_file() {
 		-o -name 'build' \
 		-o -name 'coverage' \
 		-o -name '.cache' \
-		-o -name '.venv' \) -prune \
+		-o -name '.venv' \
+		-o \( -type d -exec test -f '{}/pyvenv.cfg' \; \) \) -prune \
 		-o "$@" -print -quit 2>/dev/null)"
 	[[ -n "$match" ]]
 }
@@ -1841,7 +1842,8 @@ detect_file_signals() {
 		-o -name '.mypy_cache' \
 		-o -name '.pytest_cache' \
 		-o -name '.ruff_cache' \
-		-o -name 'obsidian' \) -prune \
+		-o -name 'obsidian' \
+		-o \( -type d -exec test -f '{}/pyvenv.cfg' \; \) \) -prune \
 		-o -type f -print0 2>/dev/null)
 
 	[[ "$NODE_MANIFESTS" -gt 0 ]] && has_node=1
