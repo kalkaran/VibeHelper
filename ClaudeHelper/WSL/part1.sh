@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # Bootstrap a small Claude Code workflow into the current repository on Ubuntu WSL.
 #
-# Version: 2026-09-11-v12
+# Version: 2026-09-29-v13
 
 set -Eeuo pipefail
 IFS=$'\n\t'
 
 SCRIPT_NAME="$(basename "$0")"
-SCRIPT_VERSION="2026-09-11-v12"
+SCRIPT_VERSION="2026-09-29-v13"
 DRY_RUN=0
 FORCE=0
 FRESH_INSTALL="${CLAUDE_HELPER_FRESH_INSTALL:-0}"
@@ -2535,7 +2535,9 @@ WIKIRISKY_EOF
 Append user requests here when the project asks for session logging.
 NOTESQ_EOF
 	)"
-	write_file "notes/queries.md" "$content" 0644
+	if [[ ! -s "$ROOT/notes/queries.md" ]]; then
+		write_file "notes/queries.md" "$content" 0644
+	fi
 
 	content="$(
 		cat <<'NOTESLOG_EOF'
@@ -2544,7 +2546,26 @@ NOTESQ_EOF
 Append user requests and assistant replies here when the project asks for session logging.
 NOTESLOG_EOF
 	)"
-	write_file "notes/conversation-log.md" "$content" 0644
+	if [[ ! -s "$ROOT/notes/conversation-log.md" ]]; then
+		write_file "notes/conversation-log.md" "$content" 0644
+	fi
+
+	# Preserve transcript history, including during forced upgrades.
+	# Pasted user text must not be reformatted or fail Markdown style checks.
+	if [[ "$DRY_RUN" -eq 0 ]]; then
+		local note temporary directive="<!-- markdownlint-disable-file -->"
+		for note in "$ROOT/notes/queries.md" "$ROOT/notes/conversation-log.md"; do
+			if [[ "$(head -n 1 "$note")" != "$directive" ]]; then
+				temporary="$(mktemp "${note}.XXXXXX")"
+				cp -p "$note" "$temporary"
+				{
+					printf '%s\n\n' "$directive"
+					cat "$note"
+				} >"$temporary"
+				mv "$temporary" "$note"
+			fi
+		done
+	fi
 
 	content="$(
 		cat <<'CMDEDITED_EOF'

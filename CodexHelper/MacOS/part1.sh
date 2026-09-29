@@ -4,7 +4,7 @@
 # DevTools MCP, optional Context7/Impeccable, and repo-local Codex workflow files. Semgrep and project
 # linters are handled by part2.sh.
 #
-# Version: 2026-09-11-v31
+# Version: 2026-09-29-v32
 #
 # Safe defaults:
 # - Prompts before network installs unless --yes is passed.
@@ -16,7 +16,7 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 
 SCRIPT_NAME="$(basename "$0")"
-SCRIPT_VERSION="2026-09-11-v31"
+SCRIPT_VERSION="2026-09-29-v32"
 YES=0
 DRY_RUN=0
 FORCE=0
@@ -2253,6 +2253,20 @@ EOF_CONVERSATION_HEADER
 	else
 		log "notes/conversation-log.md already exists; leaving prior entries intact"
 	fi
+
+	# Verbatim transcripts are records, not authored Markdown documents.
+	local note temporary directive="<!-- markdownlint-disable-file -->"
+	for note in notes/queries.md notes/conversation-log.md; do
+		if [[ "$(head -n 1 "$note")" != "$directive" ]]; then
+			temporary="$(mktemp "${note}.XXXXXX")"
+			cp -p "$note" "$temporary"
+			{
+				printf '%s\n\n' "$directive"
+				cat "$note"
+			} >"$temporary"
+			mv "$temporary" "$note"
+		fi
+	done
 }
 
 ensure_cache_gitignored() {
