@@ -57,6 +57,8 @@ Options:
   --no-chrome-mcp       Do not configure Chrome DevTools MCP.
   --impeccable          Install Impeccable in part 1 (included by fresh install).
   --no-humanizer        Do not install the Humanizer writing skill in part 1.
+  --adhd                Install i-have-adhd and enable its response style (default).
+  --no-adhd             Skip i-have-adhd installation and response-style setup.
   --with-llm-council    Install the optional LLM Council integration in part 1.
   --security-scan       Run Semgrep after part 1 when Semgrep is available.
   --no-crg-build        Skip the initial code-review-graph build in part 1.
@@ -154,7 +156,7 @@ while [[ $# -gt 0 ]]; do
 		CODEX_CONFIG_FLAG="--no-apply-codex-config"
 		shift
 		;;
-	--no-codex-hooks | --no-rtk-hook | --install-prereqs | --context7 | --chrome-mcp | --no-chrome-mcp | --impeccable | --no-humanizer | --with-llm-council | --security-scan | --no-crg-build)
+	--no-codex-hooks | --no-rtk-hook | --install-prereqs | --context7 | --chrome-mcp | --no-chrome-mcp | --impeccable | --no-humanizer | --adhd | --no-adhd | --with-llm-council | --security-scan | --no-crg-build)
 		PART1_ONLY_ARGS+=("$1")
 		shift
 		;;

@@ -4,7 +4,7 @@
 # optional Context7/Impeccable, and repo-local Codex workflow files. Semgrep and project linters are handled by
 # part2.sh.
 #
-# Version: 2026-09-29-v32
+# Version: 2026-10-01-v33
 #
 # Safe defaults:
 # - Prompts before network installs unless --yes is passed.
@@ -16,7 +16,7 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 
 SCRIPT_NAME="$(basename "$0")"
-SCRIPT_VERSION="2026-09-29-v32"
+SCRIPT_VERSION="2026-10-01-v33"
 YES=0
 DRY_RUN=0
 FORCE=0
@@ -28,6 +28,7 @@ CONTEXT7_EXPLICIT=0
 RUN_CHROME_MCP=1
 CHROME_MCP_EXPLICIT=0
 RUN_IMPECCABLE=0
+RUN_ADHD=1
 RUN_HUMANIZER=1
 RUN_SECURITY_SCAN=0
 RUN_CRG_BUILD=1
@@ -72,6 +73,8 @@ Options:
   --impeccable          Install Impeccable design skill/hooks for Codex.
                         Included by --fresh-install.
   --no-humanizer        Do not install Humanizer writing skill for Codex.
+  --adhd                Install i-have-adhd and enable its response style (default).
+  --no-adhd             Skip i-have-adhd installation and response-style setup.
   --codex-hooks         Create local Codex hooks for edited-file checks and Git blocking. Enabled by default.
   --no-codex-hooks      Do not create Codex hook files/config.
   --rtk-hook            Create the RTK PreToolUse hook. Enabled by default with --codex-hooks.
@@ -142,6 +145,8 @@ for arg in "$@"; do
 		;;
 	--no-chrome-mcp) RUN_CHROME_MCP=0 ;;
 	--impeccable) RUN_IMPECCABLE=1 ;;
+	--adhd) RUN_ADHD=1 ;;
+	--no-adhd) RUN_ADHD=0 ;;
 	--no-humanizer) RUN_HUMANIZER=0 ;;
 	--codex-hooks) CREATE_CODEX_HOOKS=1 ;;
 	--no-codex-hooks) CREATE_CODEX_HOOKS=0 ;;
@@ -1167,6 +1172,27 @@ code_review_graph_version() {
 	return 0
 }
 
+normalize_codex_config() {
+	if [[ "$DRY_RUN" == "1" ]]; then
+		log "Would normalize Codex configuration: $1"
+		return 0
+	fi
+	if ! python3 "$HELPER_ROOT/templates/normalize-codex-config.py" "$@"; then
+		record_install_failed "Codex config normalization failed: $1 (requires Python 3.11+ or tomli)"
+		return 1
+	fi
+}
+
+normalize_context7_config() {
+	# ctx7 writes the conventional user file, which may differ from our selected config.
+	normalize_codex_config "$HOME/.codex/config.toml" --context-only
+	local target
+	target="$(choose_codex_config_target)"
+	if [[ "$target" != "$HOME/.codex/config.toml" ]]; then
+		normalize_codex_config "$target" --context-only
+	fi
+}
+
 context7_codex_configured() {
 	have codex || return 1
 	local output
@@ -1515,6 +1541,72 @@ maybe_install_rtk() {
 	return 1
 }
 
+enable_adhd_style() {
+	local codex_dir="${CODEX_HOME:-$HOME/.codex}"
+	local instructions="$codex_dir/AGENTS.md" content
+	if [[ -f "$codex_dir/AGENTS.override.md" ]] && grep -q '[^[:space:]]' "$codex_dir/AGENTS.override.md"; then
+		instructions="$codex_dir/AGENTS.override.md"
+	fi
+	content="$(
+		cat <<'MD'
+<!-- BEGIN CodexHelper: i-have-adhd -->
+## Default response style: i-have-adhd
+
+Apply the i-have-adhd response style from the first reply in each session.
+Keep it active until the user says "stop adhd mode" or "normal mode".
+
+1. Put the answer, command, or next action first.
+2. Number tasks with several steps; give each step one bounded action.
+3. When work remains, finish with one concrete next action.
+4. Finish the current issue before introducing another topic.
+5. Make the current progress and remaining work clear across turns.
+6. Use concrete units when giving time estimates.
+7. After making a change, say what now works.
+8. Describe errors by location, cause, and fix without dramatic language.
+9. Group long lists into at most five visible items without losing required detail.
+10. Omit filler introductions, repeated summaries, and closing pleasantries.
+
+Explain fully when asked. Preserve safety checks and follow explicit user and
+repository instructions. After three failed fixes, reconsider the assumption
+behind them. Ask one short question when ambiguity prevents useful progress.
+<!-- END CodexHelper: i-have-adhd -->
+MD
+	)"
+	mkdir -p "$codex_dir"
+	append_if_missing "$instructions" "<!-- BEGIN CodexHelper: i-have-adhd -->" "$content"
+}
+
+setup_adhd() {
+	if ! have codex; then
+		record_install_failed "i-have-adhd requires the Codex CLI"
+		return 0
+	fi
+	if ! confirm "Install i-have-adhd and enable its response style for every Codex session?"; then
+		record_install_skipped "i-have-adhd install skipped by user"
+		return 0
+	fi
+	if ! codex_plugin_marketplace_configured "i-have-adhd"; then
+		if ! run codex codex plugin marketplace add ayghri/i-have-adhd --ref main; then
+			record_install_failed "i-have-adhd marketplace add failed"
+			return 0
+		fi
+	elif [[ "$FORCE" == "1" ]]; then
+		if ! run codex codex plugin marketplace upgrade i-have-adhd; then
+			record_install_failed "i-have-adhd marketplace refresh failed"
+			return 0
+		fi
+	fi
+	if ! run codex codex plugin add i-have-adhd@i-have-adhd; then
+		record_install_failed "i-have-adhd plugin install failed"
+	elif [[ "$DRY_RUN" == "1" ]]; then
+		log "Would enable the i-have-adhd response style in global Codex instructions."
+		record_install_skipped "i-have-adhd install would run (dry-run)"
+	else
+		enable_adhd_style
+		record_install_ok "i-have-adhd installed; response style enabled for new Codex sessions"
+	fi
+}
+
 install_global_tools() {
 	if [[ "$SKIP_GLOBAL" == "1" ]]; then
 		log "Skipping global tool installs (--repo-only/--skip-global)."
@@ -1525,6 +1617,9 @@ install_global_tools() {
 	fi
 
 	log "Global tool setup"
+	if [[ "$RUN_ADHD" == "1" ]]; then
+		setup_adhd
+	fi
 
 	if [[ "$CREATE_CODEX_HOOKS" == "1" && "$CREATE_RTK_HOOK" == "1" ]]; then
 		maybe_install_rtk || true
@@ -1668,6 +1763,8 @@ install_global_tools() {
 		fi
 	fi
 
+	normalize_context7_config
+
 	# Context7: keep a correct registration, but let fresh/explicit runs complete OAuth.
 	if context7_codex_configured; then
 		record_install_ok "Context7 MCP already registered"
@@ -1685,6 +1782,7 @@ install_global_tools() {
 					record_install_skipped "Context7 setup would run (dry-run)"
 					context7_codex_login || true
 				elif run npx npx ctx7 setup --codex --mcp --oauth -y; then
+					normalize_context7_config
 					record_install_ok "Context7 setup completed"
 					context7_codex_login || true
 				else
@@ -3925,6 +4023,8 @@ create_codex_hooks_templates() {
 		return 0
 	fi
 
+	normalize_codex_config .codex/config.toml --check
+
 	log "Creating Codex hook templates with quality-route, Git-writing, and destructive-command blockers"
 	if [[ "$CREATE_RTK_HOOK" == "1" ]]; then
 		warn "RTK PreToolUse hook is enabled by default. It rewrites eligible literal read-only/noisy Bash commands through 'rtk' when RTK is installed."
@@ -5161,13 +5261,21 @@ EOF_CODEX_CONFIG_TAIL
 		}
 	)
 	write_file ".codex/config-snippet.toml" "$config_snippet"
-	write_file ".codex/config.toml" "$config_snippet"
+	# Keep integration hooks imported on an earlier run when refreshing managed config.
+	local imported_hooks=""
+	if [[ "$DRY_RUN" != "1" && -f ".codex/config.toml" ]]; then
+		imported_hooks="$(python3 "$HELPER_ROOT/templates/normalize-codex-config.py" .codex/config.toml --preserved-block)" || return 1
+	fi
+	write_file ".codex/config.toml" "$config_snippet
+$imported_hooks"
+	normalize_codex_config .codex/config.toml
 }
 
 codex_config_candidates() {
 	# Print likely Codex config locations, one per line, without duplicates.
 	{
 		if [[ -n "${CODEX_CONFIG:-}" ]]; then printf '%s\n' "$CODEX_CONFIG"; fi
+		if [[ -n "${CODEX_HOME:-}" ]]; then printf '%s\n' "$CODEX_HOME/config.toml"; fi
 		printf '%s\n' "$HOME/.codex/config.toml"
 		if [[ -n "${XDG_CONFIG_HOME:-}" ]]; then printf '%s\n' "$XDG_CONFIG_HOME/codex/config.toml"; fi
 		printf '%s\n' "$HOME/.config/codex/config.toml"
@@ -5226,13 +5334,16 @@ apply_codex_hook_config() {
 		warn "No Codex config.toml found. Default target will be created if approved: $target"
 	fi
 
-	if [[ "$DRY_RUN" != "1" ]] && codex_hook_config_implemented "$target"; then
-		log "Codex Git-command blocker already appears to be implemented in $target"
+	if [[ "$CODEX_CONFIG_MODE" == "skip" ]]; then
+		warn "Codex config application skipped (--no-apply-codex-config)."
 		return 0
 	fi
 
-	if [[ "$CODEX_CONFIG_MODE" == "skip" ]]; then
-		warn "Codex config application skipped (--no-apply-codex-config)."
+	if [[ "$DRY_RUN" != "1" ]] && codex_hook_config_implemented "$target"; then
+		log "Codex Git-command blocker already appears to be implemented in $target"
+		if [[ "$SKIP_GLOBAL" != "1" || "$CODEX_CONFIG_MODE" == "apply" ]]; then
+			normalize_codex_config "$target"
+		fi
 		return 0
 	fi
 
@@ -5336,6 +5447,8 @@ if str(hook_path) not in text:
 
 config_path.write_text(text)
 PY_CODEX_CONFIG
+
+	normalize_codex_config "$target"
 
 	if codex_hook_config_implemented "$target"; then
 		log "Verified: Codex Git-command blocker is implemented in $target"
@@ -5662,6 +5775,9 @@ main() {
 	create_verify_script
 	create_codex_hooks_templates
 	apply_codex_hook_config
+	if [[ "$SKIP_GLOBAL" != "1" ]]; then
+		normalize_codex_config "$(choose_codex_config_target)"
+	fi
 	run_final_checks
 	print_install_summary
 	print_quality_install_step

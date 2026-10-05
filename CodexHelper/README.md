@@ -82,6 +82,26 @@ bash /path/to/CodexHelper/install.sh --repo-only --no-humanizer
 Restart Codex after installation, then invoke `$humanizer` or ask Codex to
 humanize prose.
 
+The installer includes [I Have ADHD](https://github.com/ayghri/i-have-adhd) by
+default and enables its response style at the start of each Codex session.
+Interactive runs ask before setup; `--yes` accepts it. To skip setup, use:
+
+```sh
+bash /path/to/CodexHelper/install.sh --no-adhd
+```
+
+This installs the upstream plugin for your user and appends a marked block of
+response rules to `~/.codex/AGENTS.md`, preserving existing instructions.
+It respects `CODEX_HOME` and uses an existing nonempty `AGENTS.override.md`
+when that file takes precedence. Restart Codex to load the defaults; no manual
+skill invocation is needed. Say `stop adhd mode` to stop for the current session.
+
+`--fresh-install` includes this setup; `--repo-only` skips it. Reruns preserve
+the existing instruction block; `--force` also refreshes the marketplace.
+`--no-adhd` skips setup without removing an earlier installation. To stop the
+style permanently, remove the `CodexHelper: i-have-adhd` block from the global
+instructions and use `--no-adhd` on later installer runs.
+
 The platform-specific commands below remain available for advanced use or for
 rerunning one phase by itself.
 
@@ -324,6 +344,14 @@ project memory.
 ## Notes
 
 - `part1.sh` does not auto-trust Codex hooks. Trust them manually with `/hooks`.
+- Both platform installers remove the unsupported Context7 `type` setting and
+  consolidate integration hooks into `config.toml`. Original files are backed
+  up, and imported hooks survive `--force` updates. Moved hooks need review in
+  `/hooks`. Configuration migration requires Python 3.11+ or an existing
+  `tomli` installation.
+- `--no-apply-codex-config` skips adding the global Git blocker. Normal global
+  integration setup still repairs its configuration; `--repo-only` confines
+  that cleanup to the project unless global config application is requested.
 - The full macOS `part1.sh` setup installs RTK through Homebrew and creates its
   PreToolUse hook by default. `--repo-only` skips the global install; if RTK is
   absent, the hook passes commands through unchanged.
