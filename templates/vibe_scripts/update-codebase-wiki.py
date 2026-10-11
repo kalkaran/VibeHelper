@@ -8,8 +8,7 @@ import re
 import subprocess
 from pathlib import Path
 
-
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 WIKI_DIR = ROOT / "codebase-wiki"
 GRAPH_REPORT = ROOT / "graphify-out" / "GRAPH_REPORT.md"
 CLAUDE_MD = ROOT / "CLAUDE.md"
@@ -74,19 +73,20 @@ def keep(items: list[str], limit: int, placeholder: str) -> str:
 def makefile_targets() -> list[str]:
     try:
         result = subprocess.run(
-            ["make", "-qp"],
+            ["make", "-f", "vibe_scripts/claude/Makefile", "-qp"],
             cwd=ROOT,
             stderr=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             text=True,
             timeout=10,
+            check=False,
         )
-    except Exception:
+    except (OSError, subprocess.SubprocessError):
         return []
     output = result.stdout
     found = set()
     for line in output.splitlines():
-        if ":" not in line or line.startswith("\t") or line.startswith("."):
+        if ":" not in line or line.startswith(("\t", ".")):
             continue
         name = line.split(":", 1)[0].strip()
         if re.fullmatch(r"[A-Za-z0-9_.-]+", name):
@@ -124,7 +124,7 @@ def replace_section(path: Path, title: str, key: str, body: str) -> None:
         updated = pattern.sub(block, current)
     elif (
         "TODO:" in current
-        or "Run make wiki-ai" in current
+        or "Run make -f vibe_scripts/claude/Makefile wiki-ai" in current
         or len(current.strip()) < 140
     ):
         updated = f"# {title}\n\n{block}"
@@ -148,7 +148,7 @@ Pages:
 - [Risky areas](risky-areas.md)
 
 Maintenance rule:
-- Use make wiki-ai to draft concise updates from repo guidance and Graphify output.
+- Use make -f vibe_scripts/claude/Makefile wiki-ai to draft concise updates from repo guidance and Graphify output.
 - Promote only stable, reusable facts into this wiki.
 - Do not add temporary task notes, raw linter output, raw Graphify output, or speculation.
 - Review generated sections before relying on them for future work.
@@ -162,7 +162,10 @@ def main() -> int:
 
     agents = read_text(CLAUDE_MD)
     graph = read_text(GRAPH_REPORT)
-    targets = [f"- make {target}" for target in makefile_targets()]
+    targets = [
+        f"- make -f vibe_scripts/claude/Makefile {target}"
+        for target in makefile_targets()
+    ]
     graph_summary = markdown_section(graph, "Summary")[:6]
     hubs = markdown_section(graph, "Community Hubs (Navigation)")[:16]
     god_nodes = markdown_section(
@@ -232,9 +235,9 @@ Source: CLAUDE.md and current Makefile targets.
 {keep(targets, 12, "No Makefile quality targets detected.")}
 
 ### Agent Rule
-- Prefer make edited-ai after edits so formatter, linter, and typechecker output stays capped for AI use.
-- Use make verify-ai when the change is broad, security-sensitive, or crosses multiple workflows.
-- Use make wiki-ai after Graphify or substantial discovery work to draft durable memory updates.
+- Prefer make -f vibe_scripts/claude/Makefile edited-ai after edits so formatter, linter, and typechecker output stays capped for AI use.
+- Use make -f vibe_scripts/claude/Makefile verify-ai when the change is broad, security-sensitive, or crosses multiple workflows.
+- Use make -f vibe_scripts/claude/Makefile wiki-ai after Graphify or substantial discovery work to draft durable memory updates.
 """,
         ),
         "conventions.md": (

@@ -15,8 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 LOCK_PATH = ROOT / "skills-lock.json"
 
 
@@ -247,8 +246,7 @@ def run_capture(command: list[str]) -> subprocess.CompletedProcess[str] | None:
         command,
         cwd=ROOT,
         text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         check=False,
     )
 

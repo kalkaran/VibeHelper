@@ -59,6 +59,7 @@ Options:
   --no-humanizer        Do not install the Humanizer writing skill in part 1.
   --adhd                Install i-have-adhd and enable its response style (default).
   --no-adhd             Skip i-have-adhd installation and response-style setup.
+  --no-omniroute  Skip the local free-only OmniRoute runtime setup.
   --with-llm-council    Install the optional LLM Council integration in part 1.
   --security-scan       Run Semgrep after part 1 when Semgrep is available.
   --no-crg-build        Skip the initial code-review-graph build in part 1.
@@ -156,7 +157,7 @@ while [[ $# -gt 0 ]]; do
 		CODEX_CONFIG_FLAG="--no-apply-codex-config"
 		shift
 		;;
-	--no-codex-hooks | --no-rtk-hook | --install-prereqs | --context7 | --chrome-mcp | --no-chrome-mcp | --impeccable | --no-humanizer | --adhd | --no-adhd | --with-llm-council | --security-scan | --no-crg-build)
+	--no-codex-hooks | --no-rtk-hook | --install-prereqs | --context7 | --chrome-mcp | --no-chrome-mcp | --impeccable | --no-humanizer | --adhd | --no-adhd | --no-omniroute | --with-llm-council | --security-scan | --no-crg-build)
 		PART1_ONLY_ARGS+=("$1")
 		shift
 		;;
@@ -185,45 +186,12 @@ if [[ -n "$REPO_ROOT" ]]; then
 	cd "$REPO_ROOT"
 fi
 
-remove_gitignore_block() {
-	[[ -f .gitignore ]] || return 0
-	local tmp
-	tmp="$(mktemp)"
-	awk '
-		$0 == "# VibeHelper local AI/dev tooling" { skip = 1; next }
-		skip && ($0 == "*.bak" || $0 == "*.bak.*" || $0 == ".cache/" || $0 == ".agents/" || $0 == ".claude/" || $0 == ".codex/" || $0 == ".mcp.json" || $0 == "AGENTS.md" || $0 == "CLAUDE.md" || $0 == "Makefile" || $0 == "agent/" || $0 == "agents/" || $0 == "codebase-wiki/" || $0 == "graphify-out/" || $0 == "node_modules/" || $0 == "notes/" || $0 == "obsidian/" || $0 == "vendor/" || $0 == "vibe_scripts/" || $0 == "/vibe_scripts/" || $0 == "skills-lock.json" || $0 == "/skills-lock.json" || $0 == "biome.json") { next }
-		{ skip = 0; print }
-	' .gitignore >"$tmp"
-	if cmp -s "$tmp" .gitignore; then
-		rm -f "$tmp"
-	else
-		mv "$tmp" .gitignore
-		[[ -s .gitignore ]] || rm -f .gitignore
-		log "Removed VibeHelper .gitignore block."
-	fi
-}
-
 cleanup_project() {
-	local paths=(
-		".agents"
-		".codex"
-		".cache"
-		".mcp.json"
-		"AGENTS.md"
-		"Makefile"
-		"agent"
-		"agents"
-		"codebase-wiki"
-		"graphify-out"
-		"notes"
-		"vibe_scripts"
-		"skills-lock.json"
-		"biome.json"
-	)
+	local paths=(".codex" "AGENTS.md" "agent/codex" "vibe_scripts/codex")
 	if [[ "$DRY_RUN" -eq 1 ]]; then
 		log "Would remove CodexHelper project files from $(pwd)."
 		printf '  %s\n' "${paths[@]}"
-		log "Would remove the managed VibeHelper block from .gitignore."
+		log "Shared files, legacy helpers, project Makefile and .gitignore will be preserved."
 		return 0
 	fi
 	if [[ "$YES" -ne 1 ]]; then
@@ -240,7 +208,7 @@ cleanup_project() {
 		rm -rf -- "$path"
 		log "Removed $path"
 	done
-	remove_gitignore_block
+	log "Preserved shared files, legacy helpers, project Makefile and .gitignore."
 	log "CodexHelper project cleanup complete."
 }
 

@@ -47,6 +47,7 @@ Options:
   --chrome-mcp    Configure or repair Chrome DevTools MCP in part 1.
   --no-chrome-mcp Do not configure Chrome DevTools MCP.
   --impeccable    Install Impeccable design skill/hooks (included by fresh install).
+  --no-omniroute  Skip the local free-only OmniRoute runtime setup.
   --with-llm-council  Clone karpathy/llm-council locally.
   --repo-only     Only write repo files; skip all global tool installs.
   -h, --help      Show this help.
@@ -106,7 +107,7 @@ while [[ $# -gt 0 ]]; do
 		WIRE_MODE="no-wire"
 		shift
 		;;
-	--no-humanizer | --no-rtk | --no-graphify | --no-ponytail | --no-crg | --crg-build | --no-context7 | --chrome-mcp | --no-chrome-mcp | --impeccable | --with-llm-council | --repo-only | --skip-global | --no-system-packages)
+	--no-humanizer | --no-rtk | --no-graphify | --no-ponytail | --no-crg | --crg-build | --no-context7 | --chrome-mcp | --no-chrome-mcp | --impeccable | --no-omniroute | --with-llm-council | --repo-only | --skip-global | --no-system-packages)
 		PART1_ONLY_ARGS+=("$1")
 		shift
 		;;
@@ -130,44 +131,12 @@ if [[ -n "$REPO_ROOT" ]]; then
 	cd "$REPO_ROOT"
 fi
 
-remove_gitignore_block() {
-	[[ -f .gitignore ]] || return 0
-	local tmp
-	tmp="$(mktemp)"
-	awk '
-		$0 == "# VibeHelper local AI/dev tooling" { skip = 1; next }
-		skip && ($0 == "*.bak" || $0 == "*.bak.*" || $0 == ".cache/" || $0 == ".agents/" || $0 == ".claude/" || $0 == ".codex/" || $0 == ".mcp.json" || $0 == "AGENTS.md" || $0 == "CLAUDE.md" || $0 == "Makefile" || $0 == "agent/" || $0 == "agents/" || $0 == "codebase-wiki/" || $0 == "graphify-out/" || $0 == "node_modules/" || $0 == "notes/" || $0 == "obsidian/" || $0 == "vendor/" || $0 == "vibe_scripts/" || $0 == "/vibe_scripts/" || $0 == "skills-lock.json" || $0 == "/skills-lock.json" || $0 == "biome.json") { next }
-		{ skip = 0; print }
-	' .gitignore >"$tmp"
-	if cmp -s "$tmp" .gitignore; then
-		rm -f "$tmp"
-	else
-		mv "$tmp" .gitignore
-		[[ -s .gitignore ]] || rm -f .gitignore
-		log "Removed VibeHelper .gitignore block."
-	fi
-}
-
 cleanup_project() {
-	local paths=(
-		".claude"
-		".cache"
-		".mcp.json"
-		"CLAUDE.md"
-		"Makefile"
-		"agent"
-		"agents"
-		"codebase-wiki"
-		"graphify-out"
-		"notes"
-		"vibe_scripts"
-		"skills-lock.json"
-		"biome.json"
-	)
+	local paths=(".claude" "CLAUDE.md" "agent/claude" "vibe_scripts/claude")
 	if [[ "$DRY_RUN" -eq 1 ]]; then
 		log "Would remove ClaudeHelper project files from $(pwd)."
 		printf '  %s\n' "${paths[@]}"
-		log "Would remove the managed VibeHelper block from .gitignore."
+		log "Shared files, legacy helpers, project Makefile and .gitignore will be preserved."
 		return 0
 	fi
 	if [[ "$YES" -ne 1 ]]; then
@@ -184,7 +153,7 @@ cleanup_project() {
 		rm -rf -- "$path"
 		log "Removed $path"
 	done
-	remove_gitignore_block
+	log "Preserved shared files, legacy helpers, project Makefile and .gitignore."
 	log "ClaudeHelper project cleanup complete."
 }
 
@@ -244,7 +213,7 @@ fi
 if [[ "$WIRE_MODE" == "auto" ]]; then
 	WIRE_MODE="wire"
 	if [[ "$CODEX_SETUP" -eq 1 ]]; then
-		log "Codex project setup detected; wiring the shared Makefile anyway (pass --no-wire to skip)."
+		log "Codex project setup detected; wiring vibe_scripts/claude/Makefile (pass --no-wire to skip)."
 	fi
 fi
 
@@ -258,6 +227,7 @@ fi
 if [[ "$FORCE" -eq 1 ]]; then
 	if [[ "$CODEX_SETUP" -eq 1 ]]; then
 		PART1_ARGS+=("--refresh-tools")
+		PART2_ARGS+=("--force")
 	elif [[ "$FRESH_INSTALL" -eq 1 ]]; then
 		PART1_ARGS+=("--fresh-install")
 		PART2_ARGS+=("--fresh-install")

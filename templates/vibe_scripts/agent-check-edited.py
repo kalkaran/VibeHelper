@@ -16,7 +16,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-
 EXCLUDED_DIRS = {
     ".agents",
     ".cache",
@@ -145,7 +144,7 @@ def wrapper_command(
     shell: bool = False,
     max_lines: int = 24,
 ) -> list[str]:
-    wrapper = root / "vibe_scripts" / "ai-quality-wrapper.py"
+    wrapper = Path(__file__).resolve().with_name("ai-quality-wrapper.py")
     args = [
         sys.executable,
         str(wrapper),

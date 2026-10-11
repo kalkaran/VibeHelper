@@ -94,7 +94,8 @@ This installs the upstream plugin for your user and appends a marked block of
 response rules to `~/.codex/AGENTS.md`, preserving existing instructions.
 It respects `CODEX_HOME` and uses an existing nonempty `AGENTS.override.md`
 when that file takes precedence. Restart Codex to load the defaults; no manual
-skill invocation is needed. Say `stop adhd mode` to stop for the current session.
+skill invocation is needed. Say `stop adhd mode` to stop for the current
+session.
 
 `--fresh-install` includes this setup; `--repo-only` skips it. Reruns preserve
 the existing instruction block; `--force` also refreshes the marketplace.
@@ -246,7 +247,7 @@ thread.
 Run one manual check after setup to confirm the generated checker works:
 
 ```sh
-make edited-ai
+make -f vibe_scripts/codex/Makefile edited-ai
 ```
 
 After that, trusted hooks handle normal edited-file checks automatically.
@@ -254,23 +255,31 @@ After that, trusted hooks handle normal edited-file checks automatically.
 ## Using The Workflow
 
 Once hooks are trusted, Codex checks edited files automatically after edits and
-before it stops. The hooks do not literally run `make edited-ai`; they call the
-same underlying checker, `vibe_scripts/agent-check-edited.py`, for the files
+before it stops. The hooks do not literally run
+`make -f vibe_scripts/codex/Makefile edited-ai` ; they call the
+same underlying checker, `vibe_scripts/codex/agent-check-edited.py` , for the
+files
 Codex edited.
 
-You normally do not need to run `make edited-ai` after every small change.
+You normally do not need to run `make -f vibe_scripts/codex/Makefile edited-ai`
+after every small change.
 
 What still has to be done manually:
 
 - Trust project hooks in `/hooks` after install or after hook files change.
-- Run `make edited-ai` once after setup, when hooks are not trusted, or when you
+- Run `make -f vibe_scripts/codex/Makefile edited-ai` once after setup, when
+  hooks are not trusted, or when you
   want an explicit quick check.
-- Run `make lint-ai` when you want broader non-Semgrep lint checks.
-- Run `make verify-ai` for large, risky, security-sensitive, or cross-project
+- Run `make -f vibe_scripts/codex/Makefile lint-ai` when you want broader
+  non-Semgrep lint checks.
+- Run `make -f vibe_scripts/codex/Makefile verify-ai` for large, risky,
+  security-sensitive, or cross-project
   changes.
-- Run `make savings-ai` to see the latest Codex session's recorded reduction
+- Run `make -f vibe_scripts/codex/Makefile savings-ai` to see the latest Codex
+  session's recorded reduction
   estimates.
-- Run `make wiki-ai` only when stable project knowledge should be written to
+- Run `make -f vibe_scripts/codex/Makefile wiki-ai` only when stable project
+  knowledge should be written to
   `codebase-wiki/`.
 - Review generated `codebase-wiki/` changes before relying on them.
 
@@ -297,20 +306,28 @@ What the hooks do:
 
 Use these commands when needed:
 
-- `make edited-ai` checks only edited files. Use it after setup, when hooks are
+- `make -f vibe_scripts/codex/Makefile edited-ai` checks only edited files. Use
+  it after setup, when hooks are
   not trusted, or when you want a quick manual check.
-- `make lint-ai` runs broader lint checks without Semgrep.
-- `make verify-ai` runs bigger checks. Use it for large, risky,
+- `make -f vibe_scripts/codex/Makefile lint-ai` runs broader lint checks
+  without Semgrep.
+- `make -f vibe_scripts/codex/Makefile verify-ai` runs bigger checks. Use it
+  for large, risky,
   security-sensitive, or cross-project changes. It may run Semgrep.
-- `make savings-ai` shows the latest session report. The `SessionEnd` hook
+- `make -f vibe_scripts/codex/Makefile savings-ai` shows the latest session
+  report. The `SessionEnd` hook
   quietly freezes the RTK endpoint and marks the session record as finished.
-- `make wiki-ai` updates `codebase-wiki/`. Use it only when you learned stable
+- `make -f vibe_scripts/codex/Makefile wiki-ai` updates `codebase-wiki/` . Use
+  it only when you learned stable
   facts that future agents should know.
-- `make skills-check` audits managed skills/plugins after helper upgrades or
+- `make -f vibe_scripts/codex/Makefile skills-check` audits managed
+  skills/plugins after helper upgrades or
   when behavior seems stale.
-- `make skills-update` refreshes policy-approved managed skills/plugins;
+- `make -f vibe_scripts/codex/Makefile skills-update` refreshes policy-approved
+  managed skills/plugins;
   manual-policy items still require explicit refresh intent.
-- `./vibe_scripts/agent-verify.sh` runs the edited-file check by default. Pass
+- `./vibe_scripts/codex/agent-verify.sh` runs the edited-file check by default.
+  Pass
   `lint`, `verify`, `security`, or `graph` to choose another mode.
 
 The session report keeps two measurements separate. RTK reports the estimated
@@ -337,7 +354,8 @@ project memory.
   design creation, polish, audit, critique, responsive, typography, color, and
   design-system tasks when the skill is installed.
 - Frontend edits automatically trigger the generated design touch gate in
-  `agent/coding-rules.md`; the edited-file checker also runs `impeccable detect`
+  `agent/codex/coding-rules.md` ; the edited-file checker also runs
+  `impeccable detect`
   on touched frontend files when Impeccable is already available locally.
 - `codebase-wiki/` for stable project knowledge.
 
@@ -368,7 +386,8 @@ project memory.
 - `--fresh-install` includes the forced refresh and also installs missing
   prerequisites and quality tools.
 - `skills-lock.json` records the desired managed skill/plugin set. The generated
-  `vibe_scripts/sync-skills.py --update --force` refreshes installed managed
+  `vibe_scripts/codex/sync-skills.py --update --force` refreshes installed
+  managed
   items as well as missing or drifted ones.
 - When `part2.sh` needs to create `package.json`, it writes a minimal private
   package with a sanitized name instead of relying on `npm init -y`; this avoids
@@ -378,3 +397,32 @@ project memory.
 - Full tool logs are stored under `.cache/`; AI-facing output is capped.
 - Review generated `codebase-wiki/` sections before relying on them as durable
   project memory.
+
+## Generated files and upgrades
+
+Quality commands use `vibe_scripts/codex/Makefile`. Helper scripts live beside
+it, and workflow instructions live in `agent/codex/`. The project root
+Makefile and existing wiki pages are preserved, including with `--force`.
+
+For an older installation, preview the installer with `--dry-run --force`, then
+rerun with `--force` to refresh existing managed instructions and hooks. Restart
+the agent and review/trust updated hooks where required. Legacy root Makefile
+targets and shared `vibe_scripts/*` files are retained for manual review; the
+new
+commands do not use them. Existing user instructions may need their command
+paths updated manually.
+
+`--cleanup` removes this provider's configuration, top-level instruction file,
+`agent/codex/` and `vibe_scripts/codex/`. It preserves the project
+Makefile, other provider, shared skills, wiki, notes, caches, skill lock,
+`.mcp.json`, `.gitignore` and legacy helpers. Review those shared files manually
+if removing VibeHelper entirely. Skill configuration and project memory remain
+shared; separating scripts does not add missing language checks.
+
+On `--force`, an existing global `~/.codex/hooks/ai_git_blocker.py` with a
+CodexHelper version marker is backed up and refreshed. This also works with
+`--no-apply-codex-config`: the configuration stays unchanged. Creating a new
+global hook still requires the existing opt-in. Unmarked global files are
+left alone during automatic refresh. The new global policy requires
+provider-specific commands in every project where it runs, so migrate those
+projects too. An old global hook can reject the new `make -f` commands.

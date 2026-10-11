@@ -6,9 +6,9 @@ set -euo pipefail
 # It detects likely repo types, offers to install missing dev quality tools,
 # then wires Makefile targets for tools/scripts that exist.
 #
-# Version: 2026-09-07-v24
+# Version: 2026-10-10-v35
 
-SCRIPT_VERSION="2026-09-07-v24"
+SCRIPT_VERSION="2026-10-10-v35"
 DRY_RUN=0
 YES=0
 FORCE=0
@@ -53,7 +53,7 @@ Design:
   - Creates Makefile targets only for checks that actually exist.
   - Creates AI-capped *-ai targets that write full logs under .cache/ai-quality/.
   - Creates edited-ai to format, lint, and typecheck only edited files.
-  - Preserves/adds wiki-ai when vibe_scripts/update-codebase-wiki.py exists.
+  - Preserves/adds wiki-ai when vibe_scripts/codex/update-codebase-wiki.py exists.
   - Never creates fake lint/typecheck/test targets.
 USAGE
 }
@@ -1105,7 +1105,7 @@ print_available_checks() {
 }
 
 write_ai_quality_wrapper() {
-	local path="vibe_scripts/ai-quality-wrapper.py"
+	local path="vibe_scripts/codex/ai-quality-wrapper.py"
 	local tmp
 	tmp="$(mktemp)"
 	cat >"$tmp" <<'PYWRAPPER'
@@ -1718,7 +1718,7 @@ PYWRAPPER
 }
 
 write_agent_check_edited() {
-	local path="vibe_scripts/agent-check-edited.py"
+	local path="vibe_scripts/codex/agent-check-edited.py"
 	local tmp
 	tmp="$(mktemp)"
 	cat >"$tmp" <<'PYEDITED'
@@ -1906,7 +1906,7 @@ def run_wrapped(
     shell: bool = False,
     max_lines: int = 24,
 ) -> int:
-    wrapper = root / "vibe_scripts" / "ai-quality-wrapper.py"
+    wrapper = root / "vibe_scripts" / "codex" / "ai-quality-wrapper.py"
     args = [
         sys.executable,
         str(wrapper),
@@ -2144,7 +2144,7 @@ PYEDITED
 ensure_cache_gitignored() {
 	local marker="# VibeHelper local AI/dev tooling"
 	local block
-	block=$'# VibeHelper local AI/dev tooling\n*.bak\n*.bak.*\n.cache/\n.agents/\n.claude/\n.codex/\n.mcp.json\nAGENTS.md\nCLAUDE.md\nMakefile\nagent/\nagents/\ncodebase-wiki/\ngraphify-out/\nnode_modules/\nnotes/\nobsidian/\nvendor/\nvibe_scripts/\nskills-lock.json\nbiome.json\n'
+	block=$'# VibeHelper local AI/dev tooling\n*.bak\n*.bak.*\n.cache/\n.agents/\n.claude/\n.codex/\n.mcp.json\nAGENTS.md\nCLAUDE.md\nagent/\nagents/\ncodebase-wiki/\ngraphify-out/\nnode_modules/\nnotes/\nobsidian/\nvendor/\nvibe_scripts/\nskills-lock.json\nbiome.json\n'
 	if [[ "$DRY_RUN" -eq 1 ]]; then
 		log "Would ensure .gitignore has VibeHelper local-file entries."
 		return 0
@@ -2160,7 +2160,7 @@ emit_ai_cmd() {
 	local label="$1"
 	local cmd="$2"
 	local adapter="$3"
-	printf "\t@python3 vibe_scripts/ai-quality-wrapper.py --label %q --adapter %q --max-lines 30 --shell -- %q\n" "$label" "$adapter" "$cmd"
+	printf "\t@python3 vibe_scripts/codex/ai-quality-wrapper.py --label %q --adapter %q --max-lines 30 --shell -- %q\n" "$label" "$adapter" "$cmd"
 }
 
 helper_targets_expected() {
@@ -2168,15 +2168,15 @@ helper_targets_expected() {
 }
 
 helper_targets_available() {
-	[[ -f vibe_scripts/agent-check-edited.py ||
-		-f vibe_scripts/update-codebase-wiki.py ||
-		-f vibe_scripts/sync-skills.py ||
-		-f vibe_scripts/agent-verify.sh ]] ||
+	[[ -f vibe_scripts/codex/agent-check-edited.py ||
+		-f vibe_scripts/codex/update-codebase-wiki.py ||
+		-f vibe_scripts/codex/sync-skills.py ||
+		-f vibe_scripts/codex/agent-verify.sh ]] ||
 		helper_targets_expected
 }
 
 write_makefile() {
-	local mf="Makefile"
+	local mf="vibe_scripts/codex/Makefile"
 	local tmp helper_expected=0
 	tmp="$(mktemp)"
 	helper_targets_expected && helper_expected=1
@@ -2256,19 +2256,19 @@ write_makefile() {
 		echo "verify:"
 		local deps=0
 		if [[ ${#LINT_CMDS[@]} -gt 0 ]]; then
-			echo "	\$(MAKE) lint"
+			echo "	\$(MAKE) -f vibe_scripts/codex/Makefile lint"
 			deps=1
 		fi
 		if [[ ${#TYPE_CMDS[@]} -gt 0 ]]; then
-			echo "	\$(MAKE) typecheck"
+			echo "	\$(MAKE) -f vibe_scripts/codex/Makefile typecheck"
 			deps=1
 		fi
 		if [[ ${#TEST_CMDS[@]} -gt 0 ]]; then
-			echo "	\$(MAKE) test"
+			echo "	\$(MAKE) -f vibe_scripts/codex/Makefile test"
 			deps=1
 		fi
 		if [[ ${#SECURITY_CMDS[@]} -gt 0 ]]; then
-			echo "	\$(MAKE) security"
+			echo "	\$(MAKE) -f vibe_scripts/codex/Makefile security"
 			deps=1
 		fi
 		if [[ "$deps" -eq 0 ]]; then
@@ -2280,19 +2280,19 @@ write_makefile() {
 		echo "verify-ai:"
 		local ai_deps=0
 		if [[ ${#LINT_CMDS[@]} -gt 0 ]]; then
-			echo "	@\$(MAKE) lint-ai"
+			echo "	@\$(MAKE) -f vibe_scripts/codex/Makefile lint-ai"
 			ai_deps=1
 		fi
 		if [[ ${#TYPE_CMDS[@]} -gt 0 ]]; then
-			echo "	@\$(MAKE) typecheck-ai"
+			echo "	@\$(MAKE) -f vibe_scripts/codex/Makefile typecheck-ai"
 			ai_deps=1
 		fi
 		if [[ ${#TEST_CMDS[@]} -gt 0 ]]; then
-			echo "	@\$(MAKE) test-ai"
+			echo "	@\$(MAKE) -f vibe_scripts/codex/Makefile test-ai"
 			ai_deps=1
 		fi
 		if [[ ${#SECURITY_CMDS[@]} -gt 0 ]]; then
-			echo "	@\$(MAKE) security-ai"
+			echo "	@\$(MAKE) -f vibe_scripts/codex/Makefile security-ai"
 			ai_deps=1
 		fi
 		if [[ "$ai_deps" -eq 0 ]]; then
@@ -2300,10 +2300,10 @@ write_makefile() {
 			echo "	@exit 1"
 		fi
 		echo
-		if [[ -f vibe_scripts/agent-check-edited.py || -f vibe_scripts/ai-quality-wrapper.py || "$helper_expected" -eq 1 ]]; then
+		if [[ -f vibe_scripts/codex/agent-check-edited.py || -f vibe_scripts/codex/ai-quality-wrapper.py || "$helper_expected" -eq 1 ]]; then
 			echo ".PHONY: edited-ai"
 			echo "edited-ai:"
-			echo "	@python3 vibe_scripts/agent-check-edited.py"
+			echo "	@python3 vibe_scripts/codex/agent-check-edited.py"
 		fi
 		if [[ -f .codex/hooks/post_tool_use.py ]]; then
 			echo
@@ -2311,26 +2311,26 @@ write_makefile() {
 			echo "savings-ai:"
 			echo "	@python3 .codex/hooks/post_tool_use.py --report"
 		fi
-		if [[ -f vibe_scripts/update-codebase-wiki.py || -d codebase-wiki || "$helper_expected" -eq 1 ]]; then
+		if [[ -f vibe_scripts/codex/update-codebase-wiki.py || -d codebase-wiki || "$helper_expected" -eq 1 ]]; then
 			echo
 			echo ".PHONY: wiki-ai"
 			echo "wiki-ai:"
-			echo "	@python3 vibe_scripts/update-codebase-wiki.py"
+			echo "	@python3 vibe_scripts/codex/update-codebase-wiki.py"
 		fi
-		if [[ -f vibe_scripts/sync-skills.py || "$helper_expected" -eq 1 ]]; then
+		if [[ -f vibe_scripts/codex/sync-skills.py || "$helper_expected" -eq 1 ]]; then
 			echo
 			echo ".PHONY: skills-check skills-update"
 			echo "skills-check:"
-			echo "	@python3 vibe_scripts/sync-skills.py --check"
+			echo "	@python3 vibe_scripts/codex/sync-skills.py --check"
 			echo
 			echo "skills-update:"
-			echo "	@python3 vibe_scripts/sync-skills.py --update"
+			echo "	@python3 vibe_scripts/codex/sync-skills.py --update"
 		fi
-		if [[ -f vibe_scripts/agent-verify.sh || "$helper_expected" -eq 1 ]]; then
+		if [[ -f vibe_scripts/codex/agent-verify.sh || "$helper_expected" -eq 1 ]]; then
 			echo
 			echo ".PHONY: agent-verify"
 			echo "agent-verify:"
-			echo "	@./vibe_scripts/agent-verify.sh"
+			echo "	@./vibe_scripts/codex/agent-verify.sh"
 		fi
 	} >"$tmp"
 
@@ -2410,10 +2410,10 @@ Semgrep note:
   The practical cost is runtime and findings noise, not Codex/OpenAI token usage.
 
   In the Makefile written by this script, Semgrep runs when you run:
-    make security
-    make security-ai
-    make verify
-    make verify-ai
+    make -f vibe_scripts/codex/Makefile security-ai
+    make -f vibe_scripts/codex/Makefile security-ai
+    make -f vibe_scripts/codex/Makefile verify-ai
+    make -f vibe_scripts/codex/Makefile verify-ai
 
   It does not run automatically on every query. It only runs when one of those
   commands is invoked, or if you later wire those commands into hooks or CI.
@@ -2547,10 +2547,10 @@ if [[ "$WIRE_MODE" == "ask" ]]; then
 	fi
 fi
 
-if [[ ! -f vibe_scripts/ai-quality-wrapper.py ]]; then
+if [[ ! -f vibe_scripts/codex/ai-quality-wrapper.py || "$FORCE" -eq 1 ]]; then
 	write_ai_quality_wrapper
 fi
-if [[ ! -f vibe_scripts/agent-check-edited.py ]]; then
+if [[ ! -f vibe_scripts/codex/agent-check-edited.py || "$FORCE" -eq 1 ]]; then
 	write_agent_check_edited
 fi
 ensure_cache_gitignored
@@ -2561,17 +2561,17 @@ run_fixers_now
 if [[ "$DRY_RUN" -eq 0 ]]; then
 	echo
 	log "Final checks:"
-	log "  make edited-ai   # format/lint/typecheck edited files with capped AI output"
-	log "  make verify-ai   # broader AI-safe quality/security checks"
+	log "  make -f vibe_scripts/codex/Makefile edited-ai   # format/lint/typecheck edited files with capped AI output"
+	log "  make -f vibe_scripts/codex/Makefile verify-ai   # broader AI-safe quality/security checks"
 	if [[ -f .codex/hooks/post_tool_use.py ]]; then
-		log "  make savings-ai  # show the latest Codex session's context-reduction estimates"
+		log "  make -f vibe_scripts/codex/Makefile savings-ai  # show the latest Codex session's context-reduction estimates"
 	fi
-	if [[ -f vibe_scripts/update-codebase-wiki.py || -d codebase-wiki ]]; then
-		log "  make wiki-ai     # refresh generated codebase-wiki sections"
+	if [[ -f vibe_scripts/codex/update-codebase-wiki.py || -d codebase-wiki ]]; then
+		log "  make -f vibe_scripts/codex/Makefile wiki-ai     # refresh generated codebase-wiki sections"
 	fi
-	if [[ -f vibe_scripts/sync-skills.py ]]; then
-		log "  make skills-check  # audit managed skills/plugins"
-		log "  make skills-update # refresh policy-approved managed skills/plugins"
+	if [[ -f vibe_scripts/codex/sync-skills.py ]]; then
+		log "  make -f vibe_scripts/codex/Makefile skills-check  # audit managed skills/plugins"
+		log "  make -f vibe_scripts/codex/Makefile skills-update # refresh policy-approved managed skills/plugins"
 	fi
 	print_semgrep_note
 fi

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Wire AI-safe quality targets for a repository already bootstrapped by WSL/part1.sh.
 #
-# Version: 2026-09-05-v5
+# Version: 2026-10-10-v6
 
 set -Eeuo pipefail
 IFS=$'\n\t'
@@ -22,9 +22,9 @@ Usage: $SCRIPT_NAME [options]
 
 Options:
   --dry-run       Show what would happen without writing files.
-  --wire          Write/update the managed Makefile block.
-  --force         Replace an existing ClaudeHelper managed Makefile block.
-  --fresh-install Replace the managed Makefile block and enable wiring.
+  --wire          Write/update the managed vibe_scripts/claude/Makefile block.
+  --force         Replace an existing ClaudeHelper managed vibe_scripts/claude/Makefile block.
+  --fresh-install Replace the managed vibe_scripts/claude/Makefile block and enable wiring.
   --repo PATH     Run against a specific repo/path.
   -h, --help      Show this help.
 USAGE
@@ -118,7 +118,7 @@ log "Working in repo/root: $ROOT"
 [[ "$DRY_RUN" -eq 1 ]] && warn "Dry run: no files will be written."
 
 if [[ "$WIRE" -ne 1 && "$DRY_RUN" -ne 1 ]]; then
-	warn "No changes requested. Pass --wire to write Makefile targets."
+	warn "No changes requested. Pass --wire to write vibe_scripts/claude/Makefile targets."
 	exit 0
 fi
 
@@ -137,28 +137,28 @@ helper_targets_expected() {
 	[[ "${CLAUDEHELPER_UNIFIED_INSTALL:-0}" == "1" ]]
 }
 
-wrapper='python3 vibe_scripts/ai-quality-wrapper.py'
+wrapper='python3 vibe_scripts/claude/ai-quality-wrapper.py'
 targets=()
 verify_deps=()
 helper_expected=0
 helper_targets_expected && helper_expected=1
 
-if [[ -f vibe_scripts/agent-check-edited.py || "$helper_expected" -eq 1 ]]; then
-	targets+=("$(make_target edited-ai $'\t@python3 vibe_scripts/agent-check-edited.py')")
+if [[ -f vibe_scripts/claude/agent-check-edited.py || "$helper_expected" -eq 1 ]]; then
+	targets+=("$(make_target edited-ai $'\t@python3 vibe_scripts/claude/agent-check-edited.py')")
 	verify_deps+=("edited-ai")
 fi
 
-if [[ -f vibe_scripts/update-codebase-wiki.py || -d codebase-wiki || "$helper_expected" -eq 1 ]]; then
-	targets+=("$(make_target wiki-ai $'\t@python3 vibe_scripts/update-codebase-wiki.py')")
+if [[ -f vibe_scripts/claude/update-codebase-wiki.py || -d codebase-wiki || "$helper_expected" -eq 1 ]]; then
+	targets+=("$(make_target wiki-ai $'\t@python3 vibe_scripts/claude/update-codebase-wiki.py')")
 fi
 
-if [[ -f vibe_scripts/sync-skills.py || "$helper_expected" -eq 1 ]]; then
-	targets+=("$(make_target skills-check $'\t@python3 vibe_scripts/sync-skills.py --check')")
-	targets+=("$(make_target skills-update $'\t@python3 vibe_scripts/sync-skills.py --update')")
+if [[ -f vibe_scripts/claude/sync-skills.py || "$helper_expected" -eq 1 ]]; then
+	targets+=("$(make_target skills-check $'\t@python3 vibe_scripts/claude/sync-skills.py --check')")
+	targets+=("$(make_target skills-update $'\t@python3 vibe_scripts/claude/sync-skills.py --update')")
 fi
 
-if [[ -f vibe_scripts/agent-verify.sh || "$helper_expected" -eq 1 ]]; then
-	targets+=("$(make_target agent-verify $'\t@./vibe_scripts/agent-verify.sh')")
+if [[ -f vibe_scripts/claude/agent-verify.sh || "$helper_expected" -eq 1 ]]; then
+	targets+=("$(make_target agent-verify $'\t@./vibe_scripts/claude/agent-verify.sh')")
 fi
 
 lint_commands=()
@@ -181,24 +181,24 @@ if [[ "${#lint_commands[@]}" -gt 0 ]]; then
 fi
 
 if has_npm_script typecheck; then
-	targets+=("$(make_target typecheck-ai $'\t@python3 vibe_scripts/ai-quality-wrapper.py --label typecheck-npm --max-lines 40 -- npm run typecheck')")
+	targets+=("$(make_target typecheck-ai $'\t@python3 vibe_scripts/claude/ai-quality-wrapper.py --label typecheck-npm --max-lines 40 -- npm run typecheck')")
 	verify_deps+=("typecheck-ai")
 fi
 
 if has_npm_script test; then
-	targets+=("$(make_target test-ai $'\t@python3 vibe_scripts/ai-quality-wrapper.py --label test-npm --max-lines 40 -- npm test')")
+	targets+=("$(make_target test-ai $'\t@python3 vibe_scripts/claude/ai-quality-wrapper.py --label test-npm --max-lines 40 -- npm test')")
 	verify_deps+=("test-ai")
 fi
 
 if cmd_exists semgrep; then
-	targets+=("$(make_target security-ai $'\t@mkdir -p .cache/semgrep\n\t@python3 vibe_scripts/ai-quality-wrapper.py --label security-semgrep --max-lines 40 -- semgrep scan')")
+	targets+=("$(make_target security-ai $'\t@mkdir -p .cache/semgrep\n\t@python3 vibe_scripts/claude/ai-quality-wrapper.py --label security-semgrep --max-lines 40 -- semgrep scan')")
 	verify_deps+=("security-ai")
 fi
 
 if [[ "${#verify_deps[@]}" -gt 0 ]]; then
 	body=""
 	for dep in "${verify_deps[@]}"; do
-		body+=$'\t@$(MAKE) '"$dep"$'\n'
+		body+=$'\t@$(MAKE) -f vibe_scripts/claude/Makefile '"$dep"$'\n'
 	done
 	targets+=("$(make_target verify-ai "$body")")
 fi
@@ -210,7 +210,7 @@ fi
 
 block_start="# >>> ClaudeHelper managed targets"
 block_end="# <<< ClaudeHelper managed targets"
-block="$block_start"$'\n'"# ClaudeHelper-Version: 2026-09-05-v5"$'\n\n'
+block="$block_start"$'\n'"# ClaudeHelper-Version: 2026-10-10-v6"$'\n\n'
 for target in "${targets[@]}"; do
 	block+="$target"$'\n\n'
 done
@@ -222,11 +222,11 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
 fi
 
 existing_block_count=0
-if [[ -f Makefile ]]; then
-	existing_block_count="$(grep -cF "$block_start" Makefile || true)"
+if [[ -f vibe_scripts/claude/Makefile ]]; then
+	existing_block_count="$(grep -cF "$block_start" vibe_scripts/claude/Makefile || true)"
 fi
 if [[ "$existing_block_count" -gt 1 ]]; then
-	err "Makefile contains multiple ClaudeHelper blocks; resolve them manually before wiring."
+	err "vibe_scripts/claude/Makefile contains multiple ClaudeHelper blocks; resolve them manually before wiring."
 	exit 1
 fi
 
@@ -235,25 +235,25 @@ if [[ "$existing_block_count" -eq 1 ]]; then
 		$0 == start { capture = 1 }
 		capture { print }
 		$0 == end { capture = 0 }
-	' Makefile)"
+	' vibe_scripts/claude/Makefile)"
 	if [[ "$current_block" == "${block%$'\n'}" ]]; then
-		log "Makefile ClaudeHelper targets are already current."
+		log "vibe_scripts/claude/Makefile ClaudeHelper targets are already current."
 		exit 0
 	fi
 fi
 
-if [[ -f Makefile && "$FORCE" -ne 1 && "$existing_block_count" -gt 0 ]]; then
-	warn "Makefile has an older ClaudeHelper block. Use --force to back it up and replace it."
+if [[ -f vibe_scripts/claude/Makefile && "$FORCE" -ne 1 && "$existing_block_count" -gt 0 ]]; then
+	warn "vibe_scripts/claude/Makefile has an older ClaudeHelper block. Use --force to back it up and replace it."
 	exit 0
 fi
 
 tmp="$(mktemp)"
-if [[ -f Makefile ]]; then
+if [[ -f vibe_scripts/claude/Makefile ]]; then
 	awk -v start="$block_start" -v end="$block_end" '
 		$0 == start { skip = 1; next }
 		$0 == end { skip = 0; next }
 		!skip { print }
-	' Makefile | awk '
+	' vibe_scripts/claude/Makefile | awk '
 		{ lines[NR] = $0 }
 		NF { last = NR }
 		END { for (line = 1; line <= last; line++) print lines[line] }
@@ -263,8 +263,9 @@ else
 fi
 [[ -s "$tmp" ]] && printf '\n' >>"$tmp"
 printf '%s' "$block" >>"$tmp"
-if [[ -f Makefile ]]; then
-	cp Makefile "Makefile.bak.$(date +%Y%m%d-%H%M%S)"
+if [[ -f vibe_scripts/claude/Makefile ]]; then
+	cp vibe_scripts/claude/Makefile "vibe_scripts/claude/Makefile.bak.$(date +%Y%m%d-%H%M%S)"
 fi
-mv "$tmp" Makefile
-log "Updated Makefile with ClaudeHelper targets."
+mkdir -p vibe_scripts/claude
+mv "$tmp" vibe_scripts/claude/Makefile
+log "Updated vibe_scripts/claude/Makefile with ClaudeHelper targets."

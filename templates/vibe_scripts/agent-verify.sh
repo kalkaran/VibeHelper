@@ -4,7 +4,7 @@ IFS='
 	'
 
 MODE="${1:-edited}"
-ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
 export PATH="$HOME/.local/bin:$PATH"
 
@@ -50,22 +50,22 @@ print_changed_files_summary
 echo
 
 if [[ "$MODE" == "edited" ]]; then
-	make edited-ai
+	make -f vibe_scripts/claude/Makefile edited-ai
 elif [[ "$MODE" == "lint" ]]; then
-	make lint-ai
+	make -f vibe_scripts/claude/Makefile lint-ai
 elif [[ "$MODE" == "typecheck" ]]; then
-	make typecheck-ai
+	make -f vibe_scripts/claude/Makefile typecheck-ai
 elif [[ "$MODE" == "test" ]]; then
-	make test-ai
+	make -f vibe_scripts/claude/Makefile test-ai
 elif [[ "$MODE" == "security" ]]; then
-	make security-ai
+	make -f vibe_scripts/claude/Makefile security-ai
 elif [[ "$MODE" == "graph" ]]; then
 	run_if_available code-review-graph code-review-graph detect-changes --brief
 elif [[ "$MODE" == "all" || "$MODE" == "verify" ]]; then
 	if command -v code-review-graph >/dev/null 2>&1; then
 		code-review-graph detect-changes --brief || true
 	fi
-	make verify-ai
+	make -f vibe_scripts/claude/Makefile verify-ai
 else
 	echo "Unknown mode: $MODE" >&2
 	echo "Usage: $0 [edited|all|verify|lint|typecheck|test|security|graph]" >&2
