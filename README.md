@@ -129,6 +129,13 @@ task. Review the diffs, then run from the project root:
 git add --pathspec-from-file=git-add.txt
 ```
 
+Directly below the staging command in their final reply, agents review every
+file in `git-add.txt`: its exact path, what changed, and why the task needs it.
+List one file per line with its own explanation; never group multiple file paths
+on one line.
+These are files selected for staging. Excluded files and reasons are reported
+separately.
+
 Agents inspect each diff and list only necessary source, tests, configuration,
 docs and requested assets. They exclude secrets, local tooling, logs, caches,
 backups, installed dependencies, build output and temporary reports. Package
@@ -155,8 +162,10 @@ Agents leave staging and committing to you.
 
 ## Free model delegation with OmniRoute
 
-Normal installs set up OmniRoute and its dashboard automatically for the current
-user. Both helpers share `~/.local/share/vibehelper/omniroute/`. An existing
+Installers ask whether to install OmniRoute and its dashboard, with no as the
+default. Only an explicit yes starts setup; empty input or EOF skips it.
+`--yes` does not approve this optional installation. Both helpers share
+`~/.local/share/vibehelper/omniroute/`. An existing
 compatible global executable is reused; otherwise the installer installs the
 verified version privately. Project scripts and instructions are installed for
 Codex and Claude on both macOS and WSL. `--force` updates existing projects.
@@ -176,10 +185,12 @@ python3 vibe_scripts/codex/omniroute.py connect openrouter
 # For Claude projects, use vibe_scripts/claude/omniroute.py instead.
 ```
 
-Agents try one bounded request for a suitable simple task before doing that work
-themselves. The installer ships no fixed model list: the helper discovers models
-for eligible accounts, checks context size, and ranks candidates for `code`,
-`edit`, `summary` or `extract` using capability and name hints. Use
+For a suitable simple task, agents ask whether you want to try OmniRoute to
+save tokens, unless you already authorized it. They wait for your reply before
+sending task context. If you decline, the current agent continues. After approval,
+they try one bounded request. The installer ships no fixed model list: the helper
+discovers models for eligible accounts, checks context size, and ranks candidates
+for `code`, `edit`, `summary` or `extract` using capability and name hints. Use
 `ask --task edit` with the task on stdin; `route --task edit` previews selection
 without inference. Ranking is heuristic and every proposal needs main-agent
 review and the normal project checks. Token savings are not yet measured.

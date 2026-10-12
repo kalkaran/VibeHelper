@@ -7,7 +7,7 @@
 # Version: 2026-10-10-v43
 #
 # Safe defaults:
-# - Prompts before network installs unless --yes is passed.
+# - Prompts before network installs; OmniRoute requires its own confirmation.
 # - Backs up existing files before overwriting unless --force is passed.
 # - Does not install production app dependencies.
 # - Creates project Codex hooks for edited-file checks, but does not auto-trust them.
@@ -60,7 +60,7 @@ usage() {
 Usage: $SCRIPT_NAME [options]
 
 Options:
-  --yes                 Do not prompt before installs/file writes.
+  --yes                 Skip general install prompts; OmniRoute still asks.
   --dry-run             Print what would happen, but do not change files or install tools.
   --force               Refresh installed helper-managed tools and managed files.
   --fresh-install       Install missing tools, refresh installed tools, and refresh files.
@@ -99,8 +99,8 @@ Options:
 Recommended first run:
   bash $SCRIPT_NAME
 
-Fully non-interactive repo + tools setup:
-  bash $SCRIPT_NAME --yes
+Non-interactive repo + tools setup without OmniRoute:
+  bash $SCRIPT_NAME --yes --no-omniroute
 
 Freshen an existing setup after backing up managed files and checking uv/pipx:
   bash $SCRIPT_NAME --fresh-install
@@ -2013,7 +2013,10 @@ Use this repository with minimal, verifiable changes.
 
 ## Simple tasks through OmniRoute
 
-Before solving a bounded mechanical task, try
+For a simple bounded task, if OmniRoute use is not already authorized, ask once:
+"Do you want to try OmniRoute for this task to save tokens?"
+Wait for the user's reply before sending any task or context. If they decline,
+continue with the current agent. After approval, try one bounded request using
 `python3 vibe_scripts/codex/omniroute.py ask --task edit` with the task on stdin.
 Choose `code`, `edit`, `summary` or `extract` to match the bounded task.
 Read `/agent/codex/omniroute.md` for the delegation and mandatory review rules.
@@ -2090,6 +2093,7 @@ Before final answer:
 - Check that required companion source, tests, configuration and assets are included or already committed. Do not publish a partial dependent change as ready to stage. Exclude uncertain, unreviewed or mixed-scope files and any changes that depend on them; report the excluded paths and reasons. Never retain entries from an earlier manifest without reviewing them again.
 - After the final edit and formatting pass, validate every entry against the repository root: an explicit changed file path, no duplicates, directories, ignored paths, traversal or wildcard matching. For a nonempty list, preview `git add --dry-run --pathspec-from-file=git-add.txt` and reconcile every selected addition, modification and deletion with the reviewed list. Stop on errors or unexpected paths. A preview validates selection, not contents; separately disclose existing staged changes. Have the final reviewer check the manifest and evidence. Later file changes invalidate its review.
 - Give the user `git add --pathspec-from-file=git-add.txt` to run from the repository root. Do not stage automatically. Staging includes pre-existing edits within listed files. Omit files containing unrelated edits and identify them separately for manual hunk review; never discard those edits.
+- Immediately below that command in the final reply, review every file listed in `git-add.txt`: give its exact path, what changed, and why it is needed for this task. Describe these as files selected for staging, and report excluded files and reasons separately. List one file per line with its own explanation; never group multiple file paths on one line.
 - Re-engage the same sentinel to review the final diff and evidence for breaking changes, bypasses, scope creep, and request drift. Resolve its findings before replying, with special attention to PHPStan levels, paths, ignores, configuration, and baselines.
 - Run the relevant verification command.
 - Summarize files changed.
@@ -5890,6 +5894,11 @@ install_omniroute() {
 		cat <<'OMNIROUTE_DOC'
 # OmniRoute delegation
 
+For a simple bounded task, ask once: "Do you want to try OmniRoute for this task
+to save tokens?" unless the user already authorized it. Wait for their reply
+before sending any task or context. If they decline, continue with the current
+agent. After approval, make one bounded attempt and review the proposal.
+
 Use `python3 vibe_scripts/codex/omniroute.py ask --task edit` with a bounded
 task on stdin. Choose `code` for a small function or test, `edit` for a mechanical
 change, `summary` for prose, or `extract` for structured data. The installer
@@ -5987,8 +5996,9 @@ that call only; do not claim measured main-model savings without a baseline.
 
 ## Headless operation
 
-Normal installs set up OmniRoute automatically. `--repo-only` skips runtime
-installation; `--no-omniroute` also skips runtime setup. Interactive setup asks
+Installers ask before setting up OmniRoute, with no as the default. `--yes`
+does not approve this optional installation. Empty input or EOF skips setup.
+`--repo-only` and `--no-omniroute` also skip runtime setup. Interactive setup asks
 you to choose the dashboard password. Unattended setup needs an explicitly
 supplied `VIBEHELPER_OMNIROUTE_PASSWORD`; otherwise the runtime is installed
 and configuration remains pending. No dashboard password is generated for you.
@@ -6046,9 +6056,15 @@ OMNIROUTE_DOC
 	if [[ "$SKIP_GLOBAL" == "1" || "$RUN_OMNIROUTE" != "1" ]]; then
 		log "Skipping OmniRoute runtime setup."
 	elif [[ "$DRY_RUN" == "1" ]]; then
-		log "Would install and configure private free-only OmniRoute and local dashboard."
-	elif confirm "Install and configure the local free-only OmniRoute gateway?"; then
-		python3 "$src" setup || warn "OmniRoute setup is incomplete; main agent fallback remains available."
+		log "Would ask whether to install and configure private free-only OmniRoute and local dashboard."
+	else
+		local reply=""
+		read -r -p "Install and configure the local free-only OmniRoute gateway? [y/N] " reply || true
+		if [[ "$reply" =~ ^[Yy]$|^[Yy][Ee][Ss]$ ]]; then
+			python3 "$src" setup || warn "OmniRoute setup is incomplete; main agent fallback remains available."
+		else
+			log "Skipping OmniRoute runtime setup."
+		fi
 	fi
 }
 

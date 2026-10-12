@@ -32,7 +32,7 @@ when part 1 succeeds.
 
 Options:
   --dry-run             Preview both phases without making changes.
-  --yes, -y             Accept non-interactive defaults in both phases.
+  --yes, -y             Accept general defaults; OmniRoute still asks.
   --fresh-install       Install missing tools and replace managed skill/tool files.
   --cleanup             Remove CodexHelper project files from the target repo.
   --force               Refresh installed helper-managed tools and managed files.
