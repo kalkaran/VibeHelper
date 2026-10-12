@@ -157,7 +157,8 @@ Codex with `--impeccable`, then restart Codex and approve the Impeccable hook
 in `/hooks`:
 
 ```sh
-bash /path/to/CodexHelper/MacOS/part1.sh --repo-only --impeccable --no-apply-codex-config
+bash /path/to/CodexHelper/MacOS/part1.sh --repo-only --impeccable
+--no-apply-codex-config
 ```
 
 Then preview and run the quality tooling setup:
@@ -183,7 +184,8 @@ configure.
 Preview the repo-only setup first:
 
 ```sh
-bash /path/to/CodexHelper/WSL/part1.sh --dry-run --repo-only --no-apply-codex-config
+bash /path/to/CodexHelper/WSL/part1.sh --dry-run --repo-only
+--no-apply-codex-config
 ```
 
 If the preview looks right, run it:
@@ -271,7 +273,7 @@ What still has to be done manually:
   hooks are not trusted, or when you
   want an explicit quick check.
 - Run `make -f vibe_scripts/codex/Makefile lint-ai` when you want broader
-  non-Semgrep lint checks.
+  lint checks.
 - Run `make -f vibe_scripts/codex/Makefile verify-ai` for large, risky,
   security-sensitive, or cross-project
   changes.
@@ -309,11 +311,10 @@ Use these commands when needed:
 - `make -f vibe_scripts/codex/Makefile edited-ai` checks only edited files. Use
   it after setup, when hooks are
   not trusted, or when you want a quick manual check.
-- `make -f vibe_scripts/codex/Makefile lint-ai` runs broader lint checks
-  without Semgrep.
+- `make -f vibe_scripts/codex/Makefile lint-ai` runs broader lint checks.
 - `make -f vibe_scripts/codex/Makefile verify-ai` runs bigger checks. Use it
   for large, risky,
-  security-sensitive, or cross-project changes. It may run Semgrep.
+  security-sensitive, or cross-project changes.
 - `make -f vibe_scripts/codex/Makefile savings-ai` shows the latest session
   report. The `SessionEnd` hook
   quietly freezes the RTK endpoint and marks the session record as finished.
@@ -338,8 +339,9 @@ provider. Other VibeHelper features do not expose a sound counterfactual, so
 the report leaves them unmeasured. RTK's project counters can include another
 simultaneous session in the same repository.
 
-Semgrep can be verbose. It is not automatic. It runs only when you ask for
-security or verify checks, or when you start `part1.sh` with `--security-scan`.
+Semgrep integration is retired. `--security-scan` exits with an
+unsupported-option
+message. Existing global binaries and custom security checks are preserved.
 
 Review generated `codebase-wiki/` changes before treating them as durable
 project memory.
@@ -392,7 +394,6 @@ project memory.
 - When `part2.sh` needs to create `package.json`, it writes a minimal private
   package with a sanitized name instead of relying on `npm init -y`; this avoids
   invalid names from folders such as `data%20science%20cloud%20platform`.
-- Semgrep is wired as an explicit security check, not as an automatic hook.
 - The WSL scripts are intended for Ubuntu WSL, not every Linux distro.
 - Full tool logs are stored under `.cache/`; AI-facing output is capped.
 - Review generated `codebase-wiki/` sections before relying on them as durable
@@ -404,16 +405,20 @@ Quality commands use `vibe_scripts/codex/Makefile`. Helper scripts live beside
 it, and workflow instructions live in `agent/codex/`. The project root
 Makefile and existing wiki pages are preserved, including with `--force`.
 
-For an older installation, preview the installer with `--dry-run --force`, then
-rerun with `--force` to refresh existing managed instructions and hooks. Restart
-the agent and review/trust updated hooks where required. Legacy root Makefile
-targets and shared `vibe_scripts/*` files are retained for manual review; the
-new
-commands do not use them. Existing user instructions may need their command
+For an older installation, preview with `--dry-run --refresh-managed`, then
+rerun with `--refresh-managed` to refresh managed instructions and hooks without
+package updates. `--force` also updates detected installed packages. Restart
+the agent and review/trust updated hooks where required. Recognizable generated
+Semgrep recipes are backed up and removed from legacy
+Makefiles. Other legacy targets and shared `vibe_scripts/*` files remain for
+manual review; provider commands use their scoped helpers. Existing user
+instructions may need their command
 paths updated manually.
 
-`--cleanup` removes this provider's configuration, top-level instruction file,
-`agent/codex/` and `vibe_scripts/codex/`. It preserves the project
+`--cleanup` removes only unchanged files recorded as owned by this provider.
+Modified files and legacy files without ownership evidence require manual
+review.
+It preserves the project
 Makefile, other provider, shared skills, wiki, notes, caches, skill lock,
 `.mcp.json`, `.gitignore` and legacy helpers. Review those shared files manually
 if removing VibeHelper entirely. Skill configuration and project memory remain
@@ -426,3 +431,7 @@ global hook still requires the existing opt-in. Unmarked global files are
 left alone during automatic refresh. The new global policy requires
 provider-specific commands in every project where it runs, so migrate those
 projects too. An old global hook can reject the new `make -f` commands.
+
+See [installation flow and evidence](../INSTALLATION-FLOW.md) for managed
+refresh,
+component states, migration, and repair-loop verification.

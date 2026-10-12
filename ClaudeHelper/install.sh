@@ -10,6 +10,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 DRY_RUN=0
 YES=0
 FORCE=0
+REFRESH_MANAGED=0
 FRESH_INSTALL=0
 UPDATE_INSTRUCTIONS=0
 CLEANUP=0
@@ -24,14 +25,14 @@ usage() {
 	cat <<USAGE
 Usage: $SCRIPT_NAME [options]
 
-Runs the matching platform's part1.sh and part2.sh in order. Part 2 runs only
-when part 1 succeeds. Makefile wiring is enabled by default, even when Codex
+Runs both setup phases independently and reports any phase failure. Makefile wiring is enabled by default, even when Codex
 setup is detected.
 
 Options:
   --dry-run       Preview both phases without making changes.
   --cleanup       Remove ClaudeHelper project files from the target repo.
-  --force         Refresh installed helper-managed tools and managed files.
+  --refresh-managed     Refresh managed files without installing/upgrading packages.
+  --force         Upgrade managed packages and refresh managed files (use --refresh-managed for files only).
   --fresh-install Install missing tools and replace managed skill/tool files.
   --repo PATH     Configure PATH instead of the current repository.
   --wire          Write/update the quality Makefile (default).
@@ -85,6 +86,14 @@ while [[ $# -gt 0 ]]; do
 		PART1_ONLY_ARGS+=("$1")
 		shift
 		;;
+	--security-scan)
+		err "Unsupported option --security-scan: Semgrep integration has been retired."
+		exit 2
+		;;
+	--refresh-managed)
+		REFRESH_MANAGED=1
+		shift
+		;;
 	--force)
 		FORCE=1
 		shift
@@ -131,30 +140,46 @@ if [[ -n "$REPO_ROOT" ]]; then
 	cd "$REPO_ROOT"
 fi
 
-cleanup_project() {
-	local paths=(".claude" "CLAUDE.md" "agent/claude" "vibe_scripts/claude")
-	if [[ "$DRY_RUN" -eq 1 ]]; then
-		log "Would remove ClaudeHelper project files from $(pwd)."
-		printf '  %s\n' "${paths[@]}"
-		log "Shared files, legacy helpers, project Makefile and .gitignore will be preserved."
-		return 0
+managed_operation() {
+	local operation="$1" asset
+	local flags=(--run-id "$$")
+	local flag component
+	if [[ "${#PART1_ONLY_ARGS[@]}" -gt 0 ]]; then
+		for flag in "${PART1_ONLY_ARGS[@]}"; do
+			case "$flag" in
+			--no-context7) component=context7 ;; --no-chrome-mcp) component=chrome-devtools ;;
+			--no-crg) component=code-review-graph ;; --no-rtk | --no-rtk-hook) component=rtk ;;
+			--no-graphify) component=graphify ;; --no-ponytail) component=ponytail ;;
+			--no-humanizer) component=humanizer ;; --no-omniroute) component=omniroute ;;
+			*) continue ;;
+			esac
+			flags+=("--skipped" "$component")
+		done
 	fi
-	if [[ "$YES" -ne 1 ]]; then
-		printf 'Remove ClaudeHelper project files from %s? [y/N] ' "$(pwd)"
+	[[ "$DRY_RUN" == "1" ]] && flags+=("--dry-run")
+	[[ "$operation" != "begin" || "$FORCE" != "1" ]] || flags+=("--force")
+	for asset in "$SCRIPT_DIR/../templates/vibe_scripts/managed-install.py" "$SCRIPT_DIR/templates/vibe_scripts/managed-install.py"; do
+		if [[ -f "$asset" ]]; then
+			if [[ "${#flags[@]}" -gt 0 ]]; then python3 "$asset" "$operation" --provider claude "${flags[@]}"; else python3 "$asset" "$operation" --provider claude; fi
+			return $?
+		fi
+	done
+	err "Required managed-install.py asset missing; setup cannot safely manage files."
+	return 1
+}
+
+cleanup_project() {
+	if [[ "$DRY_RUN" != "1" && "$YES" != "1" ]]; then
+		local answer
+		printf 'Remove unchanged ClaudeHelper-managed files from %s? [y/N] ' "$(pwd)"
 		read -r answer || answer=""
-		[[ "$answer" == "y" || "$answer" == "Y" || "$answer" == "yes" || "$answer" == "YES" ]] || {
+		case "$answer" in y | Y | yes | YES) ;; *)
 			log "Cleanup cancelled."
 			return 0
-		}
+			;;
+		esac
 	fi
-	local path
-	for path in "${paths[@]}"; do
-		[[ -e "$path" || -L "$path" ]] || continue
-		rm -rf -- "$path"
-		log "Removed $path"
-	done
-	log "Preserved shared files, legacy helpers, project Makefile and .gitignore."
-	log "ClaudeHelper project cleanup complete."
+	managed_operation cleanup
 }
 
 if [[ "$CLEANUP" -eq 1 ]]; then
@@ -259,24 +284,56 @@ run_part2() {
 	fi
 }
 
+if [[ "$REFRESH_MANAGED" == "1" ]]; then
+	if [[ "$FORCE" == "1" || "$FRESH_INSTALL" == "1" ]]; then
+		err "--refresh-managed cannot be combined with --force or --fresh-install."
+		exit 2
+	fi
+	PART1_ARGS+=("--refresh-managed")
+	PART2_ARGS+=("--refresh-managed")
+	log "explicitly skipped: package installation and upgrades (--refresh-managed)."
+fi
+[[ "$FORCE" != "1" ]] || log "needs action: --force permits managed package upgrades as well as file replacement."
+abort_managed_install() {
+	local status=$?
+	trap - EXIT INT TERM
+	managed_operation abort || err "Could not release installation transaction; rerun with --force."
+	exit "$status"
+}
+
+managed_operation begin
+trap abort_managed_install EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+phase_status=0
+
 log "Platform: $PLATFORM_DIR"
 log "Target repository: $(pwd)"
 log "Running repository workflow setup (part 1 of 2)."
 if run_part1; then
-	log "Part 1 completed."
+	log "configured: repository workflow (part 1); authentication is not verified."
 else
 	status=$?
-	err "Part 1 failed with exit code $status. Part 2 was not run."
-	exit "$status"
+	case "$status" in 130 | 143) exit "$status" ;; esac
+	err "failed: part 1 (exit $status); independent quality setup will still run."
+	phase_status="$status"
 fi
 
 log "Running quality-tool detection and wiring (part 2 of 2)."
 if run_part2; then
-	log "Part 2 completed."
+	log "configured: local quality setup (part 2)."
 else
 	status=$?
-	err "Part 2 failed with exit code $status."
-	exit "$status"
+	case "$status" in 130 | 143) exit "$status" ;; esac
+	err "failed: part 2 (exit $status)."
+	phase_status="$status"
+fi
+
+if ! managed_operation finish; then phase_status=1; fi
+trap - EXIT INT TERM
+if [[ "$phase_status" != "0" ]]; then
+	err "failed: installation remains incomplete; repair the reported components and rerun."
+	exit "$phase_status"
 fi
 
 if [[ "$DRY_RUN" -eq 1 ]]; then

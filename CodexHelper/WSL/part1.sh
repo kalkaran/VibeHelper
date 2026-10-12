@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Bootstrap a token-efficient, quality-focused AI coding workflow for Codex on Ubuntu WSL.
 # Installs/configures: Ponytail, Humanizer, code-review-graph, Chrome DevTools MCP,
-# optional Context7/Impeccable, and repo-local Codex workflow files. Semgrep and project linters are handled by
+# optional Context7/Impeccable, and repo-local Codex workflow files. Project linters are handled by
 # part2.sh.
 #
-# Version: 2026-10-10-v43
+# Version: 2026-10-12-v44
 #
 # Safe defaults:
 # - Prompts before network installs; OmniRoute requires its own confirmation.
@@ -13,25 +13,25 @@
 # - Creates project Codex hooks for edited-file checks, but does not auto-trust them.
 
 set -Eeuo pipefail
+INSTALLER_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 IFS=$'\n\t'
 
 SCRIPT_NAME="$(basename "$0")"
-SCRIPT_VERSION="2026-10-10-v43"
+SCRIPT_VERSION="2026-10-12-v44"
 YES=0
 DRY_RUN=0
 FORCE=0
+REFRESH_MANAGED=0
 FRESH_INSTALL=0
 SKIP_GLOBAL=0
 WITH_LLM_COUNCIL=0
 RUN_OMNIROUTE=1
 RUN_CONTEXT7=0
-CONTEXT7_EXPLICIT=0
 RUN_CHROME_MCP=1
 CHROME_MCP_EXPLICIT=0
 RUN_IMPECCABLE=0
 RUN_ADHD=1
 RUN_HUMANIZER=1
-RUN_SECURITY_SCAN=0
 RUN_CRG_BUILD=1
 CREATE_CODEX_HOOKS=1
 CREATE_RTK_HOOK=1
@@ -62,6 +62,7 @@ Usage: $SCRIPT_NAME [options]
 Options:
   --yes                 Skip general install prompts; OmniRoute still asks.
   --dry-run             Print what would happen, but do not change files or install tools.
+  --refresh-managed Refresh managed files; never install or upgrade packages.
   --force               Refresh installed helper-managed tools and managed files.
   --fresh-install       Install missing tools, refresh installed tools, and refresh files.
   --repo-only           Only create repo files; skip global tool installs.
@@ -84,7 +85,6 @@ Options:
   --apply-codex-config  Search for ~/.codex/config.toml and add the Git-blocking hook automatically.
   --no-apply-codex-config
                         Do not prompt to apply the Codex hook config.
-  --security-scan       Run semgrep scan after setup if semgrep is available.
   --install-prereqs     Explicitly install base system packages, uv, and pipx before AI tools.
   --install-system-packages
                         Explicitly install base Ubuntu WSL packages with apt-get.
@@ -125,6 +125,7 @@ for arg in "$@"; do
 	case "$arg" in
 	--yes | -y) YES=1 ;;
 	--dry-run) DRY_RUN=1 ;;
+	--refresh-managed) REFRESH_MANAGED=1 ;;
 	--force) FORCE=1 ;;
 	--fresh-install)
 		FRESH_INSTALL=1
@@ -140,7 +141,6 @@ for arg in "$@"; do
 	--with-llm-council) WITH_LLM_COUNCIL=1 ;;
 	--context7)
 		RUN_CONTEXT7=1
-		CONTEXT7_EXPLICIT=1
 		;;
 	--chrome-mcp)
 		RUN_CHROME_MCP=1
@@ -157,7 +157,10 @@ for arg in "$@"; do
 	--no-rtk-hook) CREATE_RTK_HOOK=0 ;;
 	--apply-codex-config) CODEX_CONFIG_MODE="apply" ;;
 	--no-apply-codex-config) CODEX_CONFIG_MODE="skip" ;;
-	--security-scan) RUN_SECURITY_SCAN=1 ;;
+	--security-scan)
+		err "Unsupported option --security-scan: Semgrep integration has been retired."
+		exit 2
+		;;
 	--install-prereqs)
 		INSTALL_PREREQS=1
 		INSTALL_SYSTEM_PACKAGES=1
@@ -180,6 +183,17 @@ for arg in "$@"; do
 		;;
 	esac
 done
+
+if [[ "$REFRESH_MANAGED" == "1" ]]; then
+	FORCE=1
+	FRESH_INSTALL=0
+	SKIP_GLOBAL=1
+	INSTALL_PREREQS=0
+	INSTALL_UV=0
+	INSTALL_PIPX=0
+	CODEX_CONFIG_MODE="skip"
+	log "explicitly skipped: all package changes (--refresh-managed)."
+fi
 
 if [[ -n "$PYTHON_INDEX_URL" ]]; then
 	export UV_DEFAULT_INDEX="$PYTHON_INDEX_URL"
@@ -322,57 +336,11 @@ rtk_is_expected() {
 	grep -Ei 'LLM context|token(-| )optimized|token consumption' >/dev/null <<<"$help"
 }
 
-semgrep_cert_file() {
-	if [[ -n "${SSL_CERT_FILE:-}" && -r "${SSL_CERT_FILE:-}" ]]; then
-		printf '%s\n' "$SSL_CERT_FILE"
-		return 0
-	fi
-
-	local candidate
-	for candidate in \
-		"/etc/ssl/certs/ca-certificates.crt" \
-		"/etc/ssl/cert.pem"; do
-		if [[ -r "$candidate" ]]; then
-			printf '%s\n' "$candidate"
-			return 0
-		fi
-	done
-
-	return 1
-}
-
-run_semgrep_cli() {
-	local path cert
-	path="$(resolve_binary semgrep 2>/dev/null || true)"
-	[[ -n "$path" ]] || return 127
-	local state_dir=".cache/semgrep"
-	if [[ "$DRY_RUN" -eq 1 ]]; then
-		state_dir="${TMPDIR:-/tmp}/ai-quality-semgrep-$$"
-	fi
-	mkdir -p "$state_dir"
-	cert="$(semgrep_cert_file 2>/dev/null || true)"
-	if [[ -n "$cert" ]]; then
-		SSL_CERT_FILE="$cert" \
-			SEMGREP_LOG_FILE="$state_dir/semgrep.log" \
-			SEMGREP_SETTINGS_FILE="$state_dir/settings.yml" \
-			SEMGREP_VERSION_CACHE_PATH="$state_dir/version-cache" \
-			"$path" "$@"
-	else
-		SEMGREP_LOG_FILE="$state_dir/semgrep.log" \
-			SEMGREP_SETTINGS_FILE="$state_dir/settings.yml" \
-			SEMGREP_VERSION_CACHE_PATH="$state_dir/version-cache" \
-			"$path" "$@"
-	fi
-}
-
 cli_works() {
 	local binary="$1"
 	local path
 	path="$(resolve_binary "$binary" 2>/dev/null || true)"
 	[[ -n "$path" ]] || return 1
-	if [[ "$binary" == "semgrep" ]]; then
-		return 0
-	fi
 	"$path" --version >/dev/null 2>&1
 }
 
@@ -825,7 +793,6 @@ check_prereqs() {
 	print_cli_resolution pipx
 	print_cli_resolution graphify
 	print_cli_resolution rtk
-	print_cli_resolution semgrep
 	print_cli_resolution code-review-graph
 	print_ponytail_status
 }
@@ -837,12 +804,12 @@ binary_in_active_venv() {
 	[[ -n "${VIRTUAL_ENV:-}" && -n "$path" && "$path" == "$VIRTUAL_ENV"/* ]]
 }
 
-record_install_ok() { INSTALL_OK+=("$1"); }
+record_install_ok() { INSTALL_OK+=("configured: $1"); }
 record_install_failed() {
-	INSTALL_FAILED+=("$1")
+	INSTALL_FAILED+=("failed: $1")
 	FINAL_EXIT_CODE=1
 }
-record_install_skipped() { INSTALL_SKIPPED+=("$1"); }
+record_install_skipped() { INSTALL_SKIPPED+=("explicitly skipped: $1"); }
 
 require_cli_available() {
 	# Mark a CLI as a hard failure if it is unavailable after setup.
@@ -1261,6 +1228,36 @@ context7_codex_login() {
 	fi
 	warn "Context7 OAuth login failed."
 	record_install_failed "Context7 OAuth login failed"
+	return 1
+}
+
+context7_codex_check() {
+	if [[ "$DRY_RUN" == "1" ]]; then
+		log "Would test Context7 access and run OAuth login only if authentication is required."
+		context7_codex_login
+		return
+	fi
+	local status
+	log "Testing Context7 access through Codex..."
+	if python3 "$HELPER_ROOT/templates/check-context7.py"; then
+		record_install_ok "Context7 access verified"
+		return 0
+	else
+		status=$?
+	fi
+	if [[ "$status" != "10" ]]; then
+		warn "Context7 access could not be verified; no confirmed OAuth failure, so login was not started. Check connectivity and Codex MCP status."
+		record_install_failed "Context7 access check failed"
+		return 1
+	fi
+	log "Context7 requires OAuth reauthentication; starting codex mcp login context7."
+	context7_codex_login || return 1
+	if python3 "$HELPER_ROOT/templates/check-context7.py"; then
+		record_install_ok "Context7 access verified after OAuth login"
+		return 0
+	fi
+	warn "Context7 login completed, but access still could not be verified."
+	record_install_failed "Context7 access check failed after OAuth login"
 	return 1
 }
 
@@ -1786,13 +1783,7 @@ install_global_tools() {
 		fi
 	fi
 
-	# Semgrep is a repo quality/security tool. This bootstrap only recommends it;
 	# part2.sh handles installation and Makefile wiring.
-	if have_cli semgrep; then
-		record_install_ok "semgrep already present at $(resolve_binary semgrep)"
-	else
-		record_install_skipped "semgrep not installed; part2.sh can install/wire it"
-	fi
 
 	if has_source_file \( -name '*.sh' -o -name '*.bash' -o -name '*.zsh' \); then
 		if have_cli shellcheck; then
@@ -1809,26 +1800,22 @@ install_global_tools() {
 
 	normalize_context7_config
 
-	# Context7: keep a correct registration, but let fresh/explicit runs complete OAuth.
+	# Registration alone does not prove that the stored OAuth credentials still work.
 	if context7_codex_configured; then
 		record_install_ok "Context7 MCP already registered"
-		if [[ "$FRESH_INSTALL" == "1" || "$CONTEXT7_EXPLICIT" == "1" ]]; then
-			log "Context7 MCP is already registered; starting OAuth login."
-			context7_codex_login || true
-		else
-			log "Context7 MCP is already registered at https://mcp.context7.com/mcp/oauth; skipping setup. Use --context7 to rerun OAuth login."
-		fi
+		log "Context7 MCP is already registered; checking access."
+		context7_codex_check || true
 	elif [[ "$RUN_CONTEXT7" == "1" || "$YES" != "1" ]]; then
 		if have npx; then
 			if confirm "Configure Context7 MCP for Codex with hosted OAuth?"; then
 				if [[ "$DRY_RUN" == "1" ]]; then
 					run npx npx ctx7 setup --codex --mcp --oauth -y
 					record_install_skipped "Context7 setup would run (dry-run)"
-					context7_codex_login || true
+					context7_codex_check || true
 				elif run npx npx ctx7 setup --codex --mcp --oauth -y; then
 					normalize_context7_config
 					record_install_ok "Context7 setup completed"
-					context7_codex_login || true
+					context7_codex_check || true
 				else
 					warn "Context7 setup failed."
 					record_install_failed "Context7 setup failed"
@@ -2011,6 +1998,45 @@ create_agent_files() {
 
 Use this repository with minimal, verifiable changes.
 
+For any failure, read the diagnostic first. Prefer formatted or structured
+output; use its reported cause, location and suggested correction to choose the
+next step. Read only relevant code or log sections when details are missing.
+If a tool rejects arguments, read its current schema or CLI help, correct the
+arguments and retry. Use accepted names and types instead of guessing. For
+other failures, use the diagnostic to decide whether a retry is safe.
+
+For linter/formatter failures, read the Python quality wrapper's formatted
+diagnostics first. Review each finding and any autofix diff for correctness
+and unintended changes, including pre-existing findings. Rerun the approved
+check after fixes; run affected tests when behavior could change. If diagnostics
+are omitted or unclear, read only the relevant sections of the linked log.
+Do not dump full logs or rerun raw tools for more output. Resolve failures or
+report a concrete blocker before completion. Autofixes and skipped or zero-file
+checks alone do not establish successful verification.
+
+## Task scope and guardrail consent
+
+Before implementation, state the requested outcome, what is in and out of scope,
+and how completion will be verified. Use the user's request and existing context;
+ask focused questions when unresolved details could change the scope or behavior.
+Wait for those answers before implementing the affected work. Continue authorized
+work that does not depend on them.
+
+Do not invent platform usage limits, eligibility rules, quotas or access
+restrictions. Distinguish user requirements and existing platform constraints from
+your own proposals. Cite the user instruction, existing code or authoritative
+documentation behind a claimed requirement; if it is uncertain, ask rather than
+implementing an assumed limitation.
+
+Before adding or expanding guardrails (such as restrictions, approval steps,
+validation rules or automated enforcement), present the proposed behavior, why it
+is needed and its tradeoffs, including who or what it would restrict. Obtain the
+user's explicit consent before implementing it. A general request to improve or
+fix something is not consent for extra guardrails. Honor consent already given
+for the same scope; ask again if the proposal materially changes. Preserve existing
+security, validation, accessibility and data-loss protections. Proceed with ordinary
+work already authorized by the user without adding approval steps.
+
 ## Simple tasks through OmniRoute
 
 For a simple bounded task, if OmniRoute use is not already authorized, ask once:
@@ -2064,7 +2090,6 @@ Run approved commands from the repository root. If a hook blocks a quality comma
 | `eslint`, `pylint`, `htmlhint`, `markdownlint`, `markdownlint-cli2`, `shellcheck`, `phpcs`, `golangci-lint`, `staticcheck`; `php -l`, `go vet`, `cargo clippy`; `make lint` | `make -f vibe_scripts/codex/Makefile lint-ai` |
 | `mypy`, `pyright`, `phpstan`, `phpstan.phar`; `php vendor/bin/phpstan`, `php tools/phpstan.phar`, `cargo check`, `dotnet build`; `make typecheck` | `make -f vibe_scripts/codex/Makefile typecheck-ai` |
 | `pytest`, `phpunit`; `go test`, `cargo test`, `dotnet test`; `make test` | `make -f vibe_scripts/codex/Makefile test-ai` |
-| `semgrep`; `make security` | `make -f vibe_scripts/codex/Makefile security-ai` |
 | `make verify` | `make -f vibe_scripts/codex/Makefile verify-ai` |
 
 Formatting or autofix flags on any tool (for example, `eslint --fix` or `markdownlint-cli2 --fix`) require `make -f vibe_scripts/codex/Makefile edited-ai`. Use `make -f vibe_scripts/codex/Makefile lint-ai` for whole-repository linting, including Ruff/Biome; an edited-file check does not replace requested full-repository coverage.
@@ -2473,6 +2498,10 @@ ensure_cache_gitignored() {
 }
 
 create_makefile() {
+	if [[ -f vibe_scripts/codex/Makefile ]] && grep -Eq '^security(-ai)?:|[Ss][Ee][Mm][Gg][Rr][Ee][Pp]' vibe_scripts/codex/Makefile; then
+		warn "needs action: preserving existing custom or ambiguous security wiring in vibe_scripts/codex/Makefile; review it manually."
+		return 0
+	fi
 	log "Creating or updating vibe_scripts/codex/Makefile targets"
 	detect_file_signals
 
@@ -2484,7 +2513,6 @@ create_makefile() {
 	local typecheck_cmd='@echo "No typecheck command configured yet."'
 	local test_cmd='@echo "No test command configured yet."'
 	# shellcheck disable=SC2016
-	local security_cmd='mkdir -p .cache/semgrep; cert=""; for p in /etc/ssl/certs/ca-certificates.crt /etc/ssl/cert.pem; do [ -r "$$p" ] && cert="$$p" && break; done; if command -v semgrep >/dev/null 2>&1; then if [ -n "$$cert" ]; then SSL_CERT_FILE="$$cert" SEMGREP_LOG_FILE=.cache/semgrep/semgrep.log SEMGREP_SETTINGS_FILE=.cache/semgrep/settings.yml SEMGREP_VERSION_CACHE_PATH=.cache/semgrep/version-cache semgrep --version >/dev/null 2>&1 && SSL_CERT_FILE="$$cert" SEMGREP_LOG_FILE=.cache/semgrep/semgrep.log SEMGREP_SETTINGS_FILE=.cache/semgrep/settings.yml SEMGREP_VERSION_CACHE_PATH=.cache/semgrep/version-cache semgrep scan || echo "semgrep unavailable or failing; skipping security scan"; else SEMGREP_LOG_FILE=.cache/semgrep/semgrep.log SEMGREP_SETTINGS_FILE=.cache/semgrep/settings.yml SEMGREP_VERSION_CACHE_PATH=.cache/semgrep/version-cache semgrep --version >/dev/null 2>&1 && SEMGREP_LOG_FILE=.cache/semgrep/semgrep.log SEMGREP_SETTINGS_FILE=.cache/semgrep/settings.yml SEMGREP_VERSION_CACHE_PATH=.cache/semgrep/version-cache semgrep scan || echo "semgrep unavailable or failing; skipping security scan"; fi; else echo "semgrep not installed; skipping security scan"; fi'
 
 	local -a setup_parts=()
 	local -a lint_parts=()
@@ -2559,7 +2587,7 @@ create_makefile() {
 	block=$(
 		cat <<EOF_MAKE
 $marker
-.PHONY: setup lint typecheck test security verify edited-ai wiki-ai skills-check skills-update agent-verify
+.PHONY: setup lint typecheck test verify edited-ai wiki-ai skills-check skills-update agent-verify
 export PATH := \$(HOME)/.local/bin:\$(PATH)
 
 setup:
@@ -2574,10 +2602,7 @@ typecheck:
 test:
 	$test_cmd
 
-security:
-	$security_cmd
-
-verify: lint typecheck test security
+verify: lint typecheck test
 
 edited-ai:
 	python3 vibe_scripts/codex/agent-check-edited.py
@@ -2994,1126 +3019,73 @@ create_skills_lock() {
 }
 
 create_verify_script() {
-	if [[ -f vibe_scripts/agent-verify.sh ]]; then
-		warn "Legacy shared helpers are preserved. Use vibe_scripts/codex/ commands; rerun with --force to refresh existing managed instructions and hooks."
-	fi
-	local script
-	script=$(
-		cat <<'EOF_VERIFY_SCRIPT'
-#!/usr/bin/env bash
-set -Eeuo pipefail
-IFS=$'\n\t'
-
-MODE="${1:-edited}"
-ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
-cd "$ROOT"
-export PATH="$HOME/.local/bin:$PATH"
-
-changed_files() {
-  if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-    git diff --name-only --diff-filter=ACMRTUXB HEAD 2>/dev/null || git diff --name-only --diff-filter=ACMRTUXB
-  fi
+	local src content
+	for src in "${INSTALLER_DIR}/../../templates/vibe_scripts/agent-verify.sh" "${INSTALLER_DIR}/../templates/vibe_scripts/agent-verify.sh"; do
+		if [[ -f "$src" ]]; then
+			if [[ "$DRY_RUN" == "1" ]]; then
+				log "Would refresh shared agent-verify.sh"
+				return 0
+			fi
+			content="$(cat "$src")"
+			write_file "vibe_scripts/codex/agent-verify.sh" "$content" "0755"
+			return 0
+		fi
+	done
+	err "Required shared helper asset missing: agent-verify.sh"
+	return 1
 }
 
-print_changed_files_summary() {
-  local tmp count limit=30
-  tmp="$(mktemp)"
-  changed_files >"$tmp" || true
-  count="$(wc -l <"$tmp" | tr -d ' ')"
-  if [[ "$count" -eq 0 ]]; then
-    echo "  none"
-  elif [[ "$count" -le "$limit" ]]; then
-    sed 's/^/  - /' "$tmp"
-  else
-    head -n "$limit" "$tmp" | sed 's/^/  - /'
-    echo "  ... $((count - limit)) more changed files hidden from AI output"
-  fi
-  rm -f "$tmp"
-}
-
-run_if_available() {
-  local name="$1"
-  shift
-  if command -v "$name" >/dev/null 2>&1; then
-    echo "+ $*"
-    "$@"
-  else
-    echo "- $name not found; skipping"
-  fi
-}
-
-echo "Agent verification from: $ROOT"
-echo "Mode: $MODE"
-echo
-
-echo "Changed files:"
-print_changed_files_summary
-echo
-
-if [[ "$MODE" == "edited" ]]; then
-  make -f vibe_scripts/codex/Makefile edited-ai
-elif [[ "$MODE" == "lint" ]]; then
-  make -f vibe_scripts/codex/Makefile lint-ai
-elif [[ "$MODE" == "typecheck" ]]; then
-  make -f vibe_scripts/codex/Makefile typecheck-ai
-elif [[ "$MODE" == "test" ]]; then
-  make -f vibe_scripts/codex/Makefile test-ai
-elif [[ "$MODE" == "security" ]]; then
-  make -f vibe_scripts/codex/Makefile security-ai
-elif [[ "$MODE" == "graph" ]]; then
-  run_if_available code-review-graph code-review-graph detect-changes --brief
-elif [[ "$MODE" == "all" || "$MODE" == "verify" ]]; then
-  if command -v code-review-graph >/dev/null 2>&1; then
-    code-review-graph detect-changes --brief || true
-  fi
-  make -f vibe_scripts/codex/Makefile verify-ai
-else
-  echo "Unknown mode: $MODE" >&2
-  echo "Usage: $0 [edited|all|verify|lint|typecheck|test|security|graph]" >&2
-  exit 2
-fi
-EOF_VERIFY_SCRIPT
-	)
-	write_file "vibe_scripts/codex/agent-verify.sh" "$script" "0755"
+create_quality_hook_script() {
+	local src content
+	for src in "${INSTALLER_DIR}/../../templates/vibe_scripts/quality-hook.py" "${INSTALLER_DIR}/../templates/vibe_scripts/quality-hook.py"; do
+		if [[ -f "$src" ]]; then
+			if [[ "$DRY_RUN" == "1" ]]; then
+				log "Would refresh shared quality-hook.py"
+				return 0
+			fi
+			content="$(cat "$src")"
+			write_file "vibe_scripts/codex/quality-hook.py" "$content" "0755"
+			return 0
+		fi
+	done
+	err "Required shared helper asset missing: quality-hook.py"
+	return 1
 }
 
 create_ai_quality_wrapper_script() {
-	local script
-	script=$(
-		cat <<'EOF_AI_WRAPPER'
-#!/usr/bin/env python3
-"""Run a quality command with AI-safe output."""
-
-from __future__ import annotations
-
-import argparse
-import datetime as dt
-import json
-import os
-import re
-import shutil
-import subprocess
-import sys
-from pathlib import Path
-
-
-RTK_FILTERS = {
-    "rtk:cargo-test": "cargo-test",
-    "rtk:go-test": "go-test",
-    "rtk:mypy": "mypy",
-    "rtk:pytest": "pytest",
-    "rtk:ruff-check": "ruff-check",
-    "rtk:ruff-format": "ruff-format",
-}
-
-FAILURE_PATTERN = re.compile(
-    r"\b(?:error|fatal|fail(?:ed|ure)?|exception|panic)\b", re.IGNORECASE
-)
-
-
-def slugify(value: str) -> str:
-    value = value.strip().lower()
-    value = re.sub(r"[^a-z0-9._-]+", "-", value)
-    return value.strip("-") or "quality-command"
-
-
-def clip_line(line: str, max_chars: int = 500) -> str:
-    line = line.rstrip()
-    if len(line) <= max_chars:
-        return line
-    return f"{line[:max_chars]}... {len(line) - max_chars} chars omitted"
-
-
-def trim_lines(
-    text: str, max_lines: int, *, preserve_failures: bool = False
-) -> tuple[list[str], int]:
-    lines = [clip_line(line) for line in text.splitlines() if line.strip()]
-    if len(lines) <= max_lines:
-        return lines, 0
-    shown = max_lines - 1
-    baseline_head = shown // 2
-    baseline_tail = shown - baseline_head
-    anchor_indexes: list[int] = []
-    if preserve_failures:
-        anchor_limit = min(2, max(0, shown - 2))
-        omitted_end = len(lines) - baseline_tail
-        for index in range(baseline_head, omitted_end):
-            line = lines[index]
-            if FAILURE_PATTERN.search(line):
-                anchor_indexes.append(index)
-                if len(anchor_indexes) == anchor_limit:
-                    break
-
-    remaining = shown - len(anchor_indexes)
-    head_count = remaining // 2
-    tail_count = remaining - head_count
-    omitted = len(lines) - shown
-    return (
-        lines[:head_count]
-        + [f"... {omitted} output lines omitted ..."]
-        + [lines[index] for index in anchor_indexes]
-        + lines[-tail_count:],
-        omitted,
-    )
-
-
-def summarize_known_success(output: str, returncode: int) -> list[str] | None:
-    if returncode != 0:
-        return None
-    lines = [line.rstrip() for line in output.splitlines() if line.strip()]
-    if lines and all(
-        line.startswith("No syntax errors detected in ") for line in lines
-    ):
-        return [f"PHP syntax check passed for {len(lines)} files."]
-    return None
-
-
-def json_documents(output: str) -> tuple[list[object], list[str]]:
-    decoder = json.JSONDecoder()
-    documents: list[object] = []
-    spans: list[tuple[int, int]] = []
-    cursor = 0
-    while cursor < len(output):
-        while cursor < len(output) and output[cursor].isspace():
-            cursor += 1
-        if cursor < len(output) and output[cursor] in "[{":
-            start = cursor
-        else:
-            match = re.search(r"(?m)^[ \t]*(?=[\[{])", output[cursor:])
-            if match is None:
-                break
-            start = cursor + match.end()
-        try:
-            document, end = decoder.raw_decode(output, start)
-        except json.JSONDecodeError:
-            newline = output.find("\n", start)
-            cursor = len(output) if newline < 0 else newline + 1
-            continue
-        documents.append(document)
-        spans.append((start, end))
-        cursor = end
-
-    residue_parts: list[str] = []
-    previous = 0
-    for start, end in spans:
-        residue_parts.append(output[previous:start])
-        previous = end
-    residue_parts.append(output[previous:])
-    residue = [
-        clip_line(line)
-        for part in residue_parts
-        for line in part.splitlines()
-        if line.strip()
-    ]
-    return documents, residue
-
-
-def integer(value: object) -> int:
-    try:
-        return int(value)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
-        return 0
-
-
-def one_line(value: object) -> str:
-    return " ".join(str(value).split())
-
-
-def text_value(value: object) -> str:
-    if isinstance(value, str):
-        return one_line(value)
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
-
-
-def diagnostic(
-    path: object,
-    line: object,
-    column: object,
-    severity: object,
-    code: object,
-    message: object,
-    detail: str = "",
-) -> str:
-    location = one_line(path or "<unknown>")
-    if line is not None:
-        location += f":{one_line(line)}"
-        if column is not None:
-            location += f":{one_line(column)}"
-    metadata = " ".join(
-        part
-        for part in (
-            one_line(severity or "issue").lower(),
-            one_line(code or ""),
-            one_line(detail),
-        )
-        if part
-    )
-    return clip_line(f"{location} [{metadata}] {text_value(message)}")
-
-
-def parse_phpcs(documents: list[object]) -> tuple[str, list[str]] | None:
-    errors = warnings = fixable = 0
-    files_seen = 0
-    diagnostics: list[str] = []
-    for document in documents:
-        if not isinstance(document, dict):
-            return None
-        totals = document.get("totals")
-        files = document.get("files")
-        if not isinstance(totals, dict) or not isinstance(files, dict):
-            return None
-        errors += integer(totals.get("errors"))
-        warnings += integer(totals.get("warnings"))
-        fixable += integer(totals.get("fixable"))
-        files_seen += len(files)
-        for path, report in sorted(files.items()):
-            if not isinstance(report, dict) or not isinstance(report.get("messages", []), list):
-                return None
-            for item in report.get("messages", []):
-                if not isinstance(item, dict):
-                    return None
-                detail = f"severity={item.get('severity', 0)}"
-                if item.get("fixable"):
-                    detail += " fixable"
-                diagnostics.append(
-                    diagnostic(
-                        path,
-                        item.get("line"),
-                        item.get("column"),
-                        item.get("type"),
-                        item.get("source"),
-                        item.get("message", "PHPCS issue"),
-                        detail,
-                    )
-                )
-    return (
-        f"PHPCS: {errors} errors, {warnings} warnings, {fixable} fixable across {files_seen} files.",
-        diagnostics,
-    )
-
-
-def parse_phpstan(documents: list[object]) -> tuple[str, list[str]] | None:
-    global_errors = file_errors = files_seen = 0
-    diagnostics: list[str] = []
-    for document in documents:
-        if not isinstance(document, dict):
-            return None
-        totals = document.get("totals")
-        files = document.get("files")
-        errors = document.get("errors", [])
-        if (
-            not isinstance(totals, dict)
-            or not isinstance(files, dict)
-            or not isinstance(errors, list)
-        ):
-            return None
-        global_errors += integer(totals.get("errors"))
-        file_errors += integer(totals.get("file_errors"))
-        for error in errors:
-            diagnostics.append(
-                diagnostic("<phpstan>", None, None, "error", "global", error)
-            )
-        files_seen += len(files)
-        for path, report in sorted(files.items()):
-            if not isinstance(report, dict) or not isinstance(
-                report.get("messages", []), list
-            ):
-                return None
-            for item in report.get("messages", []):
-                if not isinstance(item, dict):
-                    return None
-                diagnostics.append(
-                    diagnostic(
-                        path,
-                        item.get("line"),
-                        None,
-                        "error",
-                        item.get("identifier") or "phpstan",
-                        item.get("message", "PHPStan error"),
-                    )
-                )
-    return (
-        f"PHPStan: {global_errors} global errors, {file_errors} file errors across {files_seen} files.",
-        diagnostics,
-    )
-
-
-def parse_semgrep(documents: list[object]) -> tuple[str, list[str]] | None:
-    findings = tool_errors = 0
-    levels: dict[str, int] = {}
-    finding_diagnostics: list[str] = []
-    error_diagnostics: list[str] = []
-    for document in documents:
-        if not isinstance(document, dict) or not isinstance(document.get("results"), list):
-            return None
-        errors = document.get("errors", [])
-        if not isinstance(errors, list):
-            return None
-        for item in document["results"]:
-            if not isinstance(item, dict):
-                return None
-            start = item.get("start", {})
-            extra = item.get("extra", {})
-            if not isinstance(start, dict) or not isinstance(extra, dict):
-                return None
-            findings += 1
-            level = str(extra.get("severity") or "issue").lower()
-            levels[level] = levels.get(level, 0) + 1
-            finding_diagnostics.append(
-                diagnostic(
-                    item.get("path"),
-                    start.get("line"),
-                    start.get("col"),
-                    level,
-                    item.get("check_id"),
-                    extra.get("message", "Semgrep finding"),
-                )
-            )
-        for item in errors:
-            if not isinstance(item, dict):
-                return None
-            tool_errors += 1
-            location = item.get("location", {})
-            if not isinstance(location, dict):
-                location = {}
-            start = location.get("start", {})
-            if not isinstance(start, dict):
-                start = {}
-            error_diagnostics.append(
-                diagnostic(
-                    item.get("path") or location.get("path") or "<semgrep>",
-                    item.get("line") or start.get("line"),
-                    item.get("column") or start.get("col"),
-                    "error",
-                    item.get("type") or item.get("code") or "tool-error",
-                    item.get("message") or item,
-                )
-            )
-    counts = ", ".join(f"{count} {level}" for level, count in sorted(levels.items()))
-    return (
-        f"Semgrep: {findings} findings{f' ({counts})' if counts else ''}, {tool_errors} tool errors.",
-        error_diagnostics + finding_diagnostics,
-    )
-
-
-def parse_shellcheck(documents: list[object]) -> tuple[str, list[str]] | None:
-    diagnostics: list[str] = []
-    levels: dict[str, int] = {}
-    for document in documents:
-        if isinstance(document, list):
-            comments = document
-        elif isinstance(document, dict) and isinstance(document.get("comments"), list):
-            comments = document["comments"]
-        else:
-            return None
-        for item in comments:
-            if not isinstance(item, dict):
-                return None
-            level = str(item.get("level") or "issue").lower()
-            levels[level] = levels.get(level, 0) + 1
-            code = item.get("code")
-            diagnostics.append(
-                diagnostic(
-                    item.get("file"),
-                    item.get("line"),
-                    item.get("column"),
-                    level,
-                    f"SC{code}" if code is not None else "shellcheck",
-                    item.get("message", "ShellCheck issue"),
-                )
-            )
-    counts = ", ".join(f"{count} {level}" for level, count in sorted(levels.items()))
-    return f"ShellCheck: {len(diagnostics)} issues{f' ({counts})' if counts else ''}.", diagnostics
-
-
-def parse_pyright(documents: list[object]) -> tuple[str, list[str]] | None:
-    diagnostics: list[str] = []
-    errors = warnings = information = files = 0
-    fatal_flags = 0
-    for document in documents:
-        if not isinstance(document, dict) or not isinstance(
-            document.get("generalDiagnostics"), list
-        ):
-            return None
-        summary = document.get("summary", {})
-        if not isinstance(summary, dict):
-            return None
-        errors += integer(summary.get("errorCount"))
-        warnings += integer(summary.get("warningCount"))
-        information += integer(summary.get("informationCount"))
-        files += integer(summary.get("filesAnalyzed"))
-        for flag, message in (
-            ("fatalErrorOccurred", "Pyright reported a fatal error"),
-            ("configParseErrorOccurred", "Pyright could not parse its configuration"),
-        ):
-            if document.get(flag):
-                fatal_flags += 1
-                diagnostics.append(
-                    diagnostic("<pyright>", None, None, "error", flag, message)
-                )
-        for item in document["generalDiagnostics"]:
-            if not isinstance(item, dict):
-                return None
-            location = item.get("range", {})
-            if not isinstance(location, dict):
-                location = {}
-            start = location.get("start", {})
-            if not isinstance(start, dict):
-                start = {}
-            line = integer(start.get("line")) + 1
-            column = integer(start.get("character")) + 1
-            diagnostics.append(
-                diagnostic(
-                    item.get("file"),
-                    line,
-                    column,
-                    item.get("severity"),
-                    item.get("rule") or "pyright",
-                    item.get("message", "Pyright issue"),
-                )
-            )
-    return (
-        f"Pyright: {errors} errors, {warnings} warnings, {information} informational across {files} files; {fatal_flags} fatal/config errors.",
-        diagnostics,
-    )
-
-
-NATIVE_ADAPTERS = {
-    "native:phpcs-json": parse_phpcs,
-    "native:phpstan-json": parse_phpstan,
-    "native:pyright-json": parse_pyright,
-    "native:semgrep-json": parse_semgrep,
-    "native:shellcheck-json1": parse_shellcheck,
-}
-
-
-def diagnostic_priority(line: str) -> int:
-    match = re.search(r" \[([a-z]+)\b", line, re.IGNORECASE)
-    level = match.group(1).lower() if match else ""
-    if "fatal" in level:
-        return 0
-    return {
-        "error": 1,
-        "warning": 2,
-        "information": 3,
-        "info": 3,
-        "style": 3,
-    }.get(level, 4)
-
-
-def render_native(
-    summary: str, diagnostics: list[str], residue: list[str], max_lines: int
-) -> list[str]:
-    if residue:
-        summary += f" {len(residue)} non-JSON output lines also emitted."
-    lines = [clip_line(summary)]
-    diagnostics = sorted(diagnostics, key=diagnostic_priority)
-    detail_slots = max_lines - 1
-    residue_slots = 0
-    if residue:
-        residue_slots = min(3, detail_slots if not diagnostics else max(1, detail_slots - 2))
-    diagnostic_slots = detail_slots - residue_slots
-    if len(diagnostics) > diagnostic_slots:
-        shown = max(0, diagnostic_slots - 1)
-        lines.extend(diagnostics[:shown])
-        lines.append(f"... {len(diagnostics) - shown} diagnostics omitted ...")
-    else:
-        lines.extend(diagnostics)
-    if residue_slots:
-        shown = min(len(residue), residue_slots)
-        if len(residue) > residue_slots and residue_slots > 1:
-            shown -= 1
-        for index, line in enumerate(residue[:shown], start=1):
-            lines.append(f"[tool output {index}/{len(residue)}] {line}")
-        omitted = len(residue) - shown
-        if omitted:
-            if residue_slots == 1:
-                lines[-1] += f" (... {omitted} non-JSON lines omitted)"
-            else:
-                lines.append(f"... {omitted} non-JSON output lines omitted ...")
-    return lines
-
-
-def adapter_summary(
-    adapter: str, output: str, returncode: int, max_lines: int
-) -> tuple[list[str] | None, str | None]:
-    if adapter in RTK_FILTERS:
-        if not output:
-            return None, "the tool produced no output"
-        rtk = shutil.which("rtk")
-        if not rtk:
-            return None, "rtk is not installed"
-        try:
-            completed = subprocess.run(
-                [rtk, "pipe", "--filter", RTK_FILTERS[adapter]],
-                input=output,
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                timeout=5,
-                check=False,
-            )
-        except subprocess.TimeoutExpired:
-            return None, "rtk timed out after 5 seconds"
-        except OSError as error:
-            return None, f"rtk could not run ({one_line(error)})"
-        if completed.returncode != 0:
-            return None, f"rtk exited {completed.returncode}"
-        if not completed.stdout.strip():
-            return None, "rtk returned no summary"
-        if adapter == "rtk:go-test" and returncode != 0 and re.fullmatch(
-            r"\s*(?:go test:\s*)?no tests found[.!]?\s*",
-            completed.stdout,
-            re.IGNORECASE,
-        ):
-            return None, "rtk reported no tests for a failed Go test run"
-        return trim_lines(completed.stdout, max_lines)[0], None
-
-    parser = NATIVE_ADAPTERS.get(adapter)
-    if parser is not None:
-        try:
-            documents, residue = json_documents(output)
-            if not documents:
-                return None, "no complete JSON document was found"
-            parsed = parser(documents)
-        except Exception as error:
-            return None, f"adapter parser failed ({type(error).__name__})"
-        if parsed is None:
-            return None, "the JSON schema was not recognized"
-        summary, diagnostics = parsed
-        if returncode != 0 and not diagnostics:
-            return None, "the tool failed without any parsed diagnostics"
-        return render_native(summary, diagnostics, residue, max_lines), None
-
-    if adapter == "generic":
-        return None, None
-    return None, f"unknown adapter {adapter!r}"
-
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Run a command and print a capped AI-safe summary."
-    )
-    parser.add_argument("--label", required=True)
-    parser.add_argument("--adapter", default="generic")
-    parser.add_argument("--log-dir", default=".cache/ai-quality")
-    parser.add_argument("--max-lines", type=int, default=30)
-    parser.add_argument("--shell", action="store_true")
-    parser.add_argument("command", nargs=argparse.REMAINDER)
-    args = parser.parse_args()
-    if args.command and args.command[0] == "--":
-        args.command = args.command[1:]
-    if not args.command:
-        parser.error("missing command after --")
-    if args.max_lines < 4:
-        parser.error("--max-lines must be at least 4")
-    return args
-
-
-def main() -> int:
-    args = parse_args()
-    log_dir = Path(args.log_dir)
-    log_dir.mkdir(parents=True, exist_ok=True)
-    log_path = (
-        log_dir
-        / (
-            f"{dt.datetime.now().strftime('%Y%m%d-%H%M%S-%f')}-"
-            f"{os.getpid()}-{slugify(args.label)}.log"
-        )
-    )
-    if args.shell:
-        command_display = args.command[0]
-        run_command: str | list[str] = args.command[0]
-    else:
-        command_display = " ".join(args.command)
-        run_command = args.command
-    env = os.environ.copy()
-    env.setdefault("NO_COLOR", "1")
-    completed = subprocess.run(
-        run_command,
-        shell=args.shell,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        env=env,
-        check=False,
-    )
-    output = completed.stdout or ""
-    log_path.write_text(
-        f"$ {command_display}\nexit_code={completed.returncode}\n\n{output}",
-        encoding="utf-8",
-    )
-    status = "ok" if completed.returncode == 0 else f"failed ({completed.returncode})"
-    print(f"[ai-quality] {args.label}: {status}")
-    print(f"[ai-quality] full log: {log_path}")
-
-    if args.adapter == "generic":
-        known_success = summarize_known_success(output, completed.returncode)
-        if known_success is not None:
-            print("[ai-quality] summary:")
-            for line in known_success:
-                print(line)
-            return completed.returncode
-
-    parsed, fallback_reason = adapter_summary(
-        args.adapter, output, completed.returncode, args.max_lines
-    )
-    if parsed is not None:
-        print(f"[ai-quality] {args.adapter} output ({len(parsed)} lines):")
-        for line in parsed:
-            print(line)
-        return completed.returncode
-    if fallback_reason:
-        print(
-            f"[ai-quality] adapter fallback: {fallback_reason}; showing capped raw output."
-        )
-    summary_lines, omitted = trim_lines(
-        output, args.max_lines, preserve_failures=completed.returncode != 0
-    )
-    if summary_lines:
-        print(f"[ai-quality] capped output ({len(summary_lines)} lines):")
-        for line in summary_lines:
-            print(line)
-    else:
-        print("[ai-quality] no output")
-    if omitted:
-        print(
-            f"[ai-quality] output was truncated for the AI transcript; inspect {log_path} for the full output."
-        )
-    return completed.returncode
-
-
-if __name__ == "__main__":
-    sys.exit(main())
-EOF_AI_WRAPPER
-	)
-	write_file "vibe_scripts/codex/ai-quality-wrapper.py" "$script" "0755"
+	local src content
+	for src in "${INSTALLER_DIR}/../../templates/vibe_scripts/ai-quality-wrapper.py" "${INSTALLER_DIR}/../templates/vibe_scripts/ai-quality-wrapper.py"; do
+		if [[ -f "$src" ]]; then
+			if [[ "$DRY_RUN" == "1" ]]; then
+				log "Would refresh shared ai-quality-wrapper.py"
+				return 0
+			fi
+			content="$(cat "$src")"
+			write_file "vibe_scripts/codex/ai-quality-wrapper.py" "$content" "0755"
+			return 0
+		fi
+	done
+	err "Required shared helper asset missing: ai-quality-wrapper.py"
+	return 1
 }
 
 create_edited_check_script() {
-	local script
-	script=$(
-		cat <<'EOF_EDITED_CHECK'
-#!/usr/bin/env python3
-"""Format and verify files edited by the agent with capped AI output."""
-
-from __future__ import annotations
-
-import argparse
-import os
-import shlex
-import shutil
-import subprocess
-import sys
-from pathlib import Path
-
-
-EXCLUDED_DIRS = {
-    ".agents",
-    ".cache",
-    ".claude",
-    ".codex",
-    ".git",
-    ".venv",
-    "build",
-    "coverage",
-    "dist",
-    "graphify-out",
-    "node_modules",
-    "obsidian",
-    "vendor",
+	local src content
+	for src in "${INSTALLER_DIR}/../../templates/vibe_scripts/agent-check-edited.py" "${INSTALLER_DIR}/../templates/vibe_scripts/agent-check-edited.py"; do
+		if [[ -f "$src" ]]; then
+			if [[ "$DRY_RUN" == "1" ]]; then
+				log "Would refresh shared agent-check-edited.py"
+				return 0
+			fi
+			content="$(cat "$src")"
+			write_file "vibe_scripts/codex/agent-check-edited.py" "$content" "0755"
+			return 0
+		fi
+	done
+	err "Required shared helper asset missing: agent-check-edited.py"
+	return 1
 }
-EXCLUDED_FILES = {".mcp.json"}
-EDITED_FILE_LISTS = (
-    ".cache/claude-edited-files.txt",
-    ".cache/codex-edited-files.txt",
-)
-BIOME_EXTS = {".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".css", ".json", ".jsonc"}
-HTML_EXTS = {".html", ".htm"}
-MARKDOWN_EXTS = {".md", ".markdown"}
-PYTHON_EXTS = {".py", ".pyi"}
-GO_EXTS = {".go"}
-FRONTEND_DESIGN_EXTS = {
-    ".astro",
-    ".css",
-    ".htm",
-    ".html",
-    ".js",
-    ".jsx",
-    ".less",
-    ".sass",
-    ".scss",
-    ".svelte",
-    ".ts",
-    ".tsx",
-    ".vue",
-}
-PHP_EXTS = {".php"}
-SHELL_EXTS = {".sh", ".bash", ".zsh"}
 
-
-def run_capture(args: list[str], cwd: Path) -> str:
-    completed = subprocess.run(
-        args,
-        cwd=cwd,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        check=False,
-    )
-    return completed.stdout
-
-
-def repo_root() -> Path:
-    output = run_capture(["git", "rev-parse", "--show-toplevel"], Path.cwd()).strip()
-    return Path(output) if output else Path.cwd()
-
-
-def recorded_edited_files(root: Path) -> list[str]:
-    return sorted(
-        {
-            line.strip()
-            for relative in EDITED_FILE_LISTS
-            if (path := root / relative).is_file()
-            for line in path.read_text(encoding="utf-8").splitlines()
-            if line.strip()
-        }
-    )
-
-
-def is_excluded(path: str) -> bool:
-    parts = Path(path).parts
-    return path in EXCLUDED_FILES or any(
-        part in EXCLUDED_DIRS or part == "skills" or part.endswith("-skills")
-        for part in parts
-    )
-
-
-def existing_project_files(root: Path, files: list[str]) -> list[str]:
-    result: list[str] = []
-    for file in files:
-        normalized = file.strip()
-        if not normalized or is_excluded(normalized):
-            continue
-        full_path = (root / normalized).resolve()
-        try:
-            full_path.relative_to(root.resolve())
-        except ValueError:
-            continue
-        if full_path.is_file():
-            result.append(normalized)
-    return sorted(set(result))
-
-
-def split_by_ext(files: list[str]) -> dict[str, list[str]]:
-    groups = {
-        "biome": [],
-        "go": [],
-        "html": [],
-        "markdown": [],
-        "design": [],
-        "php": [],
-        "python": [],
-        "shell": [],
-    }
-    for file in files:
-        suffix = Path(file).suffix.lower()
-        if suffix in BIOME_EXTS:
-            groups["biome"].append(file)
-        if suffix in GO_EXTS:
-            groups["go"].append(file)
-        if suffix in HTML_EXTS:
-            groups["html"].append(file)
-        if suffix in MARKDOWN_EXTS:
-            groups["markdown"].append(file)
-        if suffix in FRONTEND_DESIGN_EXTS:
-            groups["design"].append(file)
-        if suffix in PHP_EXTS:
-            groups["php"].append(file)
-        if suffix in PYTHON_EXTS:
-            groups["python"].append(file)
-        if suffix in SHELL_EXTS:
-            groups["shell"].append(file)
-    return groups
-
-
-def have_path(root: Path, path: str) -> bool:
-    return (root / path).exists()
-
-
-def have_command(command: str, root: Path) -> bool:
-    return shutil.which(command) is not None
-
-
-def local_impeccable_command(root: Path) -> list[str] | None:
-    local_bin = root / "node_modules" / ".bin" / "impeccable"
-    if local_bin.exists():
-        return ["npx", "--no-install", "impeccable"]
-    executable = shutil.which("impeccable")
-    if executable:
-        return [executable]
-    return None
-
-
-def markdownlint_command(root: Path) -> list[str] | None:
-    local_bin = root / "node_modules" / ".bin" / "markdownlint-cli2"
-    if local_bin.exists():
-        return ["npx", "--no-install", "markdownlint-cli2"]
-    executable = shutil.which("markdownlint-cli2")
-    if executable:
-        return [executable]
-    return None
-
-
-def quote_files(files: list[str]) -> str:
-    return " ".join(shlex.quote(file) for file in files)
-
-
-def run_wrapped(
-    root: Path,
-    label: str,
-    command: list[str],
-    *,
-    adapter: str = "generic",
-    shell: bool = False,
-    max_lines: int = 24,
-) -> int:
-    wrapper = root / "vibe_scripts" / "codex" / "ai-quality-wrapper.py"
-    args = [
-        sys.executable,
-        str(wrapper),
-        "--label",
-        label,
-        "--max-lines",
-        str(max_lines),
-        "--adapter",
-        adapter,
-    ]
-    if shell:
-        args.append("--shell")
-    args.append("--")
-    args.extend(command)
-    return subprocess.run(args, cwd=root, check=False).returncode
-
-
-def run_phase(
-    root: Path, phase: str, commands: list[tuple[str, list[str], bool, int, str]]
-) -> int:
-    if not commands:
-        print(f"[edited-check] {phase}: no applicable commands")
-        return 0
-    print(f"[edited-check] {phase}")
-    sys.stdout.flush()
-    failed = 0
-    for label, command, shell, max_lines, adapter in commands:
-        code = run_wrapped(
-            root, label, command, adapter=adapter, shell=shell, max_lines=max_lines
-        )
-        if code != 0:
-            failed = 1
-    return failed
-
-
-def build_commands(
-    root: Path, groups: dict[str, list[str]]
-) -> tuple[
-    list[tuple[str, list[str], bool, int, str]],
-    list[tuple[str, list[str], bool, int, str]],
-    list[tuple[str, list[str], bool, int, str]],
-]:
-    format_cmds: list[tuple[str, list[str], bool, int, str]] = []
-    lint_cmds: list[tuple[str, list[str], bool, int, str]] = []
-    type_cmds: list[tuple[str, list[str], bool, int, str]] = []
-
-    if groups["biome"] and have_path(root, "node_modules/.bin/biome"):
-        files = quote_files(groups["biome"])
-        format_cmds.append(
-            (
-                "format-biome-edited",
-                [f"npx biome check --write --max-diagnostics=none {files}"],
-                True,
-                20,
-                "generic",
-            )
-        )
-        lint_cmds.append(
-            (
-                "lint-biome-edited",
-                [f"npx biome check --colors=off --max-diagnostics=none {files}"],
-                True,
-                24,
-                "generic",
-            )
-        )
-    if groups["html"] and have_path(root, "node_modules/.bin/htmlhint"):
-        files = quote_files(groups["html"])
-        lint_cmds.append(
-            (
-                "lint-html-edited",
-                [f"npx htmlhint --nocolor --format compact {files}"],
-                True,
-                24,
-                "generic",
-            )
-        )
-    markdownlint = markdownlint_command(root)
-    if groups["markdown"] and markdownlint:
-        files = quote_files(groups["markdown"])
-        command = " ".join(shlex.quote(part) for part in markdownlint)
-        format_cmds.append(
-            (
-                "format-markdownlint-edited",
-                [f"{command} --fix {files}"],
-                True,
-                20,
-                "generic",
-            )
-        )
-        lint_cmds.append(
-            ("lint-markdown-edited", [f"{command} {files}"], True, 24, "generic")
-        )
-    impeccable = local_impeccable_command(root)
-    if groups["design"] and impeccable:
-        detector_args = " ".join(
-            shlex.quote(part) for part in impeccable + ["detect", *groups["design"]]
-        )
-        lint_cmds.append(("design-impeccable-edited", [detector_args], True, 30, "generic"))
-    if groups["php"]:
-        files = quote_files(groups["php"])
-        syntax_loop = "for file in " + files + '; do php -l "$file" || exit; done'
-        if have_command("php", root):
-            lint_cmds.append(("lint-php-syntax-edited", [syntax_loop], True, 20, "generic"))
-        if have_path(root, "vendor/bin/phpcbf"):
-            format_cmds.append(
-                (
-                    "format-phpcbf-edited",
-                    [
-                        f"vendor/bin/phpcbf --standard=PSR12 --extensions=php {files}"
-                    ],
-                    True,
-                    20,
-                    "generic",
-                )
-            )
-        if have_path(root, "vendor/bin/phpcs"):
-            lint_cmds.append(
-                (
-                    "lint-phpcs-edited",
-                    [
-                        f"vendor/bin/phpcs --standard=PSR12 --extensions=php --report=json -q {files}"
-                    ],
-                    True,
-                    24,
-                    "native:phpcs-json",
-                )
-            )
-        if have_path(root, "vendor/bin/phpstan"):
-            type_cmds.append(
-                (
-                    "type-phpstan-edited",
-                    [
-                        f"vendor/bin/phpstan analyse --memory-limit=1G --no-progress --error-format=json -- {files}"
-                    ],
-                    True,
-                    30,
-                    "native:phpstan-json",
-                )
-            )
-    if groups["python"] and have_command("ruff", root):
-        files = quote_files(groups["python"])
-        format_cmds.append(
-            ("format-ruff-edited", [f"ruff format {files}"], True, 20, "rtk:ruff-format")
-        )
-        lint_cmds.append(
-            ("lint-ruff-edited", [f"ruff check {files}"], True, 24, "rtk:ruff-check")
-        )
-    if groups["go"] and have_command("gofmt", root):
-        files = quote_files(groups["go"])
-        format_cmds.append(
-            ("format-gofmt-edited", [f"gofmt -w {files}"], True, 20, "generic")
-        )
-    if groups["shell"]:
-        files = quote_files(groups["shell"])
-        if have_command("shfmt", root):
-            format_cmds.append(
-                ("format-shfmt-edited", [f"shfmt -w {files}"], True, 20, "generic")
-            )
-        if have_command("shellcheck", root):
-            lint_cmds.append(
-                (
-                    "lint-shellcheck-edited",
-                    [f"shellcheck -f json1 {files}"],
-                    True,
-                    24,
-                    "native:shellcheck-json1",
-                )
-            )
-    return format_cmds, lint_cmds, type_cmds
-
-
-def main() -> int:
-    parser = argparse.ArgumentParser(
-        description="Format, lint, and typecheck edited files with capped AI output."
-    )
-    parser.add_argument(
-        "files",
-        nargs="*",
-        help="Specific files to check. Defaults to files recorded by agent edit hooks.",
-    )
-    args = parser.parse_args()
-    root = repo_root()
-    os.chdir(root)
-    selected = args.files if args.files else recorded_edited_files(root)
-    print(f"[edited-check] root: {root}")
-    if not selected:
-        print("[edited-check] no explicit or recorded edited files; refusing an empty quality pass")
-        return 2
-    files = existing_project_files(root, selected)
-    if not files:
-        print("[edited-check] selected files are missing or excluded; no applicable files")
-        return 0
-    groups = split_by_ext(files)
-    relevant = sorted(
-        set(
-            groups["biome"]
-            + groups["go"]
-            + groups["html"]
-            + groups["markdown"]
-            + groups["design"]
-            + groups["php"]
-            + groups["python"]
-            + groups["shell"]
-        )
-    )
-    if not relevant:
-        print("[edited-check] selected files have no applicable edited-file checks")
-        return 0
-    print(f"[edited-check] files: {len(relevant)}")
-    for file in relevant[:30]:
-        print(f"  - {file}")
-    if len(relevant) > 30:
-        print(f"  ... {len(relevant) - 30} more files hidden from AI output")
-    sys.stdout.flush()
-    format_cmds, lint_cmds, type_cmds = build_commands(root, groups)
-    failed = 0
-    failed |= run_phase(root, "format edited files", format_cmds)
-    failed |= run_phase(root, "lint edited files", lint_cmds)
-    failed |= run_phase(root, "typecheck edited files", type_cmds)
-    if failed:
-        print(
-            "[edited-check] errors found after formatting/linting/typechecking edited files"
-        )
-        return 1
-    print("[edited-check] edited-file checks passed")
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())
-EOF_EDITED_CHECK
-	)
-	write_file "vibe_scripts/codex/agent-check-edited.py" "$script" "0755"
-}
 create_codex_hooks_templates() {
 	if [[ "$CREATE_CODEX_HOOKS" != "1" ]]; then
 		log "Skipping Codex hook templates (--no-codex-hooks)."
@@ -4203,7 +3175,6 @@ QUALITY_EXECUTABLES = {
     "pyright",
     "pytest",
     "ruff",
-    "semgrep",
     "shellcheck",
     "shfmt",
     "staticcheck",
@@ -4607,8 +3578,6 @@ def find_command(obj: Any) -> str:
 
 
 cmd = find_command(payload)
-raw = json.dumps(payload)
-search_text = cmd if cmd else raw
 
 quality_reason = quality_violation(cmd)
 if quality_reason:
@@ -4654,16 +3623,78 @@ blocked = [
     (r"wget\b.*\|\s*(sh|bash)", "wget pipe-to-shell command blocked."),
 ]
 
-for pattern, reason in blocked:
-    if re.search(pattern, search_text):
-        print(json.dumps({
-            "hookSpecificOutput": {
-                "hookEventName": "PreToolUse",
-                "permissionDecision": "deny",
-                "permissionDecisionReason": reason,
-            }
-        }))
-        sys.exit(0)
+def mutation_reason(command: str) -> str:
+    segments = shell_segments(command)
+    for original in segments:
+        parts = strip_prefixes(original)
+        if not parts:
+            continue
+        head = command_name(parts[0])
+        if command_name(original[0]) == "sudo" and head == "rm":
+            return "sudo rm command blocked."
+        if head in {"nice", "stdbuf", "timeout"}:
+            for index, value in enumerate(parts[1:], 1):
+                if command_name(value) in {"git", "rm", "dd", "chmod", "chown", "mkfs", "bash", "sh", "zsh", "dash"}:
+                    reason = mutation_reason(shlex.join(parts[index:]))
+                    if reason:
+                        return reason
+        if head == "git" and any(value.startswith("alias.") for value in parts[1:]):
+            return "Git alias overrides require manual review."
+        if head in {"bash", "dash", "sh", "zsh"}:
+            index = next((i for i, value in enumerate(parts[1:], 1) if value.startswith("-") and not value.startswith("--") and "c" in value[1:]), -1)
+            if index != -1 and index + 1 < len(parts):
+                reason = mutation_reason(parts[index + 1])
+                if reason:
+                    return reason
+        if head == "eval":
+            reason = mutation_reason(" ".join(parts[1:]))
+            if reason:
+                return reason
+        if head == "rtk" and len(parts) > 1:
+            child = parts[2:] if parts[1] in {"proxy", "run"} else parts[1:]
+            reason = mutation_reason(shlex.join(child))
+            if reason:
+                return reason
+        if head == "xargs":
+            reason = mutation_reason(shlex.join(xargs_child(parts)))
+            if reason:
+                return reason
+        if head == "find":
+            for marker in ("-exec", "-execdir", "-ok", "-okdir"):
+                if marker in parts:
+                    reason = mutation_reason(shlex.join(parts[parts.index(marker) + 1:]))
+                    if reason:
+                        return reason
+        if head == "git":
+            index = 1
+            while index < len(parts) and parts[index].startswith("-"):
+                option = parts[index]
+                index += 1
+                if option in {"-C", "-c", "--config-env", "--git-dir", "--work-tree", "--namespace", "--exec-path"}:
+                    index += 1
+            arguments = parts[index + 1:]
+            flags = arguments[:arguments.index("--")] if "--" in arguments else arguments
+            if index == 1 and original == parts and len(parts) > 1 and parts[1] == "add" and any(flag in {"--dry-run", "-n"} for flag in flags):
+                continue
+            parts = ["git", *parts[index:]]
+        executable = " ".join([head, *parts[1:]])
+        for pattern, reason in blocked:
+            if re.search("^" + pattern, executable):
+                return reason
+        if head in {"sh", "bash"} and any(command_name(strip_prefixes(segment)[0]) in {"curl", "wget"} for segment in segments if strip_prefixes(segment)):
+            return "download pipe-to-shell command blocked."
+    return ""
+
+reason = mutation_reason(cmd)
+if reason:
+    print(json.dumps({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": reason,
+        }
+    }))
+    sys.exit(0)
 
 print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse"}}))
 EOF_PRE_HOOK
@@ -5058,128 +4089,13 @@ EOF_POST_HOOK
 	post_edit_hook=$(
 		cat <<'EOF_POST_EDIT_HOOK'
 #!/usr/bin/env python3
-"""Run edited-file checks after Codex edit tools."""
-
-from __future__ import annotations
-
-import json
-import subprocess
+"""Provider adapter for the shared quality-result implementation."""
+import os
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
 
-
-PATH_KEYS = {"file", "file_path", "filename", "path", "target_file"}
-
-
-def log_hook_error(reason: str, *, raw: str = "", error: Exception | None = None) -> None:
-    entry = {
-        "ts": datetime.now(timezone.utc).isoformat(),
-        "hook": "post_edit_check.py",
-        "reason": reason,
-    }
-    if error is not None:
-        entry["error"] = str(error)
-    if raw:
-        entry["stdin_preview"] = raw[:8000]
-    try:
-        log_path = Path(__file__).resolve().parents[2] / ".cache" / "hook-errors.log"
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        with log_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(entry, sort_keys=True) + "\n")
-    except Exception as exc:
-        print(f"[codex-helper] failed to log hook error: {exc}", file=sys.stderr)
-
-
-def emit_failure(reason: str) -> None:
-    print(json.dumps({"continue": False, "stopReason": reason}))
-
-
-def collect_paths(value: Any, paths: set[str]) -> None:
-    if isinstance(value, dict):
-        for key, child in value.items():
-            if key in PATH_KEYS and isinstance(child, str):
-                paths.add(child)
-            else:
-                collect_paths(child, paths)
-    elif isinstance(value, list):
-        for child in value:
-            collect_paths(child, paths)
-
-
-def git_root() -> Path:
-    completed = subprocess.run(["git", "rev-parse", "--show-toplevel"], text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False)
-    if completed.returncode == 0 and completed.stdout.strip():
-        return Path(completed.stdout.strip())
-    return Path(__file__).resolve().parents[2]
-
-
-def main() -> int:
-    try:
-        raw = sys.stdin.read()
-    except Exception as exc:
-        log_hook_error("stdin-read-failed", error=exc)
-        payload = {}
-    else:
-        if not raw.strip():
-            log_hook_error("stdin-empty")
-            payload = {}
-        else:
-            try:
-                payload = json.loads(raw)
-            except json.JSONDecodeError as exc:
-                log_hook_error("json-decode-failed", raw=raw, error=exc)
-                payload = {}
-            if not isinstance(payload, dict):
-                payload = {}
-
-    paths: set[str] = set()
-    collect_paths(payload, paths)
-    root = git_root()
-    checker = root / "vibe_scripts" / "codex" / "agent-check-edited.py"
-    if not checker.is_file():
-        print("[post-edit-check] vibe_scripts/codex/agent-check-edited.py not found; skipping", file=sys.stderr)
-        return 0
-
-    existing_paths: list[str] = []
-    for path in sorted(paths):
-        full_path = (root / path).resolve()
-        try:
-            relative = full_path.relative_to(root.resolve())
-        except ValueError:
-            continue
-        if full_path.is_file():
-            existing_paths.append(str(relative))
-
-    if not existing_paths:
-        print("[post-edit-check] no edited file paths found in hook payload; skipping per-edit check", file=sys.stderr)
-        return 0
-
-    cache_file = root / ".cache" / "codex-edited-files.txt"
-    cache_file.parent.mkdir(parents=True, exist_ok=True)
-    previous = set(cache_file.read_text(encoding="utf-8").splitlines()) if cache_file.is_file() else set()
-    cache_file.write_text("\n".join(sorted(previous | set(existing_paths))) + "\n", encoding="utf-8")
-
-    print("[post-edit-check] checking edited files:", file=sys.stderr)
-    for path in existing_paths:
-        print(f"  - {path}", file=sys.stderr)
-
-    completed = subprocess.run([sys.executable, str(checker), *existing_paths], cwd=root, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False)
-    if completed.stdout:
-        print(completed.stdout, file=sys.stderr, end="")
-    if completed.returncode != 0:
-        emit_failure("Edited-file quality gate failed; review hook stderr output and fix the reported issues.")
-    return 0
-
-
-if __name__ == "__main__":
-    try:
-        sys.exit(main())
-    except Exception as exc:
-        print(f"[post-edit-check] unexpected error: {exc}", file=sys.stderr)
-        emit_failure(f"Post-edit hook failed unexpectedly: {exc}")
-        sys.exit(0)
+helper = Path(__file__).resolve().parents[2] / "vibe_scripts" / "codex" / "quality-hook.py"
+os.execv(sys.executable, [sys.executable, str(helper), "--provider", "codex", "--event", "PostToolUse"])
 EOF_POST_EDIT_HOOK
 	)
 	write_file ".codex/hooks/post_edit_check.py" "$post_edit_hook" "0755"
@@ -5188,83 +4104,13 @@ EOF_POST_EDIT_HOOK
 	stop_hook=$(
 		cat <<'EOF_STOP_HOOK'
 #!/usr/bin/env python3
-"""Run the edited-file quality gate before Codex stops a turn."""
-
-from __future__ import annotations
-
-import json
-import subprocess
+"""Provider adapter for the shared quality-result implementation."""
+import os
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
 
-
-def log_hook_error(reason: str, *, error: Exception | None = None) -> None:
-    entry = {
-        "ts": datetime.now(timezone.utc).isoformat(),
-        "hook": "stop_edited_check.py",
-        "reason": reason,
-    }
-    if error is not None:
-        entry["error"] = str(error)
-    try:
-        log_path = Path(__file__).resolve().parents[2] / ".cache" / "hook-errors.log"
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        with log_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(entry, sort_keys=True) + "\n")
-    except Exception as exc:
-        print(f"[codex-helper] failed to log hook error: {exc}", file=sys.stderr)
-
-
-def emit_response(exit_code: int, reason: str | None = None) -> None:
-    if exit_code != 0:
-        print(json.dumps({"continue": False, "stopReason": reason or "Edited-file quality gate failed; review hook stderr output and fix it before stopping."}))
-
-
-def git_root() -> Path:
-    completed = subprocess.run(["git", "rev-parse", "--show-toplevel"], text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False)
-    if completed.returncode == 0 and completed.stdout.strip():
-        return Path(completed.stdout.strip())
-    return Path(__file__).resolve().parents[2]
-
-
-def main() -> int:
-    root = git_root()
-    checker = root / "vibe_scripts" / "codex" / "agent-check-edited.py"
-    if not checker.is_file():
-        print("[stop-edited-check] vibe_scripts/codex/agent-check-edited.py not found; skipping", file=sys.stderr)
-        return 0
-    cache_file = root / ".cache" / "codex-edited-files.txt"
-    if not cache_file.is_file():
-        print("[stop-edited-check] no recorded edited files; skipping", file=sys.stderr)
-        return 0
-    files = [line.strip() for line in cache_file.read_text(encoding="utf-8").splitlines() if line.strip()]
-    if not files:
-        print("[stop-edited-check] recorded edited file list is empty; skipping", file=sys.stderr)
-        cache_file.unlink(missing_ok=True)
-        return 0
-    print("[stop-edited-check] checking recorded edited files before stop", file=sys.stderr)
-    completed = subprocess.run([sys.executable, str(checker), *files], cwd=root, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False)
-    if completed.stdout:
-        print(completed.stdout, file=sys.stderr, end="")
-    result = completed.returncode
-    if result == 0:
-        cache_file.unlink(missing_ok=True)
-    return result
-
-
-if __name__ == "__main__":
-    exit_code = 1
-    reason = None
-    try:
-        exit_code = main()
-    except Exception as exc:
-        reason = f"Stop hook failed unexpectedly: {exc}"
-        log_hook_error("unexpected-error", error=exc)
-        print(f"[stop-edited-check] unexpected error: {exc}", file=sys.stderr)
-    finally:
-        emit_response(exit_code, reason)
-    sys.exit(0)
+helper = Path(__file__).resolve().parents[2] / "vibe_scripts" / "codex" / "quality-hook.py"
+os.execv(sys.executable, [sys.executable, str(helper), "--provider", "codex", "--event", "Stop"])
 EOF_STOP_HOOK
 	)
 	write_file ".codex/hooks/stop_edited_check.py" "$stop_hook" "0755"
@@ -5330,6 +4176,13 @@ command = 'root="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0; hook="
 timeout = 15
 statusMessage = "Starting session savings tracker"
 
+[[hooks.SessionStart.hooks]]
+type = "command"
+command = 'root="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 1; exec python3 "$root/vibe_scripts/codex/quality-hook.py" --provider codex --event SessionStart'
+timeout = 65
+statusMessage = "Recording initial worktree state"
+
+
 [[hooks.PostToolUse]]
 matcher = "^(Bash|mcp__code[-_]review[-_]graph__.*)$"
 
@@ -5368,13 +4221,22 @@ EOF_CODEX_CONFIG_TAIL
 		}
 	)
 	write_file ".codex/config-snippet.toml" "$config_snippet"
-	# Keep integration hooks imported on an earlier run when refreshing managed config.
-	local imported_hooks=""
-	if [[ "$DRY_RUN" != "1" && -f ".codex/config.toml" ]]; then
-		imported_hooks="$(python3 "$HELPER_ROOT/templates/normalize-codex-config.py" .codex/config.toml --preserved-block)" || return 1
+	if [[ "$DRY_RUN" == "1" ]]; then
+		log "Would merge managed hooks into .codex/config.toml while preserving existing settings."
+	else
+		local managed_asset found_asset=0
+		for managed_asset in "$INSTALLER_DIR/../../templates/vibe_scripts/managed-install.py" "$INSTALLER_DIR/../templates/vibe_scripts/managed-install.py"; do
+			if [[ -f "$managed_asset" ]]; then
+				printf '%s\n' "$config_snippet" | python3 "$managed_asset" merge-codex --provider codex || return 1
+				found_asset=1
+				break
+			fi
+		done
+		if [[ "$found_asset" != "1" ]]; then
+			err "Required managed-install.py missing; config preserved."
+			return 1
+		fi
 	fi
-	write_file ".codex/config.toml" "$config_snippet
-$imported_hooks"
 	normalize_codex_config .codex/config.toml
 }
 
@@ -5585,7 +4447,10 @@ run_final_checks() {
 		return 0
 	fi
 
-	bash -n vibe_scripts/codex/agent-verify.sh || warn "vibe_scripts/codex/agent-verify.sh has a syntax error."
+	bash -n vibe_scripts/codex/agent-verify.sh || {
+		err "vibe_scripts/codex/agent-verify.sh has a syntax error."
+		return 1
+	}
 	if [[ -f .codex/hooks/pre_tool_use_policy.py ]]; then
 		local hook_files=(
 			.codex/hooks/pre_tool_use_policy.py
@@ -5594,18 +4459,16 @@ run_final_checks() {
 			.codex/hooks/stop_edited_check.py
 		)
 		[[ -f .codex/hooks/rtk_pre_tool_use.py ]] && hook_files+=(.codex/hooks/rtk_pre_tool_use.py)
-		python3 -m py_compile "${hook_files[@]}" || warn "Codex hook template Python syntax failed."
+		python3 -c 'import ast, pathlib, sys; [ast.parse(pathlib.Path(name).read_text(), filename=name) for name in sys.argv[1:]]' "${hook_files[@]}" || {
+			err "Codex hook template Python syntax failed."
+			return 1
+		}
 	fi
 
 	if have_cli code-review-graph; then
 		run_cli code-review-graph detect-changes --brief || true
 	fi
 
-	if [[ "$RUN_SECURITY_SCAN" == "1" ]] && have_cli semgrep && cli_works semgrep; then
-		run_semgrep_cli scan || true
-	elif [[ "$RUN_SECURITY_SCAN" == "1" ]] && have_cli semgrep; then
-		warn "Skipping requested security scan because semgrep exists but is not runnable."
-	fi
 }
 
 print_install_summary() {
@@ -5713,7 +4576,7 @@ EOF_QUALITY_NO_MIRROR
 
 	cat <<'EOF_QUALITY_NOTES'
 Notes:
-  - Do not install Ruff, ShellCheck, shfmt, Semgrep, Biome, HTMLHint, PHP_CodeSniffer,
+  - Do not install Ruff, ShellCheck, shfmt, Biome, HTMLHint, PHP_CodeSniffer,
     PHPStan, or similar quality tools from part1.
   - part2.sh installs or wires those only after detecting matching files in this repo.
   - Use --no-install with part2.sh if you only want recommendations and wiring for
@@ -5890,8 +4753,8 @@ install_omniroute() {
 	fi
 	content="$(cat "$src")"
 	write_file "vibe_scripts/codex/omniroute.py" "$content" 0755
-	content="$(
-		cat <<'OMNIROUTE_DOC'
+	# Keep literal documentation outside command substitutions for Bash 3.2.
+	IFS= read -r -d '' content <<'OMNIROUTE_DOC' || :
 # OmniRoute delegation
 
 For a simple bounded task, ask once: "Do you want to try OmniRoute for this task
@@ -5935,6 +4798,41 @@ To preview selection without inference, provide the same task on stdin:
 ```sh
 python3 vibe_scripts/codex/omniroute.py route --task code
 ```
+
+## Attempt history and model ranking
+
+`ask` records timestamped events in the private per-user file
+`~/.local/share/vibehelper/omniroute/attempts.jsonl`, shared by both helpers.
+Records identify the task type, selected provider/account/model, gateway endpoint,
+stage, duration, outcome, HTTP status when available, and reported token usage.
+They omit prompts, answers, credentials and raw error bodies. Token usage is
+unknown when the gateway does not return it. The endpoint is the local gateway;
+the helper cannot observe the provider's actual upstream URL.
+
+A failed or interrupted selected route stays excluded until you explicitly reset
+that account/model. This includes selected-route preflight failures, even when no
+inference occurred; the logged stage distinguishes them. Other models on that
+account remain eligible. Failures before selection have no route to exclude.
+`NEEDS_CONTEXT` is recorded as a task-context issue and does not exclude a route.
+The helpers serialize attempts through a local file lock, record the selected
+route before inference, and stop if history cannot be safely read or written.
+Resetting a route preserves its history and does not bypass eligibility checks.
+Agents must not reset routes without the user's explicit instruction.
+
+```sh
+python3 vibe_scripts/codex/omniroute.py history --json
+python3 vibe_scripts/codex/omniroute.py reset-route CONNECTION_ID --model PROVIDER/MODEL
+python3 vibe_scripts/codex/omniroute.py rank --task code
+```
+
+`rank` takes the task on stdin like `route`. It lists eligible routes in selection
+order, with suitability scores, short capability notes, and recorded outcomes for
+that task type. Failed routes are omitted; inspect `history` for their details.
+Capability hints determine suitability; completed responses break ties, followed
+by fewer recorded failures. Resetting clears exclusion, not those observations.
+Notes reflect catalog claims and name hints, not measured quality or speed.
+A completed response has not necessarily passed the supervising agent's review.
+Ranking may fetch model metadata, but sends no inference or benchmark prompts.
 
 ## Connection and usage report
 
@@ -6051,7 +4949,7 @@ Missing credentials, unknown pricing or context, changed routing, rate limits
 and weak results return work to the main agent. No successful inference is
 claimed until a real request works. Provider privacy terms apply to snippets.
 OMNIROUTE_DOC
-	)"
+	content="${content%$'\n'}"
 	write_file "agent/codex/omniroute.md" "$content" 0644
 	if [[ "$SKIP_GLOBAL" == "1" || "$RUN_OMNIROUTE" != "1" ]]; then
 		log "Skipping OmniRoute runtime setup."
@@ -6068,6 +4966,47 @@ OMNIROUTE_DOC
 	fi
 }
 
+finish_managed_lifecycle() {
+	local result=$?
+	trap - EXIT
+	if [[ "${#MANAGED_FLAGS[@]}" -gt 0 ]]; then
+		python3 "$MANAGED_ASSET" finish --provider codex --run-id "$$" "${MANAGED_FLAGS[@]}" || result=1
+	else
+		python3 "$MANAGED_ASSET" finish --provider codex --run-id "$$" || result=1
+	fi
+	exit "$result"
+}
+
+start_managed_lifecycle() {
+	[[ "${CODEXHELPER_UNIFIED_INSTALL:-0}" != "1" ]] || return 0
+	local asset
+	for asset in "$INSTALLER_DIR/../../templates/vibe_scripts/managed-install.py" "$INSTALLER_DIR/../templates/vibe_scripts/managed-install.py"; do
+		if [[ -f "$asset" ]]; then
+			MANAGED_ASSET="$asset"
+			break
+		fi
+	done
+	if [[ -z "${MANAGED_ASSET:-}" ]]; then
+		err "Required managed-install.py asset missing."
+		return 1
+	fi
+	MANAGED_FLAGS=()
+	[[ "${RUN_CONTEXT7:-0}" != "0" ]] || MANAGED_FLAGS+=("--skipped" "context7")
+	[[ "${RUN_CHROME_MCP:-0}" != "0" ]] || MANAGED_FLAGS+=("--skipped" "chrome-devtools")
+	[[ "${RUN_HUMANIZER:-0}" != "0" ]] || MANAGED_FLAGS+=("--skipped" "humanizer")
+	[[ "${RUN_IMPECCABLE:-0}" != "0" ]] || MANAGED_FLAGS+=("--skipped" "impeccable")
+	[[ "${RUN_OMNIROUTE:-0}" != "0" ]] || MANAGED_FLAGS+=("--skipped" "omniroute")
+	[[ "${WITH_LLM_COUNCIL:-0}" != "0" ]] || MANAGED_FLAGS+=("--skipped" "llm-council")
+	[[ "$DRY_RUN" != "1" ]] || MANAGED_FLAGS+=("--dry-run")
+	[[ "$CREATE_CODEX_HOOKS" != "0" ]] || MANAGED_FLAGS+=("--hooks-skipped")
+	if [[ "${#MANAGED_FLAGS[@]}" -gt 0 ]]; then
+		python3 "$MANAGED_ASSET" begin --provider codex --run-id "$$" "${MANAGED_FLAGS[@]}" || return 1
+	else
+		python3 "$MANAGED_ASSET" begin --provider codex --run-id "$$" || return 1
+	fi
+	trap 'finish_managed_lifecycle' EXIT
+}
+
 main() {
 	ensure_existing_user_tool_paths
 	bootstrap_prereqs
@@ -6075,6 +5014,7 @@ main() {
 	ROOT="$(repo_root)"
 	cd "$ROOT"
 	ensure_git_repository || exit 1
+	start_managed_lifecycle || exit 1
 	EXISTING_HELPER_INSTALL=0
 	if [[ -f AGENTS.md ]] && grep -Fq "CodexHelper-Version:" AGENTS.md; then
 		EXISTING_HELPER_INSTALL=1
@@ -6090,6 +5030,7 @@ main() {
 	create_ai_quality_wrapper_script
 	create_edited_check_script
 	create_verify_script
+	create_quality_hook_script
 	create_codex_hooks_templates
 	apply_codex_hook_config
 	if [[ "$SKIP_GLOBAL" != "1" ]]; then

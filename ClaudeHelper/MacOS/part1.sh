@@ -1,15 +1,18 @@
 #!/usr/bin/env bash
 # Bootstrap a small Claude Code workflow into the current repository.
 #
-# Version: 2026-10-10-v22
+# Version: 2026-10-12-v23
 
 set -Eeuo pipefail
+INSTALLER_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 IFS=$'\n\t'
 
 SCRIPT_NAME="$(basename "$0")"
-SCRIPT_VERSION="2026-10-10-v22"
+SCRIPT_VERSION="2026-10-12-v23"
 DRY_RUN=0
 FORCE=0
+REFRESH_MANAGED=0
+FINAL_EXIT_CODE=0
 FRESH_INSTALL="${CLAUDE_HELPER_FRESH_INSTALL:-0}"
 UPDATE_INSTRUCTIONS="${CLAUDE_HELPER_UPDATE_INSTRUCTIONS:-0}"
 REFRESH_TOOLS=0
@@ -35,6 +38,10 @@ GRAPHIFY_MARKER_END="<!-- <<< ClaudeHelper graphify guidance -->"
 log() { printf '\033[1;34m[claude-bootstrap]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[warn]\033[0m %s\n' "$*" >&2; }
 err() { printf '\033[1;31m[error]\033[0m %s\n' "$*" >&2; }
+record_failure() {
+	FINAL_EXIT_CODE=1
+	err "failed: $*"
+}
 
 usage() {
 	cat <<USAGE
@@ -42,6 +49,7 @@ Usage: $SCRIPT_NAME [options]
 
 Options:
   --dry-run       Print what would happen, but do not write files.
+  --refresh-managed Refresh managed files; never install or upgrade packages.
   --force         Refresh installed helper-managed tools and managed files.
   --fresh-install Install missing tools and replace managed skill/tool files.
   --no-humanizer  Do not install Humanizer writing skill for Claude Code.
@@ -73,6 +81,14 @@ while [[ $# -gt 0 ]]; do
 	case "$1" in
 	--dry-run)
 		DRY_RUN=1
+		shift
+		;;
+	--security-scan)
+		err "Unsupported option --security-scan: Semgrep integration has been retired."
+		exit 2
+		;;
+	--refresh-managed)
+		REFRESH_MANAGED=1
 		shift
 		;;
 	--force)
@@ -173,6 +189,14 @@ while [[ $# -gt 0 ]]; do
 	esac
 done
 
+if [[ "$REFRESH_MANAGED" == "1" ]]; then
+	FORCE=1
+	FRESH_INSTALL=0
+	SKIP_GLOBAL=1
+	REFRESH_TOOLS=0
+	log "explicitly skipped: all package changes (--refresh-managed)."
+fi
+
 script_dir() {
 	local source="${BASH_SOURCE[0]}"
 	while [[ -L "$source" ]]; do
@@ -254,15 +278,19 @@ validate_generated_files() {
 	[[ "$DRY_RUN" -eq 1 ]] && return 0
 	local pycache
 	if ! python3 -m json.tool "$ROOT/.claude/settings.local.json" >/dev/null 2>&1; then
-		warn "Generated .claude/settings.local.json failed JSON validation."
+		err "Generated .claude/settings.local.json failed JSON validation."
+		return 1
 	fi
 	pycache="$(mktemp -d "${TMPDIR:-/tmp}/claudehelper-pycache.XXXXXX")"
 	if ! PYTHONPYCACHEPREFIX="$pycache" python3 -m py_compile "$ROOT"/.claude/hooks/*.py 2>/dev/null; then
-		warn "A generated ClaudeHelper hook failed to compile."
+		err "A generated ClaudeHelper hook failed to compile."
+		rm -rf "$pycache"
+		return 1
 	fi
 	rm -rf "$pycache"
 	if ! bash -n "$ROOT/vibe_scripts/claude/agent-verify.sh" 2>/dev/null; then
-		warn "vibe_scripts/claude/agent-verify.sh failed Bash syntax validation."
+		err "vibe_scripts/claude/agent-verify.sh failed Bash syntax validation."
+		return 1
 	fi
 }
 
@@ -435,7 +463,7 @@ for event, entries in template.get("hooks", {}).items():
 print(json.dumps(existing, indent=2))
 PY
 	)"; then
-		warn "Failed to merge required hooks into $rel; leaving it unchanged."
+		record_failure "Failed to merge required hooks into $rel; leaving it unchanged."
 		return 1
 	fi
 	if cmp -s "$dest" <(printf '%s\n' "$merged"); then
@@ -513,14 +541,15 @@ install_template() {
 install_shared_vibe_script() {
 	local name="$1"
 	local src content
-	for src in "$TEMPLATE_ROOT/vibe_scripts/$name" "$HELPER_ROOT/../templates/vibe_scripts/$name"; do
+	for src in "$HELPER_ROOT/../templates/vibe_scripts/$name" "$TEMPLATE_ROOT/vibe_scripts/$name"; do
 		if [[ -f "$src" ]]; then
 			content="$(cat "$src")"
 			write_file "vibe_scripts/claude/$name" "$content" 0755
 			return 0
 		fi
 	done
-	warn "Shared vibe script template not found: $name"
+	err "Required shared vibe script template not found: $name"
+	return 1
 }
 
 append_gitignore_block() {
@@ -638,8 +667,8 @@ maybe_install_rtk() {
 		fi
 		if [[ "$REFRESH_TOOLS" -eq 1 ]]; then
 			if brew_formula_installed rtk; then
-				refresh_brew_metadata || warn "Homebrew metadata refresh failed."
-				run_tool brew upgrade rtk || warn "RTK refresh via Homebrew failed."
+				refresh_brew_metadata || record_failure "Homebrew metadata refresh failed."
+				run_tool brew upgrade rtk || record_failure "RTK refresh via Homebrew failed."
 			else
 				warn "RTK is installed but is not owned by Homebrew; leaving it unchanged."
 			fi
@@ -659,7 +688,7 @@ maybe_install_rtk() {
 			fi
 			return 0
 		fi
-		warn "RTK install via Homebrew failed. The routing hook will no-op until RTK is installed."
+		record_failure "RTK install via Homebrew failed. The routing hook will no-op until RTK is installed."
 		return 0
 	fi
 	warn "Cannot install RTK with Homebrew because brew is unavailable; the routing hook no-ops until you install it."
@@ -690,11 +719,11 @@ install_graphify_skill() {
 	# Claude Code (~/.claude/skills/graphify). See github.com/Graphify-Labs/graphify.
 	if command -v graphify >/dev/null 2>&1 && [[ "$REFRESH_TOOLS" -eq 1 ]]; then
 		if uv_tool_installed graphifyy; then
-			uv tool upgrade graphifyy || warn "graphifyy refresh via uv failed."
+			uv tool upgrade graphifyy || record_failure "graphifyy refresh via uv failed."
 		elif pipx_package_installed graphifyy; then
-			pipx upgrade graphifyy || warn "graphifyy refresh via pipx failed."
+			pipx upgrade graphifyy || record_failure "graphifyy refresh via pipx failed."
 		elif python3 -m pip show graphifyy >/dev/null 2>&1; then
-			python3 -m pip install --user --upgrade graphifyy || warn "graphifyy refresh via pip failed."
+			python3 -m pip install --user --upgrade graphifyy || record_failure "graphifyy refresh via pip failed."
 		else
 			warn "graphify is installed but its package owner is unknown; leaving the package unchanged."
 		fi
@@ -708,7 +737,7 @@ install_graphify_skill() {
 		fi
 	fi
 	if command -v graphify >/dev/null 2>&1; then
-		graphify install || warn "'graphify install' failed; run it manually."
+		graphify install || record_failure "'graphify install' failed; run it manually."
 		log "graphify installed."
 	else
 		warn "Could not install graphifyy. Install manually: 'uv tool install graphifyy && graphify install'."
@@ -732,14 +761,14 @@ maybe_install_ponytail() {
 	fi
 	if [[ "$REFRESH_TOOLS" -eq 1 ]] && claude_ponytail_installed; then
 		log "Refreshing Ponytail plugin marketplace and installation."
-		claude plugin marketplace update ponytail || warn "Ponytail marketplace refresh failed."
-		claude plugin update ponytail@ponytail || warn "Ponytail plugin refresh failed."
+		claude plugin marketplace update ponytail || record_failure "Ponytail marketplace refresh failed."
+		claude plugin update ponytail@ponytail || record_failure "Ponytail plugin refresh failed."
 		return 0
 	fi
 	log "Adding Ponytail plugin marketplace."
-	claude plugin marketplace add DietrichGebert/ponytail || warn "Ponytail marketplace add failed; add it manually via /plugin."
+	claude plugin marketplace add DietrichGebert/ponytail || record_failure "Ponytail marketplace add failed; add it manually via /plugin."
 	log "Installing Ponytail plugin."
-	claude plugin install ponytail@ponytail || warn "Ponytail install failed; finish via /plugin and trust hooks in /hooks."
+	claude plugin install ponytail@ponytail || record_failure "Ponytail install failed; finish via /plugin and trust hooks in /hooks."
 }
 
 graphify_guidance_block() {
@@ -798,20 +827,20 @@ install_graphify_guidance() {
 ensure_prereqs() {
 	if [[ "$REFRESH_TOOLS" -eq 1 ]]; then
 		if command -v brew >/dev/null 2>&1; then
-			refresh_brew_metadata || warn "Homebrew metadata refresh failed."
+			refresh_brew_metadata || record_failure "Homebrew metadata refresh failed."
 		fi
 		if command -v uv >/dev/null 2>&1; then
 			if brew_formula_installed uv; then
-				run_tool brew upgrade uv || warn "uv refresh via Homebrew failed."
+				run_tool brew upgrade uv || record_failure "uv refresh via Homebrew failed."
 			elif pipx_package_installed uv; then
-				run_tool pipx upgrade uv || warn "uv refresh via pipx failed."
+				run_tool pipx upgrade uv || record_failure "uv refresh via pipx failed."
 			else
 				run_tool uv self update || warn "uv could not refresh itself; check which package manager owns it."
 			fi
 		fi
 		if command -v pipx >/dev/null 2>&1; then
 			if brew_formula_installed pipx; then
-				run_tool brew upgrade pipx || warn "pipx refresh via Homebrew failed."
+				run_tool brew upgrade pipx || record_failure "pipx refresh via Homebrew failed."
 			else
 				warn "pipx is installed outside Homebrew; leaving it unchanged."
 			fi
@@ -841,7 +870,7 @@ ensure_prereqs() {
 			log "uv install script completed."
 			return 0
 		fi
-		warn "uv install script failed; install uv or pipx manually so graphify and code-review-graph can install."
+		record_failure "uv install script failed; install uv or pipx manually so graphify and code-review-graph can install."
 		return 0
 	fi
 	warn "Neither brew nor curl is available to install uv; install uv or pipx manually so graphify and code-review-graph can install."
@@ -889,11 +918,11 @@ install_crg() {
 	if command -v code-review-graph >/dev/null 2>&1 && [[ "$REFRESH_TOOLS" -eq 1 ]]; then
 		if uv_tool_installed code-review-graph; then
 			if ! uv tool upgrade code-review-graph; then
-				warn "code-review-graph refresh via uv failed."
+				record_failure "code-review-graph refresh via uv failed."
 			fi
 		elif pipx_package_installed code-review-graph; then
 			if ! pipx upgrade code-review-graph; then
-				warn "code-review-graph refresh via pipx failed."
+				record_failure "code-review-graph refresh via pipx failed."
 			fi
 		else
 			warn "code-review-graph is installed but is not owned by uv or pipx; leaving it unchanged."
@@ -901,20 +930,20 @@ install_crg() {
 	elif ! command -v code-review-graph >/dev/null 2>&1; then
 		log "Installing code-review-graph."
 		if ! uv_or_pipx_install code-review-graph; then
-			warn "code-review-graph install failed."
+			record_failure "code-review-graph install failed."
 		fi
 	fi
 	crg_version_after="$(code-review-graph --version 2>/dev/null | head -n 1 || true)"
 	if command -v code-review-graph >/dev/null 2>&1; then
 		if [[ "$EXISTING_HELPER_INSTALL" != "1" || "$FRESH_INSTALL" -eq 1 || (-n "$crg_version_after" && "$crg_version_before" != "$crg_version_after") ]]; then
 			log "Registering code-review-graph for Claude Code."
-			code-review-graph install --platform claude-code --no-instructions -y || warn "code-review-graph Claude Code registration failed."
+			code-review-graph install --platform claude-code --no-instructions -y || record_failure "code-review-graph Claude Code registration failed."
 		else
 			log "code-review-graph package unchanged; keeping the existing Claude Code MCP configuration."
 		fi
 		if [[ "$RUN_CRG_BUILD" -eq 1 ]]; then
 			log "Building code-review-graph index for this repo."
-			code-review-graph build || warn "code-review-graph build failed."
+			code-review-graph build || record_failure "code-review-graph build failed."
 		fi
 	else
 		warn "code-review-graph not on PATH; skipping registration."
@@ -936,7 +965,7 @@ setup_context7() {
 		return 0
 	fi
 	log "Running Context7 setup for this project."
-	npx ctx7 setup --claude --mcp -p -y || warn "Context7 setup failed; run 'npx ctx7 setup' manually to finish it interactively."
+	npx ctx7 setup --claude --mcp -p -y || record_failure "Context7 setup failed; run 'npx ctx7 setup' manually to finish it interactively."
 }
 
 chrome_mcp_claude_state() {
@@ -1046,7 +1075,7 @@ update_chrome_mcp_registration() {
 		return 0
 	fi
 	if cp "$backup" "$config_path"; then
-		warn "Chrome DevTools MCP update failed; restored the previous $scope configuration."
+		record_failure "Chrome DevTools MCP update failed; restored the previous $scope configuration."
 	else
 		err "Chrome DevTools MCP update failed and the previous configuration could not be restored from $backup."
 		return 1
@@ -1093,7 +1122,7 @@ setup_chrome_mcp() {
 			fi
 			configured=1
 		else
-			warn "Chrome DevTools MCP registration failed."
+			record_failure "Chrome DevTools MCP registration failed."
 		fi
 		;;
 	stale)
@@ -1135,10 +1164,10 @@ setup_impeccable() {
 	log "Installing Impeccable design skill/hooks for Claude Code."
 	if [[ "$REFRESH_TOOLS" -eq 1 ]]; then
 		run_tool npx impeccable skills install -y --providers=claude-code --scope=project --force ||
-			warn "Impeccable install failed or was cancelled."
+			record_failure "Impeccable install failed or was cancelled."
 	else
 		run_tool npx impeccable skills install -y --providers=claude-code --scope=project ||
-			warn "Impeccable install failed or was cancelled."
+			record_failure "Impeccable install failed or was cancelled."
 	fi
 }
 
@@ -1147,7 +1176,7 @@ clone_llm_council() {
 	local dest="$HOME/.local/share/llm-council"
 	if [[ -d "$dest/.git" ]]; then
 		if [[ "$REFRESH_TOOLS" -eq 1 ]]; then
-			run_tool git -C "$dest" pull --ff-only || warn "llm-council refresh failed."
+			run_tool git -C "$dest" pull --ff-only || record_failure "llm-council refresh failed."
 		else
 			log "llm-council already cloned at $dest."
 		fi
@@ -1162,7 +1191,7 @@ clone_llm_council() {
 		return 0
 	fi
 	mkdir -p "$(dirname "$dest")"
-	git clone https://github.com/karpathy/llm-council.git "$dest" || warn "llm-council clone failed."
+	git clone https://github.com/karpathy/llm-council.git "$dest" || record_failure "llm-council clone failed."
 }
 
 install_generated_repo_files() {
@@ -1206,7 +1235,7 @@ install_generated_repo_files() {
     ],
     "PostToolUse": [
       {
-        "matcher": "Write|Edit|NotebookEdit",
+        "matcher": "Write|Edit|NotebookEdit|apply_patch",
         "hooks": [
           {
             "type": "command",
@@ -1234,6 +1263,18 @@ install_generated_repo_files() {
             "type": "command",
             "command": "root=\"${CLAUDE_PROJECT_DIR:-}\"; [ -n \"$root\" ] || root=\"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\"; hook=\"$root/.claude/hooks/stop_edited_check.py\"; [ -f \"$hook\" ] || exit 0; exec python3 \"$hook\"",
             "timeout": 120
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "root=\"${CLAUDE_PROJECT_DIR:-}\"; [ -n \"$root\" ] || root=\"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\"; exec python3 \"$root/vibe_scripts/claude/quality-hook.py\" --provider claude --event SessionStart",
+            "timeout": 65
           }
         ]
       }
@@ -1384,17 +1425,25 @@ def find_command(data: dict[str, Any]) -> str:
 
 
 def split_segments(command: str) -> list[list[str]]:
+    try:
+        lexer = shlex.shlex(command, posix=True, punctuation_chars="|&;()<>\n")
+        lexer.whitespace = " \t\r"
+        lexer.whitespace_split = True
+        lexer.commenters = ""
+        tokens = list(lexer)
+    except ValueError:
+        return []
     segments: list[list[str]] = []
-    for raw_segment in re.split(r"\s*(?:&&|\|\||;|\||\n)\s*", command):
-        raw_segment = raw_segment.strip()
-        if not raw_segment:
-            continue
-        try:
-            parts = shlex.split(raw_segment)
-        except ValueError:
-            parts = raw_segment.split()
-        if parts:
-            segments.append(parts)
+    current: list[str] = []
+    for token in tokens:
+        if token in {"&", "&&", "(", ")", ";", "<", ">", "|", "||", "\n"}:
+            if current:
+                segments.append(current)
+                current = []
+        else:
+            current.append(token)
+    if current:
+        segments.append(current)
     return segments
 
 
@@ -1466,6 +1515,10 @@ def git_subcommand(parts: list[str]) -> str:
 
 
 def is_git_write(parts: list[str]) -> bool:
+    arguments = parts[2:]
+    flags = arguments[:arguments.index("--")] if "--" in arguments else arguments
+    if parts[:2] == ["git", "add"] and any(flag in {"--dry-run", "-n"} for flag in flags):
+        return False
     return git_subcommand(parts) in GIT_WRITE_COMMANDS
 
 
@@ -1502,9 +1555,9 @@ def nested_shell_command(parts: list[str]) -> str:
     if not parts:
         return ""
     head = command_name(parts[0])
-    if head in {"bash", "dash", "sh", "zsh"} and "-c" in parts[1:]:
-        index = parts.index("-c", 1)
-        return parts[index + 1] if index + 1 < len(parts) else ""
+    if head in {"bash", "dash", "sh", "zsh"}:
+        index = next((i for i, value in enumerate(parts[1:], 1) if value.startswith("-") and not value.startswith("--") and "c" in value[1:]), -1)
+        return parts[index + 1] if index != -1 and index + 1 < len(parts) else ""
     if head == "eval" and len(parts) > 1:
         return " ".join(parts[1:])
     return ""
@@ -1822,169 +1875,13 @@ GRAPHFIRST_EOF
 	content="$(
 		cat <<'POSTEDIT_EOF'
 #!/usr/bin/env python3
-"""Run edited-file checks after Claude Code edit tools."""
-
-from __future__ import annotations
-
-import json
+"""Provider adapter for the shared quality-result implementation."""
 import os
-import subprocess
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
 
-
-def repo_root(payload: dict[str, Any]) -> Path:
-    candidates = [
-        payload.get("cwd"),
-        os.environ.get("CLAUDE_PROJECT_DIR"),
-        str(Path.cwd()),
-    ]
-    start = next(
-        (
-            Path(value)
-            for value in candidates
-            if isinstance(value, str) and value.strip()
-        ),
-        Path.cwd(),
-    )
-    completed = subprocess.run(
-        ["git", "-C", str(start), "rev-parse", "--show-toplevel"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        text=True,
-        check=False,
-    )
-    return (
-        Path(completed.stdout.strip()) if completed.stdout.strip() else start.resolve()
-    )
-
-
-def log_hook_error(reason: str, *, raw: str = "", error: Exception | None = None) -> None:
-    entry = {
-        "ts": datetime.now(timezone.utc).isoformat(),
-        "hook": "post_edit_check.py",
-        "reason": reason,
-    }
-    if error is not None:
-        entry["error"] = str(error)
-    if raw:
-        entry["stdin_preview"] = raw[:8000]
-    try:
-        root = os.environ.get("CLAUDE_PROJECT_DIR")
-        base = Path(root) if root else Path.cwd()
-        log_path = base / ".cache" / "hook-errors.log"
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        with log_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(entry, sort_keys=True) + "\n")
-    except Exception as exc:
-        print(f"[claude-helper] failed to log hook error: {exc}", file=sys.stderr)
-
-
-def read_payload() -> dict[str, Any]:
-    try:
-        raw = sys.stdin.read()
-    except Exception as exc:
-        log_hook_error("stdin-read-failed", error=exc)
-        return {}
-    if not raw.strip():
-        log_hook_error("stdin-empty")
-        return {}
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        log_hook_error("json-decode-failed", raw=raw, error=exc)
-        return {}
-    return data if isinstance(data, dict) else {}
-
-
-def collect_paths(value: Any) -> list[str]:
-    paths: list[str] = []
-    if isinstance(value, dict):
-        for key, item in value.items():
-            if key in {"file_path", "path", "notebook_path"} and isinstance(item, str):
-                paths.append(item)
-            elif key in {"files", "paths"} and isinstance(item, list):
-                paths.extend(str(entry) for entry in item if isinstance(entry, str))
-            else:
-                paths.extend(collect_paths(item))
-    elif isinstance(value, list):
-        for item in value:
-            paths.extend(collect_paths(item))
-    return paths
-
-
-def existing_project_files(root: Path, paths: list[str]) -> list[str]:
-    result: list[str] = []
-    resolved_root = root.resolve()
-    for path in paths:
-        candidate = (
-            (root / path).resolve()
-            if not Path(path).is_absolute()
-            else Path(path).resolve()
-        )
-        try:
-            rel = candidate.relative_to(resolved_root)
-        except ValueError:
-            continue
-        if candidate.is_file():
-            result.append(str(rel))
-    return sorted(set(result))
-
-
-def main() -> int:
-    payload = read_payload()
-    root = repo_root(payload)
-    checker = root / "vibe_scripts" / "claude" / "agent-check-edited.py"
-    if not checker.is_file():
-        print(
-            "[post-edit-check] vibe_scripts/claude/agent-check-edited.py not found; skipping",
-            file=sys.stderr,
-        )
-        return 0
-
-    files = existing_project_files(
-        root, collect_paths(payload.get("tool_input", payload))
-    )
-    if not files:
-        return 0
-
-    cache_file = root / ".cache" / "claude-edited-files.txt"
-    cache_file.parent.mkdir(parents=True, exist_ok=True)
-    existing = (
-        set(cache_file.read_text(encoding="utf-8").splitlines())
-        if cache_file.exists()
-        else set()
-    )
-    cache_file.write_text(
-        "\n".join(sorted(existing | set(files))) + "\n", encoding="utf-8"
-    )
-
-    completed = subprocess.run(
-        [sys.executable, str(checker), *files],
-        cwd=root,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        check=False,
-    )
-    output = completed.stdout.rstrip()
-    if completed.returncode != 0:
-        if output:
-            print(output, file=sys.stderr)
-        print(
-            "[post-edit-check] edited-file checks failed; fix the reported errors before continuing.",
-            file=sys.stderr,
-        )
-        return 2
-    if output:
-        print(output)
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
+helper = Path(__file__).resolve().parents[2] / "vibe_scripts" / "claude" / "quality-hook.py"
+os.execv(sys.executable, [sys.executable, str(helper), "--provider", "claude", "--event", "PostToolUse"])
 POSTEDIT_EOF
 	)"
 	write_file ".claude/hooks/post_edit_check.py" "$content" 0755
@@ -1992,230 +1889,17 @@ POSTEDIT_EOF
 	content="$(
 		cat <<'STOPEDIT_EOF'
 #!/usr/bin/env python3
-"""Run the edited-file quality gate before Claude Code stops."""
-
-from __future__ import annotations
-
-import json
+"""Provider adapter for the shared quality-result implementation."""
 import os
-import subprocess
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
 
-
-def log_hook_error(reason: str, *, raw: str = "", error: Exception | None = None) -> None:
-    entry = {
-        "ts": datetime.now(timezone.utc).isoformat(),
-        "hook": "stop_edited_check.py",
-        "reason": reason,
-    }
-    if error is not None:
-        entry["error"] = str(error)
-    if raw:
-        entry["stdin_preview"] = raw[:8000]
-    try:
-        root = os.environ.get("CLAUDE_PROJECT_DIR")
-        base = Path(root) if root else Path.cwd()
-        log_path = base / ".cache" / "hook-errors.log"
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        with log_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(entry, sort_keys=True) + "\n")
-    except Exception as exc:
-        print(f"[claude-helper] failed to log hook error: {exc}", file=sys.stderr)
-
-
-def read_payload() -> dict[str, Any]:
-    try:
-        raw = sys.stdin.read()
-    except Exception as exc:
-        log_hook_error("stdin-read-failed", error=exc)
-        return {}
-    if not raw.strip():
-        log_hook_error("stdin-empty")
-        return {}
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        log_hook_error("json-decode-failed", raw=raw, error=exc)
-        return {}
-    return data if isinstance(data, dict) else {}
-
-
-def repo_root(payload: dict[str, Any]) -> Path:
-    candidates = [
-        payload.get("cwd"),
-        os.environ.get("CLAUDE_PROJECT_DIR"),
-        str(Path.cwd()),
-    ]
-    start = next(
-        (
-            Path(value)
-            for value in candidates
-            if isinstance(value, str) and value.strip()
-        ),
-        Path.cwd(),
-    )
-    completed = subprocess.run(
-        ["git", "-C", str(start), "rev-parse", "--show-toplevel"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        text=True,
-        check=False,
-    )
-    return (
-        Path(completed.stdout.strip()) if completed.stdout.strip() else start.resolve()
-    )
-
-
-def existing_project_files(root: Path, paths: list[str]) -> list[str]:
-    resolved_root = root.resolve()
-    result: list[str] = []
-    for path in paths:
-        candidate = (root / path).resolve()
-        try:
-            rel = candidate.relative_to(resolved_root)
-        except ValueError:
-            continue
-        if candidate.is_file():
-            result.append(str(rel))
-    return sorted(set(result))
-
-
-def block_stop(output: str) -> int:
-    detail = output.strip()
-    if len(detail) > 4000:
-        detail = detail[-4000:]
-    reason = "Edited-file checks failed. Fix the errors before finishing the turn."
-    if detail:
-        reason += "\n\n" + detail
-    print(json.dumps({"decision": "block", "reason": reason}), file=sys.stderr)
-    return 2
-
-
-def main() -> int:
-    payload = read_payload()
-    if payload.get("stop_hook_active") is True:
-        return 0
-
-    root = repo_root(payload)
-    checker = root / "vibe_scripts" / "claude" / "agent-check-edited.py"
-    cache_file = root / ".cache" / "claude-edited-files.txt"
-
-    if not checker.is_file() or not cache_file.is_file():
-        return 0
-
-    files = [
-        line.strip()
-        for line in cache_file.read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
-    files = existing_project_files(root, files)
-    if not files:
-        cache_file.unlink(missing_ok=True)
-        return 0
-
-    completed = subprocess.run(
-        [sys.executable, str(checker), *files],
-        cwd=root,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        check=False,
-    )
-    if completed.returncode == 0:
-        cache_file.unlink(missing_ok=True)
-        if completed.stdout.strip():
-            print(completed.stdout.rstrip())
-        return 0
-    return block_stop(completed.stdout)
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
+helper = Path(__file__).resolve().parents[2] / "vibe_scripts" / "claude" / "quality-hook.py"
+os.execv(sys.executable, [sys.executable, str(helper), "--provider", "claude", "--event", "Stop"])
 STOPEDIT_EOF
 	)"
 	write_file ".claude/hooks/stop_edited_check.py" "$content" 0755
 
-	content="$(
-		cat <<'AGENTVERIFY_EOF'
-#!/usr/bin/env bash
-set -Eeuo pipefail
-IFS='
-	'
-
-MODE="${1:-edited}"
-ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
-cd "$ROOT"
-export PATH="$HOME/.local/bin:$PATH"
-
-changed_files() {
-	if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-		git diff --name-only --diff-filter=ACMRTUXB HEAD 2>/dev/null || git diff --name-only --diff-filter=ACMRTUXB
-	fi
-}
-
-print_changed_files_summary() {
-	local tmp count limit=30
-	tmp="$(mktemp)"
-	changed_files >"$tmp" || true
-	count="$(wc -l <"$tmp" | tr -d ' ')"
-	if [[ "$count" -eq 0 ]]; then
-		echo "  none"
-	elif [[ "$count" -le "$limit" ]]; then
-		sed 's/^/  - /' "$tmp"
-	else
-		head -n "$limit" "$tmp" | sed 's/^/  - /'
-		echo "  ... $((count - limit)) more changed files hidden from AI output"
-	fi
-	rm -f "$tmp"
-}
-
-run_if_available() {
-	local name="$1"
-	shift
-	if command -v "$name" >/dev/null 2>&1; then
-		echo "+ $*"
-		"$@"
-	else
-		echo "- $name not found; skipping"
-	fi
-}
-
-echo "Agent verification from: $ROOT"
-echo "Mode: $MODE"
-echo
-
-echo "Changed files:"
-print_changed_files_summary
-echo
-
-if [[ "$MODE" == "edited" ]]; then
-	make -f vibe_scripts/claude/Makefile edited-ai
-elif [[ "$MODE" == "lint" ]]; then
-	make -f vibe_scripts/claude/Makefile lint-ai
-elif [[ "$MODE" == "typecheck" ]]; then
-	make -f vibe_scripts/claude/Makefile typecheck-ai
-elif [[ "$MODE" == "test" ]]; then
-	make -f vibe_scripts/claude/Makefile test-ai
-elif [[ "$MODE" == "security" ]]; then
-	make -f vibe_scripts/claude/Makefile security-ai
-elif [[ "$MODE" == "graph" ]]; then
-	run_if_available code-review-graph code-review-graph detect-changes --brief
-elif [[ "$MODE" == "all" || "$MODE" == "verify" ]]; then
-	if command -v code-review-graph >/dev/null 2>&1; then
-		code-review-graph detect-changes --brief || true
-	fi
-	make -f vibe_scripts/claude/Makefile verify-ai
-else
-	echo "Unknown mode: $MODE" >&2
-	echo "Usage: $0 [edited|all|verify|lint|typecheck|test|security|graph]" >&2
-	exit 2
-fi
-AGENTVERIFY_EOF
-	)"
-	write_file "vibe_scripts/claude/agent-verify.sh" "$content" 0755
 }
 
 install_agent_scaffold_files() {
@@ -2229,6 +1913,45 @@ install_agent_scaffold_files() {
 # Claude project instructions
 
 Use this repository with minimal, verifiable changes.
+
+For any failure, read the diagnostic first. Prefer formatted or structured
+output; use its reported cause, location and suggested correction to choose the
+next step. Read only relevant code or log sections when details are missing.
+If a tool rejects arguments, read its current schema or CLI help, correct the
+arguments and retry. Use accepted names and types instead of guessing. For
+other failures, use the diagnostic to decide whether a retry is safe.
+
+For linter/formatter failures, read the Python quality wrapper's formatted
+diagnostics first. Review each finding and any autofix diff for correctness
+and unintended changes, including pre-existing findings. Rerun the approved
+check after fixes; run affected tests when behavior could change. If diagnostics
+are omitted or unclear, read only the relevant sections of the linked log.
+Do not dump full logs or rerun raw tools for more output. Resolve failures or
+report a concrete blocker before completion. Autofixes and skipped or zero-file
+checks alone do not establish successful verification.
+
+## Task scope and guardrail consent
+
+Before implementation, state the requested outcome, what is in and out of scope,
+and how completion will be verified. Use the user's request and existing context;
+ask focused questions when unresolved details could change the scope or behavior.
+Wait for those answers before implementing the affected work. Continue authorized
+work that does not depend on them.
+
+Do not invent platform usage limits, eligibility rules, quotas or access
+restrictions. Distinguish user requirements and existing platform constraints from
+your own proposals. Cite the user instruction, existing code or authoritative
+documentation behind a claimed requirement; if it is uncertain, ask rather than
+implementing an assumed limitation.
+
+Before adding or expanding guardrails (such as restrictions, approval steps,
+validation rules or automated enforcement), present the proposed behavior, why it
+is needed and its tradeoffs, including who or what it would restrict. Obtain the
+user's explicit consent before implementing it. A general request to improve or
+fix something is not consent for extra guardrails. Honor consent already given
+for the same scope; ask again if the proposal materially changes. Preserve existing
+security, validation, accessibility and data-loss protections. Proceed with ordinary
+work already authorized by the user without adding approval steps.
 
 ## Simple tasks through OmniRoute
 
@@ -2634,8 +2357,8 @@ install_omniroute() {
 	fi
 	content="$(cat "$src")"
 	write_file "vibe_scripts/claude/omniroute.py" "$content" 0755
-	content="$(
-		cat <<'OMNIROUTE_DOC'
+	# Keep literal documentation outside command substitutions for Bash 3.2.
+	IFS= read -r -d '' content <<'OMNIROUTE_DOC' || :
 # OmniRoute delegation
 
 For a simple bounded task, ask once: "Do you want to try OmniRoute for this task
@@ -2679,6 +2402,41 @@ To preview selection without inference, provide the same task on stdin:
 ```sh
 python3 vibe_scripts/claude/omniroute.py route --task code
 ```
+
+## Attempt history and model ranking
+
+`ask` records timestamped events in the private per-user file
+`~/.local/share/vibehelper/omniroute/attempts.jsonl`, shared by both helpers.
+Records identify the task type, selected provider/account/model, gateway endpoint,
+stage, duration, outcome, HTTP status when available, and reported token usage.
+They omit prompts, answers, credentials and raw error bodies. Token usage is
+unknown when the gateway does not return it. The endpoint is the local gateway;
+the helper cannot observe the provider's actual upstream URL.
+
+A failed or interrupted selected route stays excluded until you explicitly reset
+that account/model. This includes selected-route preflight failures, even when no
+inference occurred; the logged stage distinguishes them. Other models on that
+account remain eligible. Failures before selection have no route to exclude.
+`NEEDS_CONTEXT` is recorded as a task-context issue and does not exclude a route.
+The helpers serialize attempts through a local file lock, record the selected
+route before inference, and stop if history cannot be safely read or written.
+Resetting a route preserves its history and does not bypass eligibility checks.
+Agents must not reset routes without the user's explicit instruction.
+
+```sh
+python3 vibe_scripts/claude/omniroute.py history --json
+python3 vibe_scripts/claude/omniroute.py reset-route CONNECTION_ID --model PROVIDER/MODEL
+python3 vibe_scripts/claude/omniroute.py rank --task code
+```
+
+`rank` takes the task on stdin like `route`. It lists eligible routes in selection
+order, with suitability scores, short capability notes, and recorded outcomes for
+that task type. Failed routes are omitted; inspect `history` for their details.
+Capability hints determine suitability; completed responses break ties, followed
+by fewer recorded failures. Resetting clears exclusion, not those observations.
+Notes reflect catalog claims and name hints, not measured quality or speed.
+A completed response has not necessarily passed the supervising agent's review.
+Ranking may fetch model metadata, but sends no inference or benchmark prompts.
 
 ## Connection and usage report
 
@@ -2795,7 +2553,7 @@ Missing credentials, unknown pricing or context, changed routing, rate limits
 and weak results return work to the main agent. No successful inference is
 claimed until a real request works. Provider privacy terms apply to snippets.
 OMNIROUTE_DOC
-	)"
+	content="${content%$'\n'}"
 	write_file "agent/claude/omniroute.md" "$content" 0644
 	if [[ "$SKIP_GLOBAL" == "1" || "$RUN_OMNIROUTE" != "1" ]]; then
 		log "Skipping OmniRoute runtime setup."
@@ -2805,16 +2563,58 @@ OMNIROUTE_DOC
 		local reply=""
 		read -r -p "Install and configure the local free-only OmniRoute gateway? [y/N] " reply || true
 		if [[ "$reply" =~ ^[Yy]$|^[Yy][Ee][Ss]$ ]]; then
-			python3 "$src" setup || warn "OmniRoute setup failed; main agent fallback remains available."
+			python3 "$src" setup || record_failure "OmniRoute setup failed; main agent fallback remains available."
 		else
 			log "Skipping OmniRoute runtime setup."
 		fi
 	fi
 }
 
+finish_managed_lifecycle() {
+	local result="$1"
+	trap - EXIT
+	if [[ "${#MANAGED_FLAGS[@]}" -gt 0 ]]; then
+		python3 "$MANAGED_ASSET" finish --provider claude --run-id "$$" "${MANAGED_FLAGS[@]}" || result=1
+	else
+		python3 "$MANAGED_ASSET" finish --provider claude --run-id "$$" || result=1
+	fi
+	exit "$result"
+}
+
+start_managed_lifecycle() {
+	[[ "${CLAUDE_HELPER_ORCHESTRATED:-0}" != "1" ]] || return 0
+	local asset
+	for asset in "$INSTALLER_DIR/../../templates/vibe_scripts/managed-install.py" "$INSTALLER_DIR/../templates/vibe_scripts/managed-install.py"; do
+		if [[ -f "$asset" ]]; then
+			MANAGED_ASSET="$asset"
+			break
+		fi
+	done
+	if [[ -z "${MANAGED_ASSET:-}" ]]; then
+		err "Required managed-install.py asset missing."
+		return 1
+	fi
+	MANAGED_FLAGS=()
+	[[ "${RUN_CONTEXT7:-0}" != "0" ]] || MANAGED_FLAGS+=("--skipped" "context7")
+	[[ "${RUN_CHROME_MCP:-0}" != "0" ]] || MANAGED_FLAGS+=("--skipped" "chrome-devtools")
+	[[ "${RUN_HUMANIZER:-0}" != "0" ]] || MANAGED_FLAGS+=("--skipped" "humanizer")
+	[[ "${RUN_IMPECCABLE:-0}" != "0" ]] || MANAGED_FLAGS+=("--skipped" "impeccable")
+	[[ "${RUN_OMNIROUTE:-0}" != "0" ]] || MANAGED_FLAGS+=("--skipped" "omniroute")
+	[[ "${WITH_LLM_COUNCIL:-0}" != "0" ]] || MANAGED_FLAGS+=("--skipped" "llm-council")
+	[[ "$DRY_RUN" != "1" ]] || MANAGED_FLAGS+=("--dry-run")
+
+	if [[ "${#MANAGED_FLAGS[@]}" -gt 0 ]]; then
+		python3 "$MANAGED_ASSET" begin --provider claude --run-id "$$" "${MANAGED_FLAGS[@]}" || return 1
+	else
+		python3 "$MANAGED_ASSET" begin --provider claude --run-id "$$" || return 1
+	fi
+	trap 'finish_managed_lifecycle "$?"' EXIT
+}
+
 ROOT="$(repo_root)"
 cd "$ROOT"
 ensure_git_repository || exit 1
+start_managed_lifecycle || exit 1
 EXISTING_HELPER_INSTALL=0
 if [[ -f CLAUDE.md ]] && grep -Fq "ClaudeHelper-Version:" CLAUDE.md; then
 	EXISTING_HELPER_INSTALL=1
@@ -2829,6 +2629,8 @@ install_shared_vibe_script "agent-check-edited.py"
 install_shared_vibe_script "update-codebase-wiki.py"
 install_generated_repo_files
 install_agent_scaffold_files
+install_shared_vibe_script "agent-verify.sh"
+install_shared_vibe_script "quality-hook.py"
 validate_generated_files
 
 # Repo files (always).
@@ -2873,3 +2675,8 @@ Next steps:
   5. Run: make -f vibe_scripts/claude/Makefile skills-check
 NEXT
 fi
+
+if [[ "${CLAUDE_HELPER_ORCHESTRATED:-0}" != "1" ]]; then
+	finish_managed_lifecycle "$FINAL_EXIT_CODE"
+fi
+exit "$FINAL_EXIT_CODE"

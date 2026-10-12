@@ -269,7 +269,6 @@ Defaults and opt-in tools differ between the two helpers. They can install:
 - markdownlint-cli2: checks Markdown files.
 - ShellCheck and shfmt: check and format shell scripts.
 - PHP_CodeSniffer and PHPStan: check PHP style, syntax, and types.
-- Semgrep: runs optional static security checks.
 
 ## After install
 
@@ -293,7 +292,8 @@ provider verifier for broader linting, or `verify` for large, risky,
 security-sensitive or cross-project changes. Each verifier selects its own
 Makefile. The project root Makefile is preserved.
 
-Existing installs need `--force` to refresh managed instructions and hooks.
+Existing installs can use `--refresh-managed` to refresh managed instructions
+and hooks without package updates. `--force` also updates installed packages.
 Legacy shared scripts and root targets remain available for manual review; new
 commands use provider-specific paths. Cleanup preserves shared project data
 and the other provider. See each helper README for the retained files.
@@ -302,3 +302,13 @@ and the other provider. See each helper README for the retained files.
 
 - [CodexHelper README](CodexHelper/README.md)
 - [ClaudeHelper README](ClaudeHelper/README.md)
+
+## Installation and check outcomes
+
+See [the maintained flow and evidence](INSTALLATION-FLOW.md) for installer phases,
+component states, migration, repair hooks, and verification limits.
+
+Use `--refresh-managed` to refresh helper files without updating packages.
+`--force` still refreshes installed tools through their detected package manager.
+Semgrep integration has been retired; `--security-scan` is unsupported. Existing
+global binaries are left installed. Custom security checks remain project-owned.

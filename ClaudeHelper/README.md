@@ -166,17 +166,25 @@ Quality commands use `vibe_scripts/claude/Makefile`. Helper scripts live beside
 it, and workflow instructions live in `agent/claude/`. The project root
 Makefile and existing wiki pages are preserved, including with `--force`.
 
-For an older installation, preview the installer with `--dry-run --force`, then
-rerun with `--force` to refresh existing managed instructions and hooks. Restart
-the agent and review/trust updated hooks where required. Legacy root Makefile
-targets and shared `vibe_scripts/*` files are retained for manual review; the
-new
-commands do not use them. Existing user instructions may need their command
+For an older installation, preview with `--dry-run --refresh-managed`, then
+rerun with `--refresh-managed` to refresh managed instructions and hooks without
+package updates. `--force` also updates detected installed packages. Restart
+the agent and review/trust updated hooks where required. Recognizable generated
+Semgrep recipes are backed up and removed from legacy
+Makefiles. Other legacy targets and shared `vibe_scripts/*` files remain for
+manual review; provider commands use their scoped helpers. Existing user
+instructions may need their command
 paths updated manually.
 
-`--cleanup` removes this provider's configuration, top-level instruction file,
-`agent/claude/` and `vibe_scripts/claude/`. It preserves the project
+`--cleanup` removes only unchanged files recorded as owned by this provider.
+Modified files and legacy files without ownership evidence require manual
+review.
+It preserves the project
 Makefile, other provider, shared skills, wiki, notes, caches, skill lock,
 `.mcp.json`, `.gitignore` and legacy helpers. Review those shared files manually
 if removing VibeHelper entirely. Skill configuration and project memory remain
 shared; separating scripts does not add missing language checks.
+
+See [installation flow and evidence](../INSTALLATION-FLOW.md) for managed
+refresh,
+component states, migration, and repair-loop verification.

@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
 # Wire AI-safe quality targets for a repository already bootstrapped by part1.sh.
 #
-# Version: 2026-10-10-v6
+# Version: 2026-10-12-v7
 
 set -Eeuo pipefail
+INSTALLER_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 IFS=$'\n\t'
 
 SCRIPT_NAME="$(basename "$0")"
 DRY_RUN=0
 FORCE=0
+REFRESH_MANAGED=0
 WIRE=0
 REPO_ROOT=""
 
@@ -23,6 +25,7 @@ Usage: $SCRIPT_NAME [options]
 Options:
   --dry-run       Show what would happen without writing files.
   --wire          Write/update the managed vibe_scripts/claude/Makefile block.
+  --refresh-managed Refresh managed files; never install or upgrade packages.
   --force         Replace an existing ClaudeHelper managed vibe_scripts/claude/Makefile block.
   --fresh-install Replace the managed vibe_scripts/claude/Makefile block and enable wiring.
   --repo PATH     Run against a specific repo/path.
@@ -38,6 +41,14 @@ while [[ $# -gt 0 ]]; do
 		;;
 	--wire)
 		WIRE=1
+		shift
+		;;
+	--security-scan)
+		err "Unsupported option --security-scan: Semgrep integration has been retired."
+		exit 2
+		;;
+	--refresh-managed)
+		REFRESH_MANAGED=1
 		shift
 		;;
 	--force)
@@ -68,6 +79,12 @@ while [[ $# -gt 0 ]]; do
 		;;
 	esac
 done
+
+if [[ "$REFRESH_MANAGED" == "1" ]]; then
+	FORCE=1
+	WIRE=1
+	log "explicitly skipped: all package changes (--refresh-managed)."
+fi
 
 repo_root() {
 	if [[ -n "$REPO_ROOT" ]]; then
@@ -107,8 +124,72 @@ has_markdown_files() {
 	[[ -n "$match" ]]
 }
 
-markdownlint_globs() {
-	printf '"**/*.md" "**/*.markdown" "#**/.agents/**" "#**/.claude/**" "#**/.codex/**" "#**/node_modules/**" "#**/vendor/**" "#**/dist/**" "#**/build/**" "#**/coverage/**" "#**/graphify-out/**" "#**/.git/**" "#**/.cache/**" "#**/.venv/**" "#**/obsidian/**"'
+selected_files_command() {
+	printf 'bash -o pipefail -c %q' "python3 vibe_scripts/claude/agent-check-edited.py --list-files $1 | xargs -0 -r $2"
+}
+
+install_runtime_assets() {
+	local name source destination found
+	for name in ai-quality-wrapper.py agent-check-edited.py agent-verify.sh quality-hook.py; do
+		found=0
+		for source in "$INSTALLER_DIR/../../templates/vibe_scripts/$name" "$INSTALLER_DIR/../templates/vibe_scripts/$name"; do
+			[[ -f "$source" ]] || continue
+			found=1
+			destination="vibe_scripts/claude/$name"
+			if [[ "$DRY_RUN" == "1" ]]; then
+				log "Would install shared runtime: $destination"
+			elif [[ ! -f "$destination" || "$FORCE" == "1" ]]; then
+				if [[ -L "$destination" || -L "vibe_scripts/claude" || -L vibe_scripts ]]; then
+					err "Refusing symlinked runtime destination: $destination"
+					return 1
+				fi
+				mkdir -p vibe_scripts/claude
+				[[ ! -f "$destination" ]] || cp -p "$destination" "$destination.bak.$(date +%s).$$"
+				cp "$source" "$destination"
+				chmod 755 "$destination"
+			fi
+			break
+		done
+		if [[ "$found" != "1" ]]; then
+			err "Required shared runtime asset missing: $name"
+			return 1
+		fi
+	done
+}
+
+finish_managed_lifecycle() {
+	local result=$?
+	trap - EXIT
+	if [[ "${#MANAGED_FLAGS[@]}" -gt 0 ]]; then
+		python3 "$MANAGED_ASSET" finish --provider claude --run-id "$$" "${MANAGED_FLAGS[@]}" || result=1
+	else
+		python3 "$MANAGED_ASSET" finish --provider claude --run-id "$$" || result=1
+	fi
+	exit "$result"
+}
+
+start_managed_lifecycle() {
+	[[ "${CLAUDEHELPER_UNIFIED_INSTALL:-0}" != "1" ]] || return 0
+	local asset
+	for asset in "$INSTALLER_DIR/../../templates/vibe_scripts/managed-install.py" "$INSTALLER_DIR/../templates/vibe_scripts/managed-install.py"; do
+		if [[ -f "$asset" ]]; then
+			MANAGED_ASSET="$asset"
+			break
+		fi
+	done
+	if [[ -z "${MANAGED_ASSET:-}" ]]; then
+		err "Required managed-install.py asset missing."
+		return 1
+	fi
+	MANAGED_FLAGS=("--quality-only")
+	[[ "$DRY_RUN" != "1" ]] || MANAGED_FLAGS+=("--dry-run")
+
+	if [[ "${#MANAGED_FLAGS[@]}" -gt 0 ]]; then
+		python3 "$MANAGED_ASSET" begin --provider claude --run-id "$$" "${MANAGED_FLAGS[@]}" || return 1
+	else
+		python3 "$MANAGED_ASSET" begin --provider claude --run-id "$$" || return 1
+	fi
+	trap 'finish_managed_lifecycle' EXIT
 }
 
 ROOT="$(repo_root)"
@@ -125,6 +206,9 @@ if ! command -v python3 >/dev/null 2>&1; then
 	err "python3 is required to inspect project scripts and run ClaudeHelper targets."
 	exit 1
 fi
+
+start_managed_lifecycle || exit 1
+install_runtime_assets || exit 1
 
 make_target() {
 	local target="$1"
@@ -165,10 +249,10 @@ if has_npm_script lint; then
 	lint_commands+=("$wrapper --label lint-npm --max-lines 30 -- npm run lint")
 fi
 if cmd_exists shellcheck; then
-	lint_commands+=("$wrapper --label lint-shell --max-lines 30 --shell -- 'find . \\( -name .agents -o -name .claude -o -name .codex -o -name node_modules -o -name vendor -o -name dist -o -name build -o -name coverage -o -name graphify-out -o -name .git -o -name .cache -o -name .venv \\) -prune -o -name \"*.sh\" -print0 | xargs -0 -r shellcheck'")
+	lint_commands+=("$wrapper --label lint-shell --max-lines 30 --shell -- $(printf %q "$(selected_files_command .sh shellcheck)")")
 fi
 if cmd_exists markdownlint-cli2 && has_markdown_files; then
-	lint_commands+=("$wrapper --label lint-markdown --max-lines 30 --shell -- 'markdownlint-cli2 $(markdownlint_globs)'")
+	lint_commands+=("$wrapper --label lint-markdown --max-lines 30 --shell -- $(printf %q "$(selected_files_command '.md .markdown' markdownlint-cli2)")")
 fi
 if [[ "${#lint_commands[@]}" -gt 0 ]]; then
 	body=""
@@ -189,11 +273,6 @@ if has_npm_script test; then
 	verify_deps+=("test-ai")
 fi
 
-if cmd_exists semgrep; then
-	targets+=("$(make_target security-ai $'\t@mkdir -p .cache/semgrep\n\t@python3 vibe_scripts/claude/ai-quality-wrapper.py --label security-semgrep --max-lines 40 -- semgrep scan')")
-	verify_deps+=("security-ai")
-fi
-
 if [[ "${#verify_deps[@]}" -gt 0 ]]; then
 	body=""
 	for dep in "${verify_deps[@]}"; do
@@ -209,7 +288,7 @@ fi
 
 block_start="# >>> ClaudeHelper managed targets"
 block_end="# <<< ClaudeHelper managed targets"
-block="$block_start"$'\n'"# ClaudeHelper-Version: 2026-10-10-v6"$'\n\n'
+block="$block_start"$'\n'"# ClaudeHelper-Version: 2026-10-12-v7"$'\n\n'
 for target in "${targets[@]}"; do
 	block+="$target"$'\n\n'
 done
@@ -217,6 +296,11 @@ block+="$block_end"$'\n'
 
 if [[ "$DRY_RUN" -eq 1 ]]; then
 	printf '\n%s\n' "$block"
+	exit 0
+fi
+
+if [[ -f vibe_scripts/claude/Makefile ]] && grep -Eq '^security(-ai)?:|[Ss][Ee][Mm][Gg][Rr][Ee][Pp]' vibe_scripts/claude/Makefile; then
+	warn "needs action: preserving existing custom or ambiguous security wiring in vibe_scripts/claude/Makefile; review it manually."
 	exit 0
 fi
 

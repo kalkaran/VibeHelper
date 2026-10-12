@@ -1,17 +1,20 @@
 #!/usr/bin/env bash
 set -euo pipefail
+INSTALLER_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
 # part2.sh
 # Quality gate setup for AI coding workflows.
 # It detects likely repo types, offers to install missing dev quality tools,
 # then wires Makefile targets for tools/scripts that exist.
 #
-# Version: 2026-10-10-v35
+# Version: 2026-10-12-v36
 
-SCRIPT_VERSION="2026-10-10-v35"
+SCRIPT_VERSION="2026-10-12-v36"
 DRY_RUN=0
 YES=0
 FORCE=0
+REFRESH_MANAGED=0
+FINAL_EXIT_CODE=0
 WIRE_MODE="ask"    # ask | yes | no
 INSTALL_MODE="ask" # ask | yes | no
 FIX_MODE="ask"     # ask | yes | no
@@ -30,6 +33,7 @@ Usage: part2.sh [options]
 Options:
   --dry-run          Show what would happen without writing files.
   --yes              Non-interactive defaults. Continues with available checks.
+  --refresh-managed Refresh managed files; never install or upgrade packages.
   --force            Refresh installed helper-managed tools and managed files.
   --fresh-install    Install missing tools, refresh installed tools, and wire Makefile.
   --install          Install missing recommended quality tools without prompting.
@@ -66,6 +70,14 @@ while [[ $# -gt 0 ]]; do
 		;;
 	--yes)
 		YES=1
+		shift
+		;;
+	--security-scan)
+		err "Unsupported option --security-scan: Semgrep integration has been retired."
+		exit 2
+		;;
+	--refresh-managed)
+		REFRESH_MANAGED=1
 		shift
 		;;
 	--force)
@@ -121,7 +133,7 @@ while [[ $# -gt 0 ]]; do
 		;;
 	-h | --help)
 		usage
-		exit 0
+		exit "$FINAL_EXIT_CODE"
 		;;
 	*)
 		err "Unknown option: $1"
@@ -130,6 +142,15 @@ while [[ $# -gt 0 ]]; do
 		;;
 	esac
 done
+
+if [[ "$REFRESH_MANAGED" == "1" ]]; then
+	FORCE=1
+	FRESH_INSTALL=0
+	INSTALL_MODE="no"
+	FIX_MODE="no"
+	WIRE_MODE="yes"
+	log "explicitly skipped: all package changes (--refresh-managed)."
+fi
 
 ask_yn() {
 	local prompt="$1"
@@ -157,6 +178,69 @@ find_repo_root() {
 	fi
 }
 
+install_runtime_assets() {
+	local name source destination found
+	for name in ai-quality-wrapper.py agent-check-edited.py agent-verify.sh quality-hook.py; do
+		found=0
+		for source in "$INSTALLER_DIR/../../templates/vibe_scripts/$name" "$INSTALLER_DIR/../templates/vibe_scripts/$name"; do
+			[[ -f "$source" ]] || continue
+			found=1
+			destination="vibe_scripts/codex/$name"
+			if [[ "$DRY_RUN" == "1" ]]; then
+				log "Would install shared runtime: $destination"
+			elif [[ ! -f "$destination" || "$FORCE" == "1" ]]; then
+				if [[ -L "$destination" || -L "vibe_scripts/codex" || -L vibe_scripts ]]; then
+					err "Refusing symlinked runtime destination: $destination"
+					return 1
+				fi
+				mkdir -p vibe_scripts/codex
+				[[ ! -f "$destination" ]] || cp -p "$destination" "$destination.bak.$(date +%s).$$"
+				cp "$source" "$destination"
+				chmod 755 "$destination"
+			fi
+			break
+		done
+		if [[ "$found" != "1" ]]; then
+			err "Required shared runtime asset missing: $name"
+			return 1
+		fi
+	done
+}
+
+finish_managed_lifecycle() {
+	local result="$1"
+	trap - EXIT
+	if [[ "${#MANAGED_FLAGS[@]}" -gt 0 ]]; then
+		python3 "$MANAGED_ASSET" finish --provider codex --run-id "$$" "${MANAGED_FLAGS[@]}" || result=1
+	else
+		python3 "$MANAGED_ASSET" finish --provider codex --run-id "$$" || result=1
+	fi
+	exit "$result"
+}
+
+start_managed_lifecycle() {
+	[[ "${CODEXHELPER_UNIFIED_INSTALL:-0}" != "1" ]] || return 0
+	local asset
+	for asset in "$INSTALLER_DIR/../../templates/vibe_scripts/managed-install.py" "$INSTALLER_DIR/../templates/vibe_scripts/managed-install.py"; do
+		if [[ -f "$asset" ]]; then
+			MANAGED_ASSET="$asset"
+			break
+		fi
+	done
+	if [[ -z "${MANAGED_ASSET:-}" ]]; then
+		err "Required managed-install.py asset missing."
+		return 1
+	fi
+	MANAGED_FLAGS=("--quality-only")
+	[[ "$DRY_RUN" != "1" ]] || MANAGED_FLAGS+=("--dry-run")
+	if [[ "${#MANAGED_FLAGS[@]}" -gt 0 ]]; then
+		python3 "$MANAGED_ASSET" begin --provider codex --run-id "$$" "${MANAGED_FLAGS[@]}" || return 1
+	else
+		python3 "$MANAGED_ASSET" begin --provider codex --run-id "$$" || return 1
+	fi
+	trap 'finish_managed_lifecycle "$?"' EXIT
+}
+
 ROOT="$(find_repo_root)"
 cd "$ROOT"
 log "Working in: $ROOT"
@@ -168,7 +252,6 @@ if [[ -n "$PYTHON_INDEX_URL" ]]; then
 	log "Using configured Python package index mirror for uv/pipx installs."
 fi
 
-has_file() { [[ -f "$1" ]]; }
 cmd_exists() { command -v "$1" >/dev/null 2>&1; }
 tool_path() {
 	local binary="$1"
@@ -209,71 +292,6 @@ tool_cmd() {
 	node_modules/.bin/* | .venv/bin/* | vendor/bin/*) printf '%s\n' "$path" ;;
 	*) printf '%s\n' "$binary" ;;
 	esac
-}
-semgrep_cert_file() {
-	if [[ -n "${SSL_CERT_FILE:-}" && -r "${SSL_CERT_FILE:-}" ]]; then
-		printf '%s\n' "$SSL_CERT_FILE"
-		return 0
-	fi
-
-	local candidate
-	for candidate in \
-		"/opt/homebrew/etc/ca-certificates/cert.pem" \
-		"/usr/local/etc/ca-certificates/cert.pem" \
-		"/opt/homebrew/etc/openssl@3/cert.pem" \
-		"/usr/local/etc/openssl@3/cert.pem"; do
-		if [[ -r "$candidate" ]]; then
-			printf '%s\n' "$candidate"
-			return 0
-		fi
-	done
-
-	return 1
-}
-semgrep_cmd() {
-	local cert
-	cert="$(semgrep_cert_file 2>/dev/null || true)"
-	printf 'mkdir -p .cache/semgrep && '
-	if [[ -n "$cert" ]]; then
-		printf 'SSL_CERT_FILE=%q ' "$cert"
-	else
-		true
-	fi
-	printf 'SEMGREP_LOG_FILE=.cache/semgrep/semgrep.log SEMGREP_SETTINGS_FILE=.cache/semgrep/settings.yml SEMGREP_VERSION_CACHE_PATH=.cache/semgrep/version-cache %q' "$(tool_cmd semgrep)"
-}
-
-run_semgrep_cli() {
-	local state_dir=".cache/semgrep"
-	if [[ "$DRY_RUN" -eq 1 ]]; then
-		state_dir="${TMPDIR:-/tmp}/ai-quality-semgrep-$$"
-	fi
-	mkdir -p "$state_dir"
-
-	local cert
-	cert="$(semgrep_cert_file 2>/dev/null || true)"
-	if [[ -n "$cert" ]]; then
-		SSL_CERT_FILE="$cert" \
-			SEMGREP_LOG_FILE="$state_dir/semgrep.log" \
-			SEMGREP_SETTINGS_FILE="$state_dir/settings.yml" \
-			SEMGREP_VERSION_CACHE_PATH="$state_dir/version-cache" \
-			semgrep "$@"
-	else
-		SEMGREP_LOG_FILE="$state_dir/semgrep.log" \
-			SEMGREP_SETTINGS_FILE="$state_dir/settings.yml" \
-			SEMGREP_VERSION_CACHE_PATH="$state_dir/version-cache" \
-			semgrep "$@"
-	fi
-}
-
-cmd_works() {
-	local cmd="$1"
-	local path
-	path="$(tool_path "$cmd" 2>/dev/null || true)"
-	[[ -n "$path" ]] || return 1
-	if [[ "$cmd" == "semgrep" ]]; then
-		return 0
-	fi
-	"$path" --version >/dev/null 2>&1
 }
 
 ensure_user_tool_path() {
@@ -424,8 +442,8 @@ has_biome_config() {
 	[[ -f biome.json || -f biome.jsonc ]]
 }
 
-markdownlint_globs() {
-	printf '"**/*.md" "**/*.markdown" "#**/.agents/**" "#**/.claude/**" "#**/.codex/**" "#**/node_modules/**" "#**/vendor/**" "#**/dist/**" "#**/build/**" "#**/coverage/**" "#**/graphify-out/**" "#**/.git/**" "#**/.cache/**" "#**/.venv/**" "#**/obsidian/**"'
+selected_files_command() {
+	printf 'bash -o pipefail -c %q' "python3 vibe_scripts/codex/agent-check-edited.py --list-files $1 | xargs -0 -r $2"
 }
 
 should_install() {
@@ -439,17 +457,6 @@ should_install() {
 	ask_yn "$prompt" "y"
 }
 
-should_install_optional() {
-	local prompt="$1"
-	if [[ "$INSTALL_MODE" == "no" ]]; then
-		return 1
-	fi
-	if [[ "$INSTALL_MODE" == "yes" || "$YES" -eq 1 ]]; then
-		return 1
-	fi
-	ask_yn "$prompt" "n"
-}
-
 run_install() {
 	local label="$1"
 	shift
@@ -461,7 +468,11 @@ run_install() {
 		log "Would run: $label"
 		return 0
 	fi
-	"$@"
+	if "$@"; then log "configured: $label"; else
+		FINAL_EXIT_CODE=1
+		err "failed: $label"
+		return 1
+	fi
 }
 
 install_missing_quality_tools() {
@@ -515,11 +526,6 @@ install_missing_quality_tools() {
 			tool_exists shellcheck && ! brew_formula_installed shellcheck && warn "shellcheck is not owned by Homebrew; leaving it unchanged."
 			tool_exists shfmt && ! brew_formula_installed shfmt && warn "shfmt is not owned by Homebrew; leaving it unchanged."
 			[[ ${#brew_refresh[@]} -gt 0 ]] && run_install "Shell quality tool refresh" brew upgrade "${brew_refresh[@]}" || true
-		fi
-		if brew_formula_installed semgrep; then
-			run_install "Semgrep refresh" brew upgrade semgrep || true
-		elif tool_exists semgrep; then
-			warn "semgrep is not owned by Homebrew; leaving it unchanged."
 		fi
 	fi
 
@@ -584,15 +590,6 @@ install_missing_quality_tools() {
 		fi
 	fi
 
-	if ! tool_exists semgrep; then
-		if cmd_exists brew && should_install_optional "Install optional Semgrep with Homebrew?"; then
-			run_install "Semgrep" brew install semgrep || warn "Semgrep install failed."
-		elif cmd_exists brew; then
-			warn "optional semgrep install skipped."
-		else
-			warn "optional semgrep skipped because Homebrew is unavailable."
-		fi
-	fi
 }
 
 # Language/project detection
@@ -855,13 +852,6 @@ No clear project type yet:
 UNKNOWNREC
 	fi
 
-	cat <<'SECURITYREC'
-
-Security scanner:
-  Semgrep (optional):
-    brew install semgrep
-    semgrep scan
-SECURITYREC
 	return 0
 }
 
@@ -961,13 +951,12 @@ reset_checks() {
 
 detect_available_checks() {
 	reset_checks
-	local biome_scope="find . ! -name . -prune ! -name .agents ! -name .claude ! -name .codex ! -name graphify-out -exec"
 
 	# Python checks
 	if [[ "$PYTHON" -eq 1 ]]; then
 		if tool_exists ruff; then
-			add_check lint ruff "$(tool_cmd ruff) check ." rtk:ruff-check
-			add_check format python "$(tool_cmd ruff) format ."
+			add_check lint ruff "$(tool_cmd ruff) check --respect-gitignore ." rtk:ruff-check
+			add_check format python "$(tool_cmd ruff) format --respect-gitignore ."
 		fi
 		if tool_exists mypy; then
 			add_check type mypy "$(tool_cmd mypy) ." rtk:mypy
@@ -990,17 +979,17 @@ detect_available_checks() {
 	# Static web checks
 	if [[ "$STATIC_WEB" -eq 1 ]]; then
 		if local_bin_exists biome; then
-			add_check lint web "$biome_scope npx biome check --max-diagnostics=none {} +"
-			add_check format web "$biome_scope npx biome check --write --max-diagnostics=none {} +"
+			add_check lint web "$(selected_files_command '' "npx biome check --files-ignore-unknown=true --max-diagnostics=none")"
+			add_check format web "$(selected_files_command '' "npx biome check --write --files-ignore-unknown=true --max-diagnostics=none")"
 		elif tool_exists biome; then
-			add_check lint web "$biome_scope $(tool_cmd biome) check --max-diagnostics=none {} +"
-			add_check format web "$biome_scope $(tool_cmd biome) check --write --max-diagnostics=none {} +"
+			add_check lint web "$(selected_files_command '' "$(tool_cmd biome) check --files-ignore-unknown=true --max-diagnostics=none")"
+			add_check format web "$(selected_files_command '' "$(tool_cmd biome) check --write --files-ignore-unknown=true --max-diagnostics=none")"
 		fi
 		if has_any -name '*.html'; then
 			if local_bin_exists htmlhint; then
-				add_check lint html "npx htmlhint --ignore \"**/.git/**,**/.agents/**,**/.claude/**,**/.codex/**,**/node_modules/**,**/vendor/**,**/dist/**,**/build/**,**/coverage/**,**/graphify-out/**,**/.cache/**,**/.venv/**,**/obsidian/**\" \"**/*.html\""
+				add_check lint html "$(selected_files_command '.html .htm' "npx htmlhint")"
 			elif tool_exists htmlhint; then
-				add_check lint html "$(tool_cmd htmlhint) --ignore \"**/.git/**,**/.agents/**,**/.claude/**,**/.codex/**,**/node_modules/**,**/vendor/**,**/dist/**,**/build/**,**/coverage/**,**/graphify-out/**,**/.cache/**,**/.venv/**,**/obsidian/**\" \"**/*.html\""
+				add_check lint html "$(selected_files_command '.html .htm' "$(tool_cmd htmlhint)")"
 			fi
 		fi
 	fi
@@ -1008,13 +997,13 @@ detect_available_checks() {
 	# PHP checks
 	if [[ "$PHP_LANG" -eq 1 ]]; then
 		if tool_exists php && has_any -name '*.php'; then
-			add_check lint php-syntax "find . \\( -name '.agents' -o -name '.claude' -o -name '.codex' -o -name 'vendor' -o -name 'node_modules' -o -name 'dist' -o -name 'build' -o -name 'coverage' -o -name 'graphify-out' -o -name '.git' -o -name '.cache' -o -name '.venv' -o -name 'obsidian' \\) -prune -o -name '*.php' -print0 | xargs -0 -n1 $(tool_cmd php) -l"
+			add_check lint php-syntax "$(selected_files_command .php "-n1 $(tool_cmd php) -l")"
 		fi
 		if tool_exists phpcs; then
-			add_check lint phpcs "$(tool_cmd phpcs) --standard=PSR12 --extensions=php --ignore=.agents/*,.claude/*,.codex/*,vendor/*,node_modules/*,dist/*,build/*,coverage/*,graphify-out/*,.git/*,.cache/*,.venv/*,obsidian/* ." native:phpcs-json "$(tool_cmd phpcs) --standard=PSR12 --extensions=php --report=json --ignore=.agents/*,.claude/*,.codex/*,vendor/*,node_modules/*,dist/*,build/*,coverage/*,graphify-out/*,.git/*,.cache/*,.venv/*,obsidian/* ."
+			add_check lint phpcs "$(selected_files_command .php "$(tool_cmd phpcs) --standard=PSR12 --extensions=php")" native:phpcs-json "$(selected_files_command .php "$(tool_cmd phpcs) --standard=PSR12 --extensions=php --report=json")"
 		fi
 		if tool_exists phpcbf; then
-			add_check format phpcbf "$(tool_cmd phpcbf) --standard=PSR12 --extensions=php --ignore=.agents/*,.claude/*,.codex/*,vendor/*,node_modules/*,dist/*,build/*,coverage/*,graphify-out/*,.git/*,.cache/*,.venv/*,obsidian/* ."
+			add_check format phpcbf "$(selected_files_command .php "$(tool_cmd phpcbf) --standard=PSR12 --extensions=php")"
 		fi
 		if tool_exists phpstan; then
 			add_check type phpstan "find . \\( -name '.agents' -o -name '.claude' -o -name '.codex' -o -name 'vendor' -o -name 'node_modules' -o -name 'dist' -o -name 'build' -o -name 'coverage' -o -name 'graphify-out' -o -name '.git' -o -name '.cache' -o -name '.venv' -o -name 'obsidian' \\) -prune -o -name '*.php' -print0 | xargs -0 $(tool_cmd phpstan) analyse --memory-limit=1G --no-progress --" native:phpstan-json "find . \\( -name '.agents' -o -name '.claude' -o -name '.codex' -o -name 'vendor' -o -name 'node_modules' -o -name 'dist' -o -name 'build' -o -name 'coverage' -o -name 'graphify-out' -o -name '.git' -o -name '.cache' -o -name '.venv' -o -name 'obsidian' \\) -prune -o -name '*.php' -print0 | xargs -0 $(tool_cmd phpstan) analyse --memory-limit=1G --no-progress --error-format=json --"
@@ -1023,24 +1012,24 @@ detect_available_checks() {
 
 	# Shell checks
 	if [[ "$SHELL_LANG" -eq 1 ]]; then
-		if tool_exists shellcheck; then add_check lint shell "find . \\( -name '.agents' -o -name '.claude' -o -name '.codex' -o -name 'vendor' -o -name 'node_modules' -o -name 'dist' -o -name 'build' -o -name 'coverage' -o -name 'graphify-out' -o -name '.git' -o -name '.cache' -o -name '.venv' -o -name 'obsidian' \\) -prune -o -name '*.sh' -print0 | xargs -0 -r $(tool_cmd shellcheck)" native:shellcheck-json1 "find . \\( -name '.agents' -o -name '.claude' -o -name '.codex' -o -name 'vendor' -o -name 'node_modules' -o -name 'dist' -o -name 'build' -o -name 'coverage' -o -name 'graphify-out' -o -name '.git' -o -name '.cache' -o -name '.venv' -o -name 'obsidian' \\) -prune -o -name '*.sh' -print0 | xargs -0 -r $(tool_cmd shellcheck) -f json1"; fi
-		if tool_exists shfmt; then add_check format shell "find . \\( -name '.agents' -o -name '.claude' -o -name '.codex' -o -name 'vendor' -o -name 'node_modules' -o -name 'dist' -o -name 'build' -o -name 'coverage' -o -name 'graphify-out' -o -name '.git' -o -name '.cache' -o -name '.venv' -o -name 'obsidian' \\) -prune -o -name '*.sh' -print0 | xargs -0 $(tool_cmd shfmt) -w"; fi
+		if tool_exists shellcheck; then add_check lint shell "$(selected_files_command .sh "$(tool_cmd shellcheck)")" native:shellcheck-json1 "$(selected_files_command .sh "$(tool_cmd shellcheck) -f json1")"; fi
+		if tool_exists shfmt; then add_check format shell "$(selected_files_command .sh "$(tool_cmd shfmt) -w")"; fi
 	fi
 
 	# Markdown checks
 	if [[ "$MARKDOWN" -eq 1 ]]; then
 		if local_bin_exists markdownlint-cli2; then
-			add_check lint markdown "npx markdownlint-cli2 $(markdownlint_globs)"
-			add_check format markdown "npx markdownlint-cli2 --fix $(markdownlint_globs)"
+			add_check lint markdown "$(selected_files_command '.md .markdown' "npx markdownlint-cli2")"
+			add_check format markdown "$(selected_files_command '.md .markdown' "npx markdownlint-cli2 --fix")"
 		elif tool_exists markdownlint-cli2; then
-			add_check lint markdown "$(tool_cmd markdownlint-cli2) $(markdownlint_globs)"
-			add_check format markdown "$(tool_cmd markdownlint-cli2) --fix $(markdownlint_globs)"
+			add_check lint markdown "$(selected_files_command '.md .markdown' "$(tool_cmd markdownlint-cli2)")"
+			add_check format markdown "$(selected_files_command '.md .markdown' "$(tool_cmd markdownlint-cli2) --fix")"
 		fi
 	fi
 
 	# Go checks
 	if [[ "$GO_LANG" -eq 1 ]] && cmd_exists go; then
-		add_check format go "gofmt -w ."
+		add_check format go "$(selected_files_command .go 'gofmt -w')"
 		add_check lint go "go vet ./..."
 		add_check test go "go test ./..." rtk:go-test "go test -json ./..."
 	fi
@@ -1064,11 +1053,6 @@ detect_available_checks() {
 	fi
 
 	# Security check
-	if cmd_works semgrep; then
-		add_check security semgrep "$(semgrep_cmd) scan" native:semgrep-json "$(semgrep_cmd) scan --json"
-	elif cmd_exists semgrep; then
-		warn "Semgrep is installed but failed 'semgrep --version'; not wiring security until it runs cleanly."
-	fi
 }
 
 print_available_checks() {
@@ -1104,1047 +1088,10 @@ print_available_checks() {
 	return 0
 }
 
-write_ai_quality_wrapper() {
-	local path="vibe_scripts/codex/ai-quality-wrapper.py"
-	local tmp
-	tmp="$(mktemp)"
-	cat >"$tmp" <<'PYWRAPPER'
-#!/usr/bin/env python3
-"""Run a quality command with AI-safe output."""
-
-from __future__ import annotations
-
-import argparse
-import datetime as dt
-import json
-import os
-import re
-import shutil
-import subprocess
-import sys
-from pathlib import Path
-
-
-RTK_FILTERS = {
-    "rtk:cargo-test": "cargo-test",
-    "rtk:go-test": "go-test",
-    "rtk:mypy": "mypy",
-    "rtk:pytest": "pytest",
-    "rtk:ruff-check": "ruff-check",
-    "rtk:ruff-format": "ruff-format",
-}
-
-FAILURE_PATTERN = re.compile(
-    r"\b(?:error|fatal|fail(?:ed|ure)?|exception|panic)\b", re.IGNORECASE
-)
-
-
-def slugify(value: str) -> str:
-    value = value.strip().lower()
-    value = re.sub(r"[^a-z0-9._-]+", "-", value)
-    return value.strip("-") or "quality-command"
-
-
-def clip_line(line: str, max_chars: int = 500) -> str:
-    line = line.rstrip()
-    if len(line) <= max_chars:
-        return line
-    return f"{line[:max_chars]}... {len(line) - max_chars} chars omitted"
-
-
-def trim_lines(
-    text: str, max_lines: int, *, preserve_failures: bool = False
-) -> tuple[list[str], int]:
-    lines = [clip_line(line) for line in text.splitlines() if line.strip()]
-    if len(lines) <= max_lines:
-        return lines, 0
-    shown = max_lines - 1
-    baseline_head = shown // 2
-    baseline_tail = shown - baseline_head
-    anchor_indexes: list[int] = []
-    if preserve_failures:
-        anchor_limit = min(2, max(0, shown - 2))
-        omitted_end = len(lines) - baseline_tail
-        for index in range(baseline_head, omitted_end):
-            line = lines[index]
-            if FAILURE_PATTERN.search(line):
-                anchor_indexes.append(index)
-                if len(anchor_indexes) == anchor_limit:
-                    break
-
-    remaining = shown - len(anchor_indexes)
-    head_count = remaining // 2
-    tail_count = remaining - head_count
-    omitted = len(lines) - shown
-    return (
-        lines[:head_count]
-        + [f"... {omitted} output lines omitted ..."]
-        + [lines[index] for index in anchor_indexes]
-        + lines[-tail_count:],
-        omitted,
-    )
-
-
-def summarize_known_success(output: str, returncode: int) -> list[str] | None:
-    if returncode != 0:
-        return None
-    lines = [line.rstrip() for line in output.splitlines() if line.strip()]
-    if lines and all(
-        line.startswith("No syntax errors detected in ") for line in lines
-    ):
-        return [f"PHP syntax check passed for {len(lines)} files."]
-    return None
-
-
-def json_documents(output: str) -> tuple[list[object], list[str]]:
-    decoder = json.JSONDecoder()
-    documents: list[object] = []
-    spans: list[tuple[int, int]] = []
-    cursor = 0
-    while cursor < len(output):
-        while cursor < len(output) and output[cursor].isspace():
-            cursor += 1
-        if cursor < len(output) and output[cursor] in "[{":
-            start = cursor
-        else:
-            match = re.search(r"(?m)^[ \t]*(?=[\[{])", output[cursor:])
-            if match is None:
-                break
-            start = cursor + match.end()
-        try:
-            document, end = decoder.raw_decode(output, start)
-        except json.JSONDecodeError:
-            newline = output.find("\n", start)
-            cursor = len(output) if newline < 0 else newline + 1
-            continue
-        documents.append(document)
-        spans.append((start, end))
-        cursor = end
-
-    residue_parts: list[str] = []
-    previous = 0
-    for start, end in spans:
-        residue_parts.append(output[previous:start])
-        previous = end
-    residue_parts.append(output[previous:])
-    residue = [
-        clip_line(line)
-        for part in residue_parts
-        for line in part.splitlines()
-        if line.strip()
-    ]
-    return documents, residue
-
-
-def integer(value: object) -> int:
-    try:
-        return int(value)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
-        return 0
-
-
-def one_line(value: object) -> str:
-    return " ".join(str(value).split())
-
-
-def text_value(value: object) -> str:
-    if isinstance(value, str):
-        return one_line(value)
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
-
-
-def diagnostic(
-    path: object,
-    line: object,
-    column: object,
-    severity: object,
-    code: object,
-    message: object,
-    detail: str = "",
-) -> str:
-    location = one_line(path or "<unknown>")
-    if line is not None:
-        location += f":{one_line(line)}"
-        if column is not None:
-            location += f":{one_line(column)}"
-    metadata = " ".join(
-        part
-        for part in (
-            one_line(severity or "issue").lower(),
-            one_line(code or ""),
-            one_line(detail),
-        )
-        if part
-    )
-    return clip_line(f"{location} [{metadata}] {text_value(message)}")
-
-
-def parse_phpcs(documents: list[object]) -> tuple[str, list[str]] | None:
-    errors = warnings = fixable = 0
-    files_seen = 0
-    diagnostics: list[str] = []
-    for document in documents:
-        if not isinstance(document, dict):
-            return None
-        totals = document.get("totals")
-        files = document.get("files")
-        if not isinstance(totals, dict) or not isinstance(files, dict):
-            return None
-        errors += integer(totals.get("errors"))
-        warnings += integer(totals.get("warnings"))
-        fixable += integer(totals.get("fixable"))
-        files_seen += len(files)
-        for path, report in sorted(files.items()):
-            if not isinstance(report, dict) or not isinstance(report.get("messages", []), list):
-                return None
-            for item in report.get("messages", []):
-                if not isinstance(item, dict):
-                    return None
-                detail = f"severity={item.get('severity', 0)}"
-                if item.get("fixable"):
-                    detail += " fixable"
-                diagnostics.append(
-                    diagnostic(
-                        path,
-                        item.get("line"),
-                        item.get("column"),
-                        item.get("type"),
-                        item.get("source"),
-                        item.get("message", "PHPCS issue"),
-                        detail,
-                    )
-                )
-    return (
-        f"PHPCS: {errors} errors, {warnings} warnings, {fixable} fixable across {files_seen} files.",
-        diagnostics,
-    )
-
-
-def parse_phpstan(documents: list[object]) -> tuple[str, list[str]] | None:
-    global_errors = file_errors = files_seen = 0
-    diagnostics: list[str] = []
-    for document in documents:
-        if not isinstance(document, dict):
-            return None
-        totals = document.get("totals")
-        files = document.get("files")
-        errors = document.get("errors", [])
-        if (
-            not isinstance(totals, dict)
-            or not isinstance(files, dict)
-            or not isinstance(errors, list)
-        ):
-            return None
-        global_errors += integer(totals.get("errors"))
-        file_errors += integer(totals.get("file_errors"))
-        for error in errors:
-            diagnostics.append(
-                diagnostic("<phpstan>", None, None, "error", "global", error)
-            )
-        files_seen += len(files)
-        for path, report in sorted(files.items()):
-            if not isinstance(report, dict) or not isinstance(
-                report.get("messages", []), list
-            ):
-                return None
-            for item in report.get("messages", []):
-                if not isinstance(item, dict):
-                    return None
-                diagnostics.append(
-                    diagnostic(
-                        path,
-                        item.get("line"),
-                        None,
-                        "error",
-                        item.get("identifier") or "phpstan",
-                        item.get("message", "PHPStan error"),
-                    )
-                )
-    return (
-        f"PHPStan: {global_errors} global errors, {file_errors} file errors across {files_seen} files.",
-        diagnostics,
-    )
-
-
-def parse_semgrep(documents: list[object]) -> tuple[str, list[str]] | None:
-    findings = tool_errors = 0
-    levels: dict[str, int] = {}
-    finding_diagnostics: list[str] = []
-    error_diagnostics: list[str] = []
-    for document in documents:
-        if not isinstance(document, dict) or not isinstance(document.get("results"), list):
-            return None
-        errors = document.get("errors", [])
-        if not isinstance(errors, list):
-            return None
-        for item in document["results"]:
-            if not isinstance(item, dict):
-                return None
-            start = item.get("start", {})
-            extra = item.get("extra", {})
-            if not isinstance(start, dict) or not isinstance(extra, dict):
-                return None
-            findings += 1
-            level = str(extra.get("severity") or "issue").lower()
-            levels[level] = levels.get(level, 0) + 1
-            finding_diagnostics.append(
-                diagnostic(
-                    item.get("path"),
-                    start.get("line"),
-                    start.get("col"),
-                    level,
-                    item.get("check_id"),
-                    extra.get("message", "Semgrep finding"),
-                )
-            )
-        for item in errors:
-            if not isinstance(item, dict):
-                return None
-            tool_errors += 1
-            location = item.get("location", {})
-            if not isinstance(location, dict):
-                location = {}
-            start = location.get("start", {})
-            if not isinstance(start, dict):
-                start = {}
-            error_diagnostics.append(
-                diagnostic(
-                    item.get("path") or location.get("path") or "<semgrep>",
-                    item.get("line") or start.get("line"),
-                    item.get("column") or start.get("col"),
-                    "error",
-                    item.get("type") or item.get("code") or "tool-error",
-                    item.get("message") or item,
-                )
-            )
-    counts = ", ".join(f"{count} {level}" for level, count in sorted(levels.items()))
-    return (
-        f"Semgrep: {findings} findings{f' ({counts})' if counts else ''}, {tool_errors} tool errors.",
-        error_diagnostics + finding_diagnostics,
-    )
-
-
-def parse_shellcheck(documents: list[object]) -> tuple[str, list[str]] | None:
-    diagnostics: list[str] = []
-    levels: dict[str, int] = {}
-    for document in documents:
-        if isinstance(document, list):
-            comments = document
-        elif isinstance(document, dict) and isinstance(document.get("comments"), list):
-            comments = document["comments"]
-        else:
-            return None
-        for item in comments:
-            if not isinstance(item, dict):
-                return None
-            level = str(item.get("level") or "issue").lower()
-            levels[level] = levels.get(level, 0) + 1
-            code = item.get("code")
-            diagnostics.append(
-                diagnostic(
-                    item.get("file"),
-                    item.get("line"),
-                    item.get("column"),
-                    level,
-                    f"SC{code}" if code is not None else "shellcheck",
-                    item.get("message", "ShellCheck issue"),
-                )
-            )
-    counts = ", ".join(f"{count} {level}" for level, count in sorted(levels.items()))
-    return f"ShellCheck: {len(diagnostics)} issues{f' ({counts})' if counts else ''}.", diagnostics
-
-
-def parse_pyright(documents: list[object]) -> tuple[str, list[str]] | None:
-    diagnostics: list[str] = []
-    errors = warnings = information = files = 0
-    fatal_flags = 0
-    for document in documents:
-        if not isinstance(document, dict) or not isinstance(
-            document.get("generalDiagnostics"), list
-        ):
-            return None
-        summary = document.get("summary", {})
-        if not isinstance(summary, dict):
-            return None
-        errors += integer(summary.get("errorCount"))
-        warnings += integer(summary.get("warningCount"))
-        information += integer(summary.get("informationCount"))
-        files += integer(summary.get("filesAnalyzed"))
-        for flag, message in (
-            ("fatalErrorOccurred", "Pyright reported a fatal error"),
-            ("configParseErrorOccurred", "Pyright could not parse its configuration"),
-        ):
-            if document.get(flag):
-                fatal_flags += 1
-                diagnostics.append(
-                    diagnostic("<pyright>", None, None, "error", flag, message)
-                )
-        for item in document["generalDiagnostics"]:
-            if not isinstance(item, dict):
-                return None
-            location = item.get("range", {})
-            if not isinstance(location, dict):
-                location = {}
-            start = location.get("start", {})
-            if not isinstance(start, dict):
-                start = {}
-            line = integer(start.get("line")) + 1
-            column = integer(start.get("character")) + 1
-            diagnostics.append(
-                diagnostic(
-                    item.get("file"),
-                    line,
-                    column,
-                    item.get("severity"),
-                    item.get("rule") or "pyright",
-                    item.get("message", "Pyright issue"),
-                )
-            )
-    return (
-        f"Pyright: {errors} errors, {warnings} warnings, {information} informational across {files} files; {fatal_flags} fatal/config errors.",
-        diagnostics,
-    )
-
-
-NATIVE_ADAPTERS = {
-    "native:phpcs-json": parse_phpcs,
-    "native:phpstan-json": parse_phpstan,
-    "native:pyright-json": parse_pyright,
-    "native:semgrep-json": parse_semgrep,
-    "native:shellcheck-json1": parse_shellcheck,
-}
-
-
-def diagnostic_priority(line: str) -> int:
-    match = re.search(r" \[([a-z]+)\b", line, re.IGNORECASE)
-    level = match.group(1).lower() if match else ""
-    if "fatal" in level:
-        return 0
-    return {
-        "error": 1,
-        "warning": 2,
-        "information": 3,
-        "info": 3,
-        "style": 3,
-    }.get(level, 4)
-
-
-def render_native(
-    summary: str, diagnostics: list[str], residue: list[str], max_lines: int
-) -> list[str]:
-    if residue:
-        summary += f" {len(residue)} non-JSON output lines also emitted."
-    lines = [clip_line(summary)]
-    diagnostics = sorted(diagnostics, key=diagnostic_priority)
-    detail_slots = max_lines - 1
-    residue_slots = 0
-    if residue:
-        residue_slots = min(3, detail_slots if not diagnostics else max(1, detail_slots - 2))
-    diagnostic_slots = detail_slots - residue_slots
-    if len(diagnostics) > diagnostic_slots:
-        shown = max(0, diagnostic_slots - 1)
-        lines.extend(diagnostics[:shown])
-        lines.append(f"... {len(diagnostics) - shown} diagnostics omitted ...")
-    else:
-        lines.extend(diagnostics)
-    if residue_slots:
-        shown = min(len(residue), residue_slots)
-        if len(residue) > residue_slots and residue_slots > 1:
-            shown -= 1
-        for index, line in enumerate(residue[:shown], start=1):
-            lines.append(f"[tool output {index}/{len(residue)}] {line}")
-        omitted = len(residue) - shown
-        if omitted:
-            if residue_slots == 1:
-                lines[-1] += f" (... {omitted} non-JSON lines omitted)"
-            else:
-                lines.append(f"... {omitted} non-JSON output lines omitted ...")
-    return lines
-
-
-def adapter_summary(
-    adapter: str, output: str, returncode: int, max_lines: int
-) -> tuple[list[str] | None, str | None]:
-    if adapter in RTK_FILTERS:
-        if not output:
-            return None, "the tool produced no output"
-        rtk = shutil.which("rtk")
-        if not rtk:
-            return None, "rtk is not installed"
-        try:
-            completed = subprocess.run(
-                [rtk, "pipe", "--filter", RTK_FILTERS[adapter]],
-                input=output,
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                timeout=5,
-                check=False,
-            )
-        except subprocess.TimeoutExpired:
-            return None, "rtk timed out after 5 seconds"
-        except OSError as error:
-            return None, f"rtk could not run ({one_line(error)})"
-        if completed.returncode != 0:
-            return None, f"rtk exited {completed.returncode}"
-        if not completed.stdout.strip():
-            return None, "rtk returned no summary"
-        if adapter == "rtk:go-test" and returncode != 0 and re.fullmatch(
-            r"\s*(?:go test:\s*)?no tests found[.!]?\s*",
-            completed.stdout,
-            re.IGNORECASE,
-        ):
-            return None, "rtk reported no tests for a failed Go test run"
-        return trim_lines(completed.stdout, max_lines)[0], None
-
-    parser = NATIVE_ADAPTERS.get(adapter)
-    if parser is not None:
-        try:
-            documents, residue = json_documents(output)
-            if not documents:
-                return None, "no complete JSON document was found"
-            parsed = parser(documents)
-        except Exception as error:
-            return None, f"adapter parser failed ({type(error).__name__})"
-        if parsed is None:
-            return None, "the JSON schema was not recognized"
-        summary, diagnostics = parsed
-        if returncode != 0 and not diagnostics:
-            return None, "the tool failed without any parsed diagnostics"
-        return render_native(summary, diagnostics, residue, max_lines), None
-
-    if adapter == "generic":
-        return None, None
-    return None, f"unknown adapter {adapter!r}"
-
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Run a command and print a capped AI-safe summary."
-    )
-    parser.add_argument("--label", required=True)
-    parser.add_argument("--adapter", default="generic")
-    parser.add_argument("--log-dir", default=".cache/ai-quality")
-    parser.add_argument("--max-lines", type=int, default=30)
-    parser.add_argument("--shell", action="store_true")
-    parser.add_argument("command", nargs=argparse.REMAINDER)
-    args = parser.parse_args()
-    if args.command and args.command[0] == "--":
-        args.command = args.command[1:]
-    if not args.command:
-        parser.error("missing command after --")
-    if args.max_lines < 4:
-        parser.error("--max-lines must be at least 4")
-    return args
-
-
-def main() -> int:
-    args = parse_args()
-    log_dir = Path(args.log_dir)
-    log_dir.mkdir(parents=True, exist_ok=True)
-    log_path = (
-        log_dir
-        / (
-            f"{dt.datetime.now().strftime('%Y%m%d-%H%M%S-%f')}-"
-            f"{os.getpid()}-{slugify(args.label)}.log"
-        )
-    )
-    if args.shell:
-        command_display = args.command[0]
-        run_command: str | list[str] = args.command[0]
-    else:
-        command_display = " ".join(args.command)
-        run_command = args.command
-    env = os.environ.copy()
-    env.setdefault("NO_COLOR", "1")
-    completed = subprocess.run(
-        run_command,
-        shell=args.shell,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        env=env,
-        check=False,
-    )
-    output = completed.stdout or ""
-    log_path.write_text(
-        f"$ {command_display}\nexit_code={completed.returncode}\n\n{output}",
-        encoding="utf-8",
-    )
-    status = "ok" if completed.returncode == 0 else f"failed ({completed.returncode})"
-    print(f"[ai-quality] {args.label}: {status}")
-    print(f"[ai-quality] full log: {log_path}")
-
-    if args.adapter == "generic":
-        known_success = summarize_known_success(output, completed.returncode)
-        if known_success is not None:
-            print("[ai-quality] summary:")
-            for line in known_success:
-                print(line)
-            return completed.returncode
-
-    parsed, fallback_reason = adapter_summary(
-        args.adapter, output, completed.returncode, args.max_lines
-    )
-    if parsed is not None:
-        print(f"[ai-quality] {args.adapter} output ({len(parsed)} lines):")
-        for line in parsed:
-            print(line)
-        return completed.returncode
-    if fallback_reason:
-        print(
-            f"[ai-quality] adapter fallback: {fallback_reason}; showing capped raw output."
-        )
-    summary_lines, omitted = trim_lines(
-        output, args.max_lines, preserve_failures=completed.returncode != 0
-    )
-    if summary_lines:
-        print(f"[ai-quality] capped output ({len(summary_lines)} lines):")
-        for line in summary_lines:
-            print(line)
-    else:
-        print("[ai-quality] no output")
-    if omitted:
-        print(
-            f"[ai-quality] output was truncated for the AI transcript; inspect {log_path} for the full output."
-        )
-    return completed.returncode
-
-
-if __name__ == "__main__":
-    sys.exit(main())
-PYWRAPPER
-	write_managed_temp "$path" "$tmp" 0755
-}
-
-write_agent_check_edited() {
-	local path="vibe_scripts/codex/agent-check-edited.py"
-	local tmp
-	tmp="$(mktemp)"
-	cat >"$tmp" <<'PYEDITED'
-#!/usr/bin/env python3
-"""Format and verify files edited by the agent with capped AI output."""
-
-from __future__ import annotations
-
-import argparse
-import os
-import shlex
-import shutil
-import subprocess
-import sys
-from pathlib import Path
-
-
-EXCLUDED_DIRS = {
-    ".agents",
-    ".cache",
-    ".claude",
-    ".codex",
-    ".git",
-    ".venv",
-    "build",
-    "coverage",
-    "dist",
-    "graphify-out",
-    "node_modules",
-    "obsidian",
-    "vendor",
-}
-EXCLUDED_FILES = {".mcp.json"}
-EDITED_FILE_LISTS = (
-    ".cache/claude-edited-files.txt",
-    ".cache/codex-edited-files.txt",
-)
-BIOME_EXTS = {".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".css", ".json", ".jsonc"}
-HTML_EXTS = {".html", ".htm"}
-MARKDOWN_EXTS = {".md", ".markdown"}
-PYTHON_EXTS = {".py", ".pyi"}
-GO_EXTS = {".go"}
-FRONTEND_DESIGN_EXTS = {
-    ".astro",
-    ".css",
-    ".htm",
-    ".html",
-    ".js",
-    ".jsx",
-    ".less",
-    ".sass",
-    ".scss",
-    ".svelte",
-    ".ts",
-    ".tsx",
-    ".vue",
-}
-PHP_EXTS = {".php"}
-SHELL_EXTS = {".sh", ".bash", ".zsh"}
-
-
-def run_capture(args: list[str], cwd: Path) -> str:
-    completed = subprocess.run(
-        args,
-        cwd=cwd,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        check=False,
-    )
-    return completed.stdout
-
-
-def repo_root() -> Path:
-    output = run_capture(["git", "rev-parse", "--show-toplevel"], Path.cwd()).strip()
-    return Path(output) if output else Path.cwd()
-
-
-def recorded_edited_files(root: Path) -> list[str]:
-    return sorted(
-        {
-            line.strip()
-            for relative in EDITED_FILE_LISTS
-            if (path := root / relative).is_file()
-            for line in path.read_text(encoding="utf-8").splitlines()
-            if line.strip()
-        }
-    )
-
-
-def is_excluded(path: str) -> bool:
-    parts = Path(path).parts
-    return path in EXCLUDED_FILES or any(
-        part in EXCLUDED_DIRS or part == "skills" or part.endswith("-skills")
-        for part in parts
-    )
-
-
-def existing_project_files(root: Path, files: list[str]) -> list[str]:
-    result: list[str] = []
-    for file in files:
-        normalized = file.strip()
-        if not normalized or is_excluded(normalized):
-            continue
-        full_path = (root / normalized).resolve()
-        try:
-            full_path.relative_to(root.resolve())
-        except ValueError:
-            continue
-        if full_path.is_file():
-            result.append(normalized)
-    return sorted(set(result))
-
-
-def split_by_ext(files: list[str]) -> dict[str, list[str]]:
-    groups = {
-        "biome": [],
-        "go": [],
-        "html": [],
-        "markdown": [],
-        "design": [],
-        "php": [],
-        "python": [],
-        "shell": [],
-    }
-    for file in files:
-        suffix = Path(file).suffix.lower()
-        if suffix in BIOME_EXTS:
-            groups["biome"].append(file)
-        if suffix in GO_EXTS:
-            groups["go"].append(file)
-        if suffix in HTML_EXTS:
-            groups["html"].append(file)
-        if suffix in MARKDOWN_EXTS:
-            groups["markdown"].append(file)
-        if suffix in FRONTEND_DESIGN_EXTS:
-            groups["design"].append(file)
-        if suffix in PHP_EXTS:
-            groups["php"].append(file)
-        if suffix in PYTHON_EXTS:
-            groups["python"].append(file)
-        if suffix in SHELL_EXTS:
-            groups["shell"].append(file)
-    return groups
-
-
-def have_path(root: Path, path: str) -> bool:
-    return (root / path).exists()
-
-
-def have_command(command: str, root: Path) -> bool:
-    return shutil.which(command) is not None
-
-
-def local_impeccable_command(root: Path) -> list[str] | None:
-    local_bin = root / "node_modules" / ".bin" / "impeccable"
-    if local_bin.exists():
-        return ["npx", "--no-install", "impeccable"]
-    executable = shutil.which("impeccable")
-    if executable:
-        return [executable]
-    return None
-
-
-def markdownlint_command(root: Path) -> list[str] | None:
-    local_bin = root / "node_modules" / ".bin" / "markdownlint-cli2"
-    if local_bin.exists():
-        return ["npx", "--no-install", "markdownlint-cli2"]
-    executable = shutil.which("markdownlint-cli2")
-    if executable:
-        return [executable]
-    return None
-
-
-def quote_files(files: list[str]) -> str:
-    return " ".join(shlex.quote(file) for file in files)
-
-
-def run_wrapped(
-    root: Path,
-    label: str,
-    command: list[str],
-    *,
-    adapter: str = "generic",
-    shell: bool = False,
-    max_lines: int = 24,
-) -> int:
-    wrapper = root / "vibe_scripts" / "codex" / "ai-quality-wrapper.py"
-    args = [
-        sys.executable,
-        str(wrapper),
-        "--label",
-        label,
-        "--max-lines",
-        str(max_lines),
-        "--adapter",
-        adapter,
-    ]
-    if shell:
-        args.append("--shell")
-    args.append("--")
-    args.extend(command)
-    return subprocess.run(args, cwd=root, check=False).returncode
-
-
-def run_phase(
-    root: Path, phase: str, commands: list[tuple[str, list[str], bool, int, str]]
-) -> int:
-    if not commands:
-        print(f"[edited-check] {phase}: no applicable commands")
-        return 0
-    print(f"[edited-check] {phase}")
-    sys.stdout.flush()
-    failed = 0
-    for label, command, shell, max_lines, adapter in commands:
-        code = run_wrapped(
-            root, label, command, adapter=adapter, shell=shell, max_lines=max_lines
-        )
-        if code != 0:
-            failed = 1
-    return failed
-
-
-def build_commands(
-    root: Path, groups: dict[str, list[str]]
-) -> tuple[
-    list[tuple[str, list[str], bool, int, str]],
-    list[tuple[str, list[str], bool, int, str]],
-    list[tuple[str, list[str], bool, int, str]],
-]:
-    format_cmds: list[tuple[str, list[str], bool, int, str]] = []
-    lint_cmds: list[tuple[str, list[str], bool, int, str]] = []
-    type_cmds: list[tuple[str, list[str], bool, int, str]] = []
-
-    if groups["biome"] and have_path(root, "node_modules/.bin/biome"):
-        files = quote_files(groups["biome"])
-        format_cmds.append(
-            (
-                "format-biome-edited",
-                [f"npx biome check --write --max-diagnostics=none {files}"],
-                True,
-                20,
-                "generic",
-            )
-        )
-        lint_cmds.append(
-            (
-                "lint-biome-edited",
-                [f"npx biome check --colors=off --max-diagnostics=none {files}"],
-                True,
-                24,
-                "generic",
-            )
-        )
-    if groups["html"] and have_path(root, "node_modules/.bin/htmlhint"):
-        files = quote_files(groups["html"])
-        lint_cmds.append(
-            (
-                "lint-html-edited",
-                [f"npx htmlhint --nocolor --format compact {files}"],
-                True,
-                24,
-                "generic",
-            )
-        )
-    markdownlint = markdownlint_command(root)
-    if groups["markdown"] and markdownlint:
-        files = quote_files(groups["markdown"])
-        command = " ".join(shlex.quote(part) for part in markdownlint)
-        format_cmds.append(
-            (
-                "format-markdownlint-edited",
-                [f"{command} --fix {files}"],
-                True,
-                20,
-                "generic",
-            )
-        )
-        lint_cmds.append(
-            ("lint-markdown-edited", [f"{command} {files}"], True, 24, "generic")
-        )
-    impeccable = local_impeccable_command(root)
-    if groups["design"] and impeccable:
-        detector_args = " ".join(
-            shlex.quote(part) for part in impeccable + ["detect", *groups["design"]]
-        )
-        lint_cmds.append(("design-impeccable-edited", [detector_args], True, 30, "generic"))
-    if groups["php"]:
-        files = quote_files(groups["php"])
-        syntax_loop = "for file in " + files + '; do php -l "$file" || exit; done'
-        if have_command("php", root):
-            lint_cmds.append(("lint-php-syntax-edited", [syntax_loop], True, 20, "generic"))
-        if have_path(root, "vendor/bin/phpcbf"):
-            format_cmds.append(
-                (
-                    "format-phpcbf-edited",
-                    [
-                        f"vendor/bin/phpcbf --standard=PSR12 --extensions=php {files}"
-                    ],
-                    True,
-                    20,
-                    "generic",
-                )
-            )
-        if have_path(root, "vendor/bin/phpcs"):
-            lint_cmds.append(
-                (
-                    "lint-phpcs-edited",
-                    [
-                        f"vendor/bin/phpcs --standard=PSR12 --extensions=php --report=json -q {files}"
-                    ],
-                    True,
-                    24,
-                    "native:phpcs-json",
-                )
-            )
-        if have_path(root, "vendor/bin/phpstan"):
-            type_cmds.append(
-                (
-                    "type-phpstan-edited",
-                    [
-                        f"vendor/bin/phpstan analyse --memory-limit=1G --no-progress --error-format=json -- {files}"
-                    ],
-                    True,
-                    30,
-                    "native:phpstan-json",
-                )
-            )
-    if groups["python"] and have_command("ruff", root):
-        files = quote_files(groups["python"])
-        format_cmds.append(
-            ("format-ruff-edited", [f"ruff format {files}"], True, 20, "rtk:ruff-format")
-        )
-        lint_cmds.append(
-            ("lint-ruff-edited", [f"ruff check {files}"], True, 24, "rtk:ruff-check")
-        )
-    if groups["go"] and have_command("gofmt", root):
-        files = quote_files(groups["go"])
-        format_cmds.append(
-            ("format-gofmt-edited", [f"gofmt -w {files}"], True, 20, "generic")
-        )
-    if groups["shell"]:
-        files = quote_files(groups["shell"])
-        if have_command("shfmt", root):
-            format_cmds.append(
-                ("format-shfmt-edited", [f"shfmt -w {files}"], True, 20, "generic")
-            )
-        if have_command("shellcheck", root):
-            lint_cmds.append(
-                (
-                    "lint-shellcheck-edited",
-                    [f"shellcheck -f json1 {files}"],
-                    True,
-                    24,
-                    "native:shellcheck-json1",
-                )
-            )
-    return format_cmds, lint_cmds, type_cmds
-
-
-def main() -> int:
-    parser = argparse.ArgumentParser(
-        description="Format, lint, and typecheck edited files with capped AI output."
-    )
-    parser.add_argument(
-        "files",
-        nargs="*",
-        help="Specific files to check. Defaults to files recorded by agent edit hooks.",
-    )
-    args = parser.parse_args()
-    root = repo_root()
-    os.chdir(root)
-    selected = args.files if args.files else recorded_edited_files(root)
-    print(f"[edited-check] root: {root}")
-    if not selected:
-        print("[edited-check] no explicit or recorded edited files; refusing an empty quality pass")
-        return 2
-    files = existing_project_files(root, selected)
-    if not files:
-        print("[edited-check] selected files are missing or excluded; no applicable files")
-        return 0
-    groups = split_by_ext(files)
-    relevant = sorted(
-        set(
-            groups["biome"]
-            + groups["go"]
-            + groups["html"]
-            + groups["markdown"]
-            + groups["design"]
-            + groups["php"]
-            + groups["python"]
-            + groups["shell"]
-        )
-    )
-    if not relevant:
-        print("[edited-check] selected files have no applicable edited-file checks")
-        return 0
-    print(f"[edited-check] files: {len(relevant)}")
-    for file in relevant[:30]:
-        print(f"  - {file}")
-    if len(relevant) > 30:
-        print(f"  ... {len(relevant) - 30} more files hidden from AI output")
-    sys.stdout.flush()
-    format_cmds, lint_cmds, type_cmds = build_commands(root, groups)
-    failed = 0
-    failed |= run_phase(root, "format edited files", format_cmds)
-    failed |= run_phase(root, "lint edited files", lint_cmds)
-    failed |= run_phase(root, "typecheck edited files", type_cmds)
-    if failed:
-        print(
-            "[edited-check] errors found after formatting/linting/typechecking edited files"
-        )
-        return 1
-    print("[edited-check] edited-file checks passed")
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())
-PYEDITED
-	write_managed_temp "$path" "$tmp" 0755
-}
 ensure_cache_gitignored() {
 	local marker="# VibeHelper local AI/dev tooling"
 	local block
-	block=$'# VibeHelper local AI/dev tooling\n*.bak\n*.bak.*\n.cache/\n.agents/\n.claude/\n.codex/\n.mcp.json\nAGENTS.md\nCLAUDE.md\nagent/\nagents/\ncodebase-wiki/\ngraphify-out/\nnode_modules/\nnotes/\nobsidian/\nvendor/\nvibe_scripts/\nskills-lock.json\nbiome.json\n'
+	block=$'# VibeHelper local AI/dev tooling\n*.bak\n*.bak.*\n.cache/\n.agents/\n.claude/\n.codex/\n.unlazy/\n.mcp.json\nAGENTS.md\nCLAUDE.md\nagent/\nagents/\ncodebase-wiki/\ngraphify-out/\nnode_modules/\nnotes/\nobsidian/\nvendor/\nvibe_scripts/\nskills-lock.json\nbiome.json\n'
 	if [[ "$DRY_RUN" -eq 1 ]]; then
 		log "Would ensure .gitignore has VibeHelper local-file entries."
 		return 0
@@ -2153,6 +1100,9 @@ ensure_cache_gitignored() {
 	if ! grep -Fq "$marker" .gitignore; then
 		printf '\n%s' "$block" >>.gitignore
 		log "Updated .gitignore."
+	fi
+	if ! grep -Fxq '.unlazy/' .gitignore; then
+		printf '\n.unlazy/\n' >>.gitignore
 	fi
 }
 
@@ -2176,6 +1126,10 @@ helper_targets_available() {
 }
 
 write_makefile() {
+	if [[ -f vibe_scripts/codex/Makefile ]] && grep -Eq '^security(-ai)?:|[Ss][Ee][Mm][Gg][Rr][Ee][Pp]' vibe_scripts/codex/Makefile; then
+		warn "needs action: preserving existing custom or ambiguous security wiring in vibe_scripts/codex/Makefile; review it manually."
+		return 0
+	fi
 	local mf="vibe_scripts/codex/Makefile"
 	local tmp helper_expected=0
 	tmp="$(mktemp)"
@@ -2398,28 +1352,6 @@ BIOMEJSON
 	log "Wrote biome.json."
 }
 
-print_semgrep_note() {
-	if [[ ${#SECURITY_CMDS[@]} -eq 0 ]]; then
-		return 0
-	fi
-
-	cat <<'SEMGREP_NOTE'
-
-Semgrep note:
-  Semgrep does not use LLM tokens. It is a local/static security scanner.
-  The practical cost is runtime and findings noise, not Codex/OpenAI token usage.
-
-  In the Makefile written by this script, Semgrep runs when you run:
-    make -f vibe_scripts/codex/Makefile security-ai
-    make -f vibe_scripts/codex/Makefile security-ai
-    make -f vibe_scripts/codex/Makefile verify-ai
-    make -f vibe_scripts/codex/Makefile verify-ai
-
-  It does not run automatically on every query. It only runs when one of those
-  commands is invoked, or if you later wire those commands into hooks or CI.
-SEMGREP_NOTE
-}
-
 warn_fixers_scope() {
 	warn "Automatic fixers may rewrite files across the entire codebase."
 	warn "Commands that will run:"
@@ -2450,6 +1382,12 @@ should_run_fixers() {
 fixer_verify_cmd() {
 	local cmd="$1"
 	case "$cmd" in
+	*biome\\\ check\\\ --write\\\ *)
+		printf '%s\n' "${cmd/biome\\ check\\ --write/biome\\ check}"
+		;;
+	*markdownlint-cli2\\\ --fix*)
+		printf '%s\n' "${cmd/\\ --fix/}"
+		;;
 	*npx\ biome\ check\ --write\ *)
 		printf '%s\n' "${cmd/biome check --write/biome check}"
 		;;
@@ -2527,15 +1465,18 @@ fi
 
 if [[ "$WIRE_MODE" == "no" ]]; then
 	log "Not writing Makefile because --no-wire was used."
-	exit 0
+	exit "$FINAL_EXIT_CODE"
 fi
+
+start_managed_lifecycle || exit 1
+install_runtime_assets || exit 1
 
 TOTAL_CHECKS=$((${#LINT_CMDS[@]} + ${#TYPE_CMDS[@]} + ${#TEST_CMDS[@]} + ${#SECURITY_CMDS[@]}))
 if [[ "$TOTAL_CHECKS" -eq 0 ]]; then
 	if ! helper_targets_available; then
 		warn "No runnable quality checks or helper targets are available. Not writing a Makefile."
 		warn "Run part1.sh first or install a recommended tool manually, then rerun this script."
-		exit 0
+		exit "$FINAL_EXIT_CODE"
 	fi
 	warn "No runnable quality checks are available; writing helper operational targets only."
 fi
@@ -2543,16 +1484,10 @@ fi
 if [[ "$WIRE_MODE" == "ask" ]]; then
 	if ! ask_yn "Write/update Makefile using only currently available checks?" "y"; then
 		log "Not writing Makefile."
-		exit 0
+		exit "$FINAL_EXIT_CODE"
 	fi
 fi
 
-if [[ ! -f vibe_scripts/codex/ai-quality-wrapper.py || "$FORCE" -eq 1 ]]; then
-	write_ai_quality_wrapper
-fi
-if [[ ! -f vibe_scripts/codex/agent-check-edited.py || "$FORCE" -eq 1 ]]; then
-	write_agent_check_edited
-fi
 ensure_cache_gitignored
 write_biome_config
 write_makefile
@@ -2573,5 +1508,9 @@ if [[ "$DRY_RUN" -eq 0 ]]; then
 		log "  make -f vibe_scripts/codex/Makefile skills-check  # audit managed skills/plugins"
 		log "  make -f vibe_scripts/codex/Makefile skills-update # refresh policy-approved managed skills/plugins"
 	fi
-	print_semgrep_note
 fi
+
+if [[ "${CODEXHELPER_UNIFIED_INSTALL:-0}" != "1" ]]; then
+	finish_managed_lifecycle "$FINAL_EXIT_CODE"
+fi
+exit "$FINAL_EXIT_CODE"

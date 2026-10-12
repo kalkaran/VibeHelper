@@ -2,6 +2,7 @@
 """Headless, bounded delegation to a private OmniRoute free-only instance."""
 
 import argparse
+import fcntl
 import fnmatch
 import getpass
 import http.cookiejar
@@ -13,6 +14,7 @@ import secrets
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -20,8 +22,16 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime, timezone
+from contextlib import contextmanager
+from datetime import datetime
 from pathlib import Path
+
+try:
+    from datetime import UTC
+except ImportError:
+    from datetime import timedelta, timezone
+
+    UTC = timezone(timedelta(0))
 
 VERSION = "3.8.51"
 PORT = 20130
@@ -95,6 +105,99 @@ def load_config():
     if config.get("owner") != "VibeHelper-OmniRoute-v1":
         raise Unavailable("Refusing an unrecognized client configuration.")
     return config
+
+
+@contextmanager
+def attempt_history():
+    """Serialize cooperating workers and retain interrupted attempts on disk."""
+    private_dir(root())
+    path = root() / "attempts.jsonl"
+    fd = os.open(path, os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "a+", encoding="utf-8") as stream:
+        if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+            raise Unavailable("Attempt history must be a regular file.")
+        os.fchmod(stream.fileno(), 0o600)
+        try:
+            fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise Unavailable("Another worker is using the attempt history.") from exc
+        stream.seek(0)
+        try:
+            lines = list(stream)
+            if any(not line.endswith("\n") for line in lines):
+                raise ValueError
+            events = [json.loads(line) for line in lines]
+            for event in events:
+                if event["status"] not in (
+                    "started",
+                    "succeeded",
+                    "failed",
+                    "needs_context",
+                    "reset",
+                ):
+                    raise ValueError
+                if event["route"] is not None:
+                    route_identity(event["route"])
+        except (ValueError, KeyError, TypeError) as exc:
+            raise Unavailable(
+                "Attempt history is damaged; inspect it before continuing."
+            ) from exc
+        yield stream, events
+
+
+def route_identity(route):
+    identity = tuple(
+        route[field] for field in ("endpoint", "provider", "connection_id", "model")
+    )
+    if not all(isinstance(value, str) and value for value in identity):
+        raise ValueError("Invalid route identity")
+    return identity
+
+
+def blocked_routes(events):
+    blocked = {}
+    for event in events:
+        if event["route"] is None:
+            continue
+        key = route_identity(event["route"])
+        if event["status"] == "reset":
+            blocked.pop(key, None)
+        elif event["status"] in ("started", "failed"):
+            blocked[key] = event
+        elif blocked.get(key, {}).get("attempt_id") == event.get("attempt_id"):
+            blocked.pop(key, None)
+    return blocked
+
+
+def record_attempt(stream, event):
+    stream.write(json.dumps(event, ensure_ascii=True) + "\n")
+    stream.flush()
+    os.fsync(stream.fileno())
+
+
+def reset_route(connection_id, model):
+    with attempt_history() as (stream, events):
+        matches = [
+            event["route"]
+            for event in blocked_routes(events).values()
+            if event["route"]["connection_id"] == connection_id
+            and event["route"]["model"] == model
+            and event["route"]["endpoint"] == BASE_URL + "/v1/chat/completions"
+        ]
+        if not matches:
+            raise Unavailable(
+                "No matching failed route; use history to find its exact account and model."
+            )
+        for route in matches:
+            record_attempt(
+                stream,
+                {
+                    "status": "reset",
+                    "route": route,
+                    "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                },
+            )
+    print("Failed route reset. Its next use still requires normal eligibility checks.")
 
 
 def choose_password():
@@ -312,14 +415,14 @@ def confirm_free_accounts(client, connection_id):
         grants[connection["id"]] = {
             "provider": connection["provider"],
             "authType": connection.get("authType"),
-            "confirmed_at": datetime.now(timezone.utc).isoformat(),
+            "confirmed_at": datetime.now(UTC).isoformat(),
         }
     save_config(client.config)
     print(f"Recorded free-only account confirmation for {len(selected)} connection(s).")
 
 
-def task_score(task, model):
-    """Capability/name hints rank candidates; these are not quality benchmarks."""
+def model_hints(model):
+    """Catalog claims and name hints, not measured quality."""
     text = " ".join(
         str(model.get(key, "")) for key in ("id", "name", "description")
     ).lower()
@@ -329,6 +432,12 @@ def task_score(task, model):
     compact = bool(re.search(r"\b(mini|lite|small|nano|fast)\b", text))
     reasoning = caps.get("reasoning") is True or "reasoning" in params
     structured = caps.get("structured_output") is True or "response_format" in params
+    return coding, compact, reasoning, structured
+
+
+def task_score(task, model):
+    """Capability/name hints rank candidates; these are not quality benchmarks."""
+    coding, compact, reasoning, structured = model_hints(model)
     if task == "code":
         return 4 * coding + reasoning
     if task == "edit":
@@ -338,9 +447,42 @@ def task_score(task, model):
     return 2 * compact - reasoning
 
 
-def select_route(client, task, prompt):
+def model_notes(model):
+    coding, compact, reasoning, structured = model_hints(model)
+    notes = []
+    if coding:
+        notes.append("Coding/editing hint in the model name or catalog description.")
+    if compact:
+        notes.append("Compact/fast model hint; may suit summaries and small edits.")
+    if reasoning:
+        notes.append("Catalog advertises reasoning support.")
+    if structured:
+        notes.append("Catalog advertises structured output, useful for extraction.")
+    return notes or ["No task-specific capability evidence in the catalog."]
+
+
+def route_observations(events, route, task):
+    completed = [
+        event
+        for event in events
+        if event["route"] is not None
+        and route_identity(event["route"]) == route_identity(route)
+        and event.get("task") == task
+        and event["status"] in ("succeeded", "failed", "needs_context")
+    ]
+    return {
+        status: sum(event["status"] == status for event in completed)
+        for status in ("succeeded", "failed", "needs_context")
+    }
+
+
+def select_route(client, task, prompt, events=None, ranked=False):
     if not prompt.strip() or len(prompt) > MAX_INPUT:
         raise Unavailable(f"Provide a nonempty task of at most {MAX_INPUT} characters.")
+    if events is None:
+        with attempt_history() as (_, history):
+            return select_route(client, task, prompt, history, ranked)
+    blocked = blocked_routes(events)
     verified_executable(client.config)
     if task not in TASKS:
         raise Unavailable("Choose a task: code, edit, summary or extract.")
@@ -436,9 +578,12 @@ def select_route(client, task, prompt):
                     (
                         task_score(task, metadata),
                         {
+                            "endpoint": BASE_URL + "/v1/chat/completions",
                             "connection_id": connection_id,
                             "provider": provider,
                             "model": provider + "/" + model_id,
+                            "suitability_score": task_score(task, metadata),
+                            "suitability_notes": model_notes(metadata),
                             "task": task,
                             "context": context,
                             "context_source": context_source,
@@ -460,10 +605,24 @@ def select_route(client, task, prompt):
         client.request("/api/rate-limits"),
         client.request("/api/usage/provider-limits"),
     )
+    for _, route in candidates:
+        route["observed_outcomes"] = route_observations(events, route, task)
+        route["suitability_notes"].append(
+            "Capability hints are not benchmarks; completed responses have not been quality-graded."
+        )
+    eligible = []
     for _, route in sorted(
         candidates,
-        key=lambda item: (-item[0], item[1]["model"], item[1]["connection_id"]),
+        key=lambda item: (
+            -item[0],
+            -item[1]["observed_outcomes"]["succeeded"],
+            item[1]["observed_outcomes"]["failed"],
+            item[1]["model"],
+            item[1]["connection_id"],
+        ),
     ):
+        if route_identity(route) in blocked:
+            continue
         try:
             preflight(
                 client,
@@ -472,10 +631,17 @@ def select_route(client, task, prompt):
                 route["provider"],
                 snapshot,
             )
-            return route
+            route["rank"] = len(eligible) + 1
+            if not ranked:
+                return route
+            eligible.append(route)
         except Unavailable:
             continue
-    raise Unavailable("Suitable routes are currently blocked.")
+    if eligible:
+        return eligible
+    raise Unavailable(
+        "Suitable routes are blocked; inspect history before explicitly resetting a failed route."
+    )
 
 
 def number(value):
@@ -496,7 +662,10 @@ def timestamp(value):
     try:
         if value.isdigit():
             return timestamp(int(value))
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        # Python before 3.11 requires an explicit offset instead of trailing Z.
+        if value.endswith("Z"):
+            value = value[:-1] + "+00:00"
+        parsed = datetime.fromisoformat(value)
         return parsed.timestamp() if parsed.tzinfo else None
     except (ValueError, OverflowError):
         return None
@@ -604,7 +773,7 @@ def report(client, refresh_models=False):
     caches = read("/api/usage/provider-limits", maps=("caches",)).get("caches", {})
     limits = read("/api/rate-limits", lists=("connections", "lockouts"))
     result = {
-        "collected_at": datetime.now(timezone.utc).isoformat(),
+        "collected_at": datetime.now(UTC).isoformat(),
         "notes": [
             "Catalog entries do not prove account access, free pricing or inference availability.",
             "Tokens are recorded gateway usage; external traffic and unrecorded usage are excluded.",
@@ -882,14 +1051,65 @@ def setup():
 
 
 def ask(client, prompt, task="edit"):
-    if not prompt.strip() or len(prompt) > MAX_INPUT:
-        raise Unavailable(f"Provide a nonempty task of at most {MAX_INPUT} characters.")
-    client.login()
-    client.verify_policy()
-    route = select_route(client, task, prompt)
+    started = time.monotonic()
+    event = {
+        "attempt_id": secrets.token_hex(12),
+        "gateway_version": VERSION,
+        "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "endpoint": BASE_URL + "/v1/chat/completions",
+        "task": task if task in TASKS else "unknown",
+        "route": None,
+        "status": "started",
+        "stage": "input",
+    }
+    with attempt_history() as (stream, events):
+        record_attempt(stream, event)
+        try:
+            if not prompt.strip() or len(prompt) > MAX_INPUT:
+                raise Unavailable(
+                    f"Provide a nonempty task of at most {MAX_INPUT} characters."
+                )
+            event["stage"] = "gateway_preflight"
+            client.login()
+            client.verify_policy()
+            event["stage"] = "selection"
+            route = select_route(client, task, prompt, events)
+            event["route"] = route
+            event["stage"] = "route_preflight"
+            record_attempt(stream, event)
+            result = run_attempt(client, prompt, route, event)
+            event["status"] = "succeeded"
+            return {**result, "attempt_id": event["attempt_id"]}
+        except (
+            Unavailable,
+            OSError,
+            ValueError,
+            KeyError,
+            IndexError,
+            TypeError,
+            AttributeError,
+            subprocess.SubprocessError,
+        ) as exc:
+            if event["status"] != "needs_context":
+                event["status"] = "failed"
+            event["error_type"] = type(exc).__name__
+            if isinstance(exc, urllib.error.HTTPError):
+                event["http_status"] = exc.code
+            raise
+        finally:
+            event["finished_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            event["duration_ms"] = round((time.monotonic() - started) * 1000)
+            record_attempt(stream, event)
+            print(
+                f"OmniRoute attempt {event['attempt_id']}: {event['status']}; see history.",
+                file=sys.stderr,
+            )
+
+
+def run_attempt(client, prompt, route, event):
     client.verify_policy(route["model"])
     expires = (
-        datetime.fromtimestamp(time.time() + 120, timezone.utc)
+        datetime.fromtimestamp(time.time() + 120, UTC)
         .isoformat()
         .replace("+00:00", "Z")
     )
@@ -902,6 +1122,7 @@ def ask(client, prompt, task="edit"):
         "allowedCombos": [],
         "expiresAt": expires,
     }
+    event["stage"] = "temporary_key"
     key = client.request("/api/keys", restriction)
     if not isinstance(key, dict) or not isinstance(key.get("id"), str) or not key["id"]:
         raise Unavailable("Gateway did not return a temporary key identifier.")
@@ -929,9 +1150,11 @@ def ask(client, prompt, task="edit"):
             for field, value in {**restriction, **controls}.items()
         ):
             raise Unavailable("Temporary key routing controls were not applied.")
+        event["stage"] = "route_preflight"
         preflight(client, route["connection_id"], route["model"], route["provider"])
         # This new client has no dashboard session cookie; only the restricted bearer.
         inference = Client({"api_key": key["key"]})
+        event["stage"] = "inference"
         result = inference.request(
             "/v1/chat/completions",
             {
@@ -949,11 +1172,30 @@ def ask(client, prompt, task="edit"):
         try:
             client.request(key_path, method="DELETE")
         except (Unavailable, OSError, ValueError):
+            event["key_cleanup_failed"] = True
             print(
                 "Temporary worker key cleanup failed; its expiry remains set.",
                 file=sys.stderr,
             )
+    event["stage"] = "response_validation"
+    returned_model = result.get("model")
+    event["returned_model"] = (
+        returned_model
+        if returned_model in (route["model"], route["model"].split("/", 1)[-1])
+        else None
+    )
+    usage = result.get("usage")
+    event["usage"] = {
+        field: number(usage.get(field)) if isinstance(usage, dict) else None
+        for field in ("prompt_tokens", "completion_tokens", "total_tokens")
+    }
     choice = result["choices"][0]
+    event["finish_reason"] = (
+        choice.get("finish_reason")
+        if choice.get("finish_reason")
+        in ("stop", "length", "content_filter", "tool_calls", "function_call")
+        else "unknown"
+    )
     answer = choice["message"].get("content")
     if (
         choice.get("finish_reason") != "stop"
@@ -963,8 +1205,11 @@ def ask(client, prompt, task="edit"):
         raise Unavailable(
             "Gateway returned an incomplete answer; main agent should continue."
         )
-    if len(answer) > MAX_OUTPUT or answer.lstrip().startswith("NEEDS_CONTEXT"):
-        raise Unavailable("Proposal exceeds the output budget or needs more context.")
+    if answer.lstrip().startswith("NEEDS_CONTEXT"):
+        event["status"] = "needs_context"
+        raise Unavailable("Proposal needs more context.")
+    if len(answer) > MAX_OUTPUT:
+        raise Unavailable("Proposal exceeds the output budget.")
     return {
         "review_required": True,
         "selected_route": route,
@@ -993,12 +1238,16 @@ def main():
             "route",
             "confirm-free",
             "revoke-free",
+            "history",
+            "reset-route",
+            "rank",
         ),
     )
     parser.add_argument(
         "provider", nargs="?", help="Provider ID for connect; API key comes from stdin"
     )
-    parser.add_argument("--json", action="store_true", help="Report as JSON")
+    parser.add_argument("--json", action="store_true", help="Report/history as JSON")
+    parser.add_argument("--model", help="Exact provider/model ID for reset-route")
     parser.add_argument("--task", choices=TASKS, help="Task type for ask/route")
     parser.add_argument(
         "--billing-disabled",
@@ -1012,6 +1261,28 @@ def main():
     )
     args = parser.parse_args()
     try:
+        if args.command == "history":
+            with attempt_history() as (_, events):
+                print(
+                    json.dumps(
+                        {
+                            "events": events,
+                            "blocked_routes": [
+                                event["route"]
+                                for event in blocked_routes(events).values()
+                            ],
+                        },
+                        indent=None if args.json else 2,
+                    )
+                )
+            return 0
+        if args.command == "reset-route":
+            if not args.provider or not args.model:
+                raise Unavailable(
+                    "Use reset-route CONNECTION_ID --model PROVIDER/MODEL."
+                )
+            reset_route(args.provider, args.model)
+            return 0
         if args.command == "setup":
             setup()
             return 0
@@ -1032,7 +1303,7 @@ def main():
                 grants.pop(args.provider, None)
             save_config(config)
             print("Free-account confirmation removed.")
-        elif args.command == "route":
+        elif args.command in ("route", "rank"):
             if not args.task:
                 raise Unavailable("route requires --task.")
             signal.signal(signal.SIGALRM, timed_out)
@@ -1043,7 +1314,12 @@ def main():
                 client.verify_policy()
                 print(
                     json.dumps(
-                        select_route(client, args.task, sys.stdin.read(MAX_INPUT + 1))
+                        select_route(
+                            client,
+                            args.task,
+                            sys.stdin.read(MAX_INPUT + 1),
+                            ranked=args.command == "rank",
+                        )
                     )
                 )
             finally:
