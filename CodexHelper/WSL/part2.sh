@@ -14,6 +14,7 @@ DRY_RUN=0
 YES=0
 FORCE=0
 REFRESH_MANAGED=0
+FALLOW_INSTALL=1
 FINAL_EXIT_CODE=0
 WIRE_MODE="ask"    # ask | yes | no
 INSTALL_MODE="ask" # ask | yes | no
@@ -178,9 +179,25 @@ find_repo_root() {
 	fi
 }
 
+configure_fallow() {
+	local source="$INSTALLER_DIR/../../templates/vibe_scripts/fallow.py"
+	[[ -f "$source" ]] || source="$INSTALLER_DIR/../templates/vibe_scripts/fallow.py"
+	local flags=("install" "--provider" "codex")
+	[[ "$DRY_RUN" != "1" ]] || flags+=("--dry-run")
+	if [[ "$REFRESH_MANAGED" == "1" || "$INSTALL_MODE" == "no" ]]; then FALLOW_INSTALL=0; fi
+	python3 "$source" "${flags[@]}" --allow-install "$FALLOW_INSTALL"
+}
+
+configure_design_hook() {
+	[[ "$DRY_RUN" != "1" ]] || return 0
+	local source="$INSTALLER_DIR/../../templates/vibe_scripts/quality-hook.py"
+	[[ -f "$source" ]] || source="$INSTALLER_DIR/../templates/vibe_scripts/quality-hook.py"
+	python3 "$source" --provider codex --install-design-scope
+}
+
 install_runtime_assets() {
 	local name source destination found
-	for name in ai-quality-wrapper.py agent-check-edited.py agent-verify.sh quality-hook.py; do
+	for name in ai-quality-wrapper.py agent-check-edited.py agent-verify.sh quality-hook.py fallow.py; do
 		found=0
 		for source in "$INSTALLER_DIR/../../templates/vibe_scripts/$name" "$INSTALLER_DIR/../templates/vibe_scripts/$name"; do
 			[[ -f "$source" ]] || continue
@@ -1194,12 +1211,13 @@ write_makefile() {
 			local cmd
 			for cmd in "${LINT_CMDS[@]}"; do echo "	$cmd"; done
 			echo
-			echo ".PHONY: lint-ai"
-			echo "lint-ai:"
-			local idx
-			for idx in "${!LINT_AI_CMDS[@]}"; do emit_ai_cmd "lint-${LINT_TARGETS[$idx]}" "${LINT_AI_CMDS[$idx]}" "${LINT_ADAPTERS[$idx]}"; done
-			echo
 		fi
+		echo ".PHONY: lint-ai"
+		echo "lint-ai:"
+		local idx
+		for idx in "${!LINT_AI_CMDS[@]}"; do emit_ai_cmd "lint-${LINT_TARGETS[$idx]}" "${LINT_AI_CMDS[$idx]}" "${LINT_ADAPTERS[$idx]}"; done
+		printf '\t@python3 vibe_scripts/codex/fallow.py lint\n'
+		echo
 
 		if [[ ${#FORMAT_CMDS[@]} -gt 0 ]]; then
 			echo ".PHONY: format fix"
@@ -1513,6 +1531,8 @@ fi
 
 start_managed_lifecycle || exit 1
 install_runtime_assets || exit 1
+configure_design_hook || exit 1
+configure_fallow || exit 1
 
 TOTAL_CHECKS=$((${#LINT_CMDS[@]} + ${#TYPE_CMDS[@]} + ${#TEST_CMDS[@]} + ${#SECURITY_CMDS[@]}))
 if [[ "$TOTAL_CHECKS" -eq 0 ]]; then

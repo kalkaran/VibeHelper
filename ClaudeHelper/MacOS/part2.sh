@@ -11,6 +11,7 @@ SCRIPT_NAME="$(basename "$0")"
 DRY_RUN=0
 FORCE=0
 REFRESH_MANAGED=0
+FALLOW_INSTALL="${CLAUDEHELPER_PACKAGE_INSTALL:-1}"
 WIRE=0
 REPO_ROOT=""
 
@@ -128,9 +129,25 @@ selected_files_command() {
 	printf 'bash -o pipefail -c %q' "python3 vibe_scripts/claude/agent-check-edited.py --list-files $1 | xargs -0 -r $2"
 }
 
+configure_fallow() {
+	local source="$INSTALLER_DIR/../../templates/vibe_scripts/fallow.py"
+	[[ -f "$source" ]] || source="$INSTALLER_DIR/../templates/vibe_scripts/fallow.py"
+	local flags=("install" "--provider" "claude")
+	[[ "$DRY_RUN" != "1" ]] || flags+=("--dry-run")
+	if [[ "$REFRESH_MANAGED" == "1" ]]; then FALLOW_INSTALL=0; fi
+	python3 "$source" "${flags[@]}" --allow-install "$FALLOW_INSTALL"
+}
+
+configure_design_hook() {
+	[[ "$DRY_RUN" != "1" ]] || return 0
+	local source="$INSTALLER_DIR/../../templates/vibe_scripts/quality-hook.py"
+	[[ -f "$source" ]] || source="$INSTALLER_DIR/../templates/vibe_scripts/quality-hook.py"
+	python3 "$source" --provider claude --install-design-scope
+}
+
 install_runtime_assets() {
 	local name source destination found
-	for name in ai-quality-wrapper.py agent-check-edited.py agent-verify.sh quality-hook.py; do
+	for name in ai-quality-wrapper.py agent-check-edited.py agent-verify.sh quality-hook.py fallow.py; do
 		found=0
 		for source in "$INSTALLER_DIR/../../templates/vibe_scripts/$name" "$INSTALLER_DIR/../templates/vibe_scripts/$name"; do
 			[[ -f "$source" ]] || continue
@@ -209,6 +226,8 @@ fi
 
 start_managed_lifecycle || exit 1
 install_runtime_assets || exit 1
+configure_design_hook || exit 1
+configure_fallow || exit 1
 
 make_target() {
 	local target="$1"
@@ -255,12 +274,15 @@ if cmd_exists markdownlint-cli2 && has_markdown_files; then
 	lint_commands+=("$wrapper --label lint-markdown --max-lines 30 --shell -- $(printf %q "$(selected_files_command '.md .markdown' markdownlint-cli2)")")
 fi
 if [[ "${#lint_commands[@]}" -gt 0 ]]; then
+	verify_deps+=("lint-ai")
+fi
+lint_commands+=("python3 vibe_scripts/claude/fallow.py lint")
+if [[ "${#lint_commands[@]}" -gt 0 ]]; then
 	body=""
 	for command in "${lint_commands[@]}"; do
 		body+=$'\t@'"$command"$'\n'
 	done
 	targets+=("$(make_target lint-ai "$body")")
-	verify_deps+=("lint-ai")
 fi
 
 if has_npm_script typecheck; then

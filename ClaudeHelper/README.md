@@ -188,3 +188,14 @@ shared; separating scripts does not add missing language checks.
 See [installation flow and evidence](../INSTALLATION-FLOW.md) for managed
 refresh,
 component states, migration, and repair-loop verification.
+
+## Fallow advisory lint
+
+Standard installation includes JavaScript/TypeScript dead-code and duplication
+reports in `lint-ai`. Findings are advisory and use the active session's recorded
+edits when available. Missing session scope prompts an explicit scoped report.
+See [Fallow setup and scope](../FALLOW.md) for commands and coverage limits.
+
+Impeccable design review runs from the completion hook when UI source changes,
+separately from ordinary lint. See [design review scope](../DESIGN-REVIEW.md) for
+upgrade behavior and detection limits.

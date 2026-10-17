@@ -2157,7 +2157,7 @@ Read order for non-trivial tasks:
 
 Default workflow:
 1. Understand the task and expected behavior.
-2. Read the relevant `/codebase-wiki/` page for durable repo memory.
+2. Before substantial planning, follow `/agent/codex/context-strategy.md` for a scoped memory brief and source evidence.
 3. Before the first repository edit of any coding task, spawn the required read-only sentinel and keep that same agent for plan and final review.
 4. Use Graphify and/or code-review-graph to identify the smallest affected area when the task is broad or unfamiliar.
 5. Use Context7 for framework/library/API details.
@@ -2346,19 +2346,43 @@ EOF_CODING
 		cat <<'EOF_CONTEXT'
 # Context strategy
 
-Goal: minimize tokens while preserving enough context to make correct changes.
+Before substantial planning, state the requested outcome and allowed edits. Task
+scope is separate from graph coverage and the files needed for inspection.
 
-Before large edits:
-1. Read the relevant `/codebase-wiki/` page for durable architecture/testing/security knowledge.
-2. Use Graphify if available for high-level repo understanding when the task is broad, unfamiliar, or high-risk.
-3. Use code-review-graph for affected files, callers, dependents, tests, and blast radius.
-4. Read only files returned by the graph unless the task requires more.
-5. Avoid loading unrelated docs, old generated code, build artifacts, or vendored dependencies.
+1. Run `python3 vibe_scripts/codex/project-memory.py context --task "current request" --files path/to/relevant/file`.
+   Use paths from initial discovery, not all dirty files. Add `--architecture`
+   when architecture or relationships across documents matter. Start a new brief
+   when the request changes; a resumed session is not automatically the same task.
+2. Read the relevant wiki pages and cited source. Use code-review-graph to inspect
+   callers, dependents and tests, including symbols identified by file summaries.
+   Use Graphify for broader discovery. The brief is an entry point, not exhaustive
+   evidence; inspect additional source where dependencies require it.
+3. Check freshness. Missing tools or pending updates require source inspection and
+   an explicit limitation, not unrelated repairs or a blocking retry loop.
+4. State the planned change and affected tests using that evidence. Inspection
+   paths do not authorize edits, design reviews or changes outside the request.
 
-After editing:
-1. Run `code-review-graph detect-changes --brief` when available.
-2. Run targeted tests.
-3. Run `make -f vibe_scripts/codex/Makefile wiki-ai` only when new stable knowledge was discovered, then review the generated wiki section before relying on it.
+Memory hooks record actual changes after edits and shell commands. Graph queries
+and task boundaries batch refreshes; unchanged content does not trigger a rebuild.
+Graphify's supported code refresh may rebuild all code. Documents have separate
+semantic freshness; code refresh never completes document review. Hooks do not
+run semantic inference or install tools. Existing global/custom graph watchers
+may still run independently; inspect them if updates appear duplicated.
+
+For explicit maintenance, run `python3 vibe_scripts/codex/project-memory.py refresh`
+(add `--architecture` for Graphify), or use `status` to inspect pending work.
+Use the Graphify skill's semantic update at a meaningful task boundary when
+changed documents affect the task. Review its sources, deletion handling and
+output before recording the status snapshot with `accept-semantic --snapshot
+<snapshot> --evidence "reviewed source paths and corrections"`. This records a
+review; it does not perform one. Never stamp failed or skipped extraction as done.
+
+Use `make -f vibe_scripts/codex/Makefile wiki-ai` only when work reveals stable
+architecture, testing, security or integration facts. Inspect the generated diff
+and source evidence; preserve handwritten wiki content. Graph conclusions are
+review prompts until confirmed. Do not index session logs, caches, generated
+reports or saved graph answers as project facts. Run affected tests through the
+approved quality routes; memory maintenance does not replace verification.
 EOF_CONTEXT
 	)
 	write_file "agent/codex/context-strategy.md" "$context_strategy"
@@ -2800,7 +2824,7 @@ def makefile_targets() -> list[str]:
 
 
 def auto_block(key: str, body: str) -> str:
-    return f"<!-- BEGIN AUTO-WIKI:{key} -->\n{body.rstrip()}\n<!-- END AUTO-WIKI:{key} -->\n"
+    return f"<!-- BEGIN AUTO-WIKI:{key} -->\n> Draft: confirm source evidence and graph freshness before promoting these notes.\n\n{body.rstrip()}\n<!-- END AUTO-WIKI:{key} -->\n"
 
 
 def replace_section(path: Path, title: str, key: str, body: str) -> None:
@@ -3038,6 +3062,25 @@ create_verify_script() {
 	done
 	err "Required shared helper asset missing: agent-verify.sh"
 	return 1
+}
+
+create_project_memory() {
+	local name src content
+	for name in project-memory.py install-project-memory.py; do
+		src="$INSTALLER_DIR/../../templates/vibe_scripts/$name"
+		[[ -f "$src" ]] || src="$INSTALLER_DIR/../templates/vibe_scripts/$name"
+		[[ -f "$src" ]] || {
+			err "Required memory helper missing: $name"
+			return 1
+		}
+		content="$(cat "$src")"
+		write_file "vibe_scripts/codex/$name" "$content" "0755"
+	done
+	if [[ "$DRY_RUN" == "1" ]]; then
+		log "Would configure scoped project memory hooks and exclusions."
+	else
+		python3 vibe_scripts/codex/install-project-memory.py --provider codex --hooks "$CREATE_CODEX_HOOKS"
+	fi
 }
 
 create_quality_hook_script() {
@@ -5029,6 +5072,7 @@ main() {
 	create_verify_script
 	create_quality_hook_script
 	create_codex_hooks_templates
+	create_project_memory
 	apply_codex_hook_config
 	if [[ "$SKIP_GLOBAL" != "1" ]]; then
 		normalize_codex_config "$(choose_codex_config_target)"

@@ -238,6 +238,34 @@ Depending on the helper and options you choose, VibeHelper can add:
   edited-file, lint, verification, wiki and skills commands; Codex also has
   `savings-ai`
 
+## Project memory and planning
+
+Both helpers install `project-memory.py` in their provider directory. Before
+substantial planning, request a brief for the task and the files being inspected:
+
+```bash
+python3 vibe_scripts/codex/project-memory.py context \
+  --task "Fix tracking attribution" --files src/tracking.py
+```
+
+Use `vibe_scripts/claude/` for Claude. Add `--architecture` when broader Graphify
+context helps. The brief links relevant wiki pages, queries code relationships
+and tests, and reports freshness. Confirm the source before relying on a graph
+finding; inspection does not authorize unrelated edits or design work.
+
+Hooks record changes after edits and shell commands, then batch graph refreshes
+before graph queries and at task boundaries. Missing tools and failed updates
+remain visible without blocking completion. Existing custom or global graph
+watchers may still run independently. Graphify's code refresh can rebuild all
+code; semantic document updates require separate extraction and source review.
+The `status` command lists pending work, while `refresh --architecture` requests
+both code indexes. Neither command installs or upgrades tools.
+
+Generated reports, caches and session logs are excluded from Graphify inputs.
+Use `wiki-ai` only for durable knowledge, review its generated diff, and preserve
+handwritten sections. See `agent/codex/context-strategy.md` or its Claude
+equivalent for recording a completed semantic review.
+
 ## What it can install
 
 Defaults and opt-in tools differ between the two helpers. They can install:

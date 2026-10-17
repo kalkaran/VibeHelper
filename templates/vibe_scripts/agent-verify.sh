@@ -10,8 +10,8 @@ if [[ "$(basename -- "$SCRIPT_DIR")" == "codex" || "$(basename -- "$SCRIPT_DIR")
 	ROOT="$(cd -- "$SCRIPT_DIR/../.." && pwd)"
 fi
 shift "$(($# > 0 ? 1 : 0))"
-if [[ "$MODE" != "test" && "$#" -gt 0 ]]; then
-	echo "Only test accepts additional paths or identifiers" >&2
+if [[ "$MODE" != "test" && "$MODE" != "fallow" && "$#" -gt 0 ]]; then
+	echo "Only test and fallow accept additional scope arguments" >&2
 	exit 2
 fi
 MAKE_ARGS=()
@@ -62,7 +62,9 @@ echo "Changed files:"
 print_changed_files_summary
 echo
 
-if [[ "$MODE" == "edited" ]]; then
+if [[ "$MODE" == "fallow" ]]; then
+	python3 "$SCRIPT_DIR/fallow.py" report "$@"
+elif [[ "$MODE" == "edited" ]]; then
 	make "${MAKE_ARGS[@]}" edited-ai
 elif [[ "$MODE" == "lint" ]]; then
 	make "${MAKE_ARGS[@]}" lint-ai
@@ -114,6 +116,6 @@ elif [[ "$MODE" == "all" || "$MODE" == "verify" ]]; then
 	make "${MAKE_ARGS[@]}" verify-ai
 else
 	echo "Unknown mode: $MODE" >&2
-	echo "Usage: $0 [edited|all|verify|lint|typecheck|test|security|graph]" >&2
+	echo "Usage: $0 [edited|all|verify|lint|typecheck|test|security|graph|fallow (--files PATH...|--all)]" >&2
 	exit 2
 fi

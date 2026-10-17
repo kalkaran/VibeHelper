@@ -244,6 +244,12 @@ fi
 
 PART1_ARGS=()
 PART2_ARGS=()
+PACKAGE_INSTALL=1
+if [[ "${#PART1_ONLY_ARGS[@]}" -gt 0 ]]; then
+	for option in "${PART1_ONLY_ARGS[@]}"; do
+		case "$option" in --repo-only | --skip-global) PACKAGE_INSTALL=0 ;; esac
+	done
+fi
 
 if [[ "$DRY_RUN" -eq 1 ]]; then
 	PART1_ARGS+=("--dry-run")
@@ -278,9 +284,9 @@ run_part1() {
 
 run_part2() {
 	if [[ "${#PART2_ARGS[@]}" -gt 0 ]]; then
-		CLAUDEHELPER_UNIFIED_INSTALL=1 bash "$PART2" "${PART2_ARGS[@]}"
+		CLAUDEHELPER_PACKAGE_INSTALL="$PACKAGE_INSTALL" CLAUDEHELPER_UNIFIED_INSTALL=1 bash "$PART2" "${PART2_ARGS[@]}"
 	else
-		CLAUDEHELPER_UNIFIED_INSTALL=1 bash "$PART2"
+		CLAUDEHELPER_PACKAGE_INSTALL="$PACKAGE_INSTALL" CLAUDEHELPER_UNIFIED_INSTALL=1 bash "$PART2"
 	fi
 }
 

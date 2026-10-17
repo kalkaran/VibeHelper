@@ -875,7 +875,7 @@ graphify_guidance_block() {
   - **Understanding a codebase**: onboarding to, or answering architecture / dependency / "how does this fit together" questions about, a new or large repo.
   - **Synthesizing many documents**: several docs, papers, or notes that need cross-linking into one map.
   - **Explicit mapping asks**: any request to "map", "graph", "diagram", or "show relationships" — not just the literal `/graphify`.
-  - **Before a codebase-wiki update**: run graphify first so `graphify-out/GRAPH_REPORT.md` exists for `update-codebase-wiki.py` (`make -f vibe_scripts/claude/Makefile wiki-ai`) to consume.
+  - **Project planning**: follow `agent/claude/context-strategy.md`; refresh only relevant stale context. Wiki updates need confirmed source facts, not an unconditional Graphify run.
 - `/graphify` remains the explicit manual trigger. For a clearly expensive run, give a one-line heads-up and proceed rather than asking permission.
 BLOCK
 	printf '%s\n' "$GRAPHIFY_MARKER_END"
@@ -1281,16 +1281,6 @@ install_generated_repo_files() {
             "timeout": 10
           }
         ]
-      },
-      {
-        "matcher": "Grep|Glob|Read",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "root=\"${CLAUDE_PROJECT_DIR:-}\"; [ -n \"$root\" ] || root=\"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\"; hook=\"$root/.claude/hooks/graph_first_policy.py\"; [ -f \"$hook\" ] || exit 0; exec python3 \"$hook\"",
-            "timeout": 10
-          }
-        ]
       }
     ],
     "PostToolUse": [
@@ -1301,16 +1291,6 @@ install_generated_repo_files() {
             "type": "command",
             "command": "root=\"${CLAUDE_PROJECT_DIR:-}\"; [ -n \"$root\" ] || root=\"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\"; hook=\"$root/.claude/hooks/post_edit_check.py\"; [ -f \"$hook\" ] || exit 0; exec python3 \"$hook\"",
             "timeout": 120
-          }
-        ]
-      },
-      {
-        "matcher": "mcp__code-review-graph__.*",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "root=\"${CLAUDE_PROJECT_DIR:-}\"; [ -n \"$root\" ] || root=\"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\"; hook=\"$root/.claude/hooks/graph_first_policy.py\"; [ -f \"$hook\" ] || exit 0; exec python3 \"$hook\"",
-            "timeout": 10
           }
         ]
       }
@@ -1343,6 +1323,9 @@ install_generated_repo_files() {
 }
 SETTINGS_EOF
 	)"
+	if [[ "$DRY_RUN" -ne 1 ]]; then
+		content="$(printf '%s\n' "$content" | python3 vibe_scripts/claude/install-project-memory.py --provider claude --template-json)"
+	fi
 	write_hooks_settings "$content"
 
 	content="$(
@@ -2244,16 +2227,43 @@ AGENTRULES_EOF
 		cat <<'AGENTCTX_EOF'
 # Context strategy
 
-Read narrowly before editing:
-- Start from the changed workflow or failing command.
-- Prefer `rg` and `rg --files` for discovery.
-- Read adjacent tests and existing helpers before creating new code.
-- Do not paste large generated logs into the conversation; use `.cache/ai-quality/` logs when full output is needed.
+Before substantial planning, state the requested outcome and allowed edits. Task
+scope is separate from graph coverage and the files needed for inspection.
 
-Durable memory:
-- Treat `codebase-wiki/` as reviewed project memory.
-- Add to it only when a task reveals stable architecture, testing, security, integration, or operational facts.
-- Do not store temporary task notes, raw tool output, speculation, credentials, or user-private data.
+1. Run `python3 vibe_scripts/claude/project-memory.py context --task "current request" --files path/to/relevant/file`.
+   Use paths from initial discovery, not all dirty files. Add `--architecture`
+   when architecture or relationships across documents matter. Start a new brief
+   when the request changes; a resumed session is not automatically the same task.
+2. Read the relevant wiki pages and cited source. Use code-review-graph to inspect
+   callers, dependents and tests, including symbols identified by file summaries.
+   Use Graphify for broader discovery. The brief is an entry point, not exhaustive
+   evidence; inspect additional source where dependencies require it.
+3. Check freshness. Missing tools or pending updates require source inspection and
+   an explicit limitation, not unrelated repairs or a blocking retry loop.
+4. State the planned change and affected tests using that evidence. Inspection
+   paths do not authorize edits, design reviews or changes outside the request.
+
+Memory hooks record actual changes after edits and shell commands. Graph queries
+and task boundaries batch refreshes; unchanged content does not trigger a rebuild.
+Graphify's supported code refresh may rebuild all code. Documents have separate
+semantic freshness; code refresh never completes document review. Hooks do not
+run semantic inference or install tools. Existing global/custom graph watchers
+may still run independently; inspect them if updates appear duplicated.
+
+For explicit maintenance, run `python3 vibe_scripts/claude/project-memory.py refresh`
+(add `--architecture` for Graphify), or use `status` to inspect pending work.
+Use the Graphify skill's semantic update at a meaningful task boundary when
+changed documents affect the task. Review its sources, deletion handling and
+output before recording the status snapshot with `accept-semantic --snapshot
+<snapshot> --evidence "reviewed source paths and corrections"`. This records a
+review; it does not perform one. Never stamp failed or skipped extraction as done.
+
+Use `make -f vibe_scripts/claude/Makefile wiki-ai` only when work reveals stable
+architecture, testing, security or integration facts. Inspect the generated diff
+and source evidence; preserve handwritten wiki content. Graph conclusions are
+review prompts until confirmed. Do not index session logs, caches, generated
+reports or saved graph answers as project facts. Run affected tests through the
+approved quality routes; memory maintenance does not replace verification.
 AGENTCTX_EOF
 	)"
 	write_file "agent/claude/context-strategy.md" "$content" 0644
@@ -2687,6 +2697,8 @@ done < <(find "$TEMPLATE_ROOT" -type f ! -path '*/__pycache__/*' ! -name '*.pyc'
 install_shared_vibe_script "ai-quality-wrapper.py"
 install_shared_vibe_script "agent-check-edited.py"
 install_shared_vibe_script "update-codebase-wiki.py"
+install_shared_vibe_script "project-memory.py"
+install_shared_vibe_script "install-project-memory.py"
 install_generated_repo_files
 install_agent_scaffold_files
 install_shared_vibe_script "agent-verify.sh"
@@ -2712,6 +2724,12 @@ else
 	setup_chrome_mcp
 	setup_impeccable
 	clone_llm_council
+fi
+
+if [[ "$DRY_RUN" -eq 1 ]]; then
+	log "Would configure scoped project memory hooks and exclusions."
+else
+	python3 vibe_scripts/claude/install-project-memory.py --provider claude --crg "$RUN_CRG" --graphify "$RUN_GRAPHIFY"
 fi
 
 install_omniroute

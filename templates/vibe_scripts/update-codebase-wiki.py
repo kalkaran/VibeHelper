@@ -110,7 +110,7 @@ def makefile_targets() -> list[str]:
 
 
 def auto_block(key: str, body: str) -> str:
-    return f"<!-- BEGIN AUTO-WIKI:{key} -->\n{body.rstrip()}\n<!-- END AUTO-WIKI:{key} -->\n"
+    return f"<!-- BEGIN AUTO-WIKI:{key} -->\n> Draft: confirm source evidence and graph freshness before promoting these notes.\n\n{body.rstrip()}\n<!-- END AUTO-WIKI:{key} -->\n"
 
 
 def replace_section(path: Path, title: str, key: str, body: str) -> None:

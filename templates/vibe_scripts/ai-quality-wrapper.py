@@ -741,6 +741,7 @@ def run_quality(
         label,
         parsed,
         returncode=code,
+        execution_error=failure,
         log=str(log_path) if log_path.is_file() else None,
         command_count=count,
         duration_seconds=round(time.monotonic() - started, 4),

@@ -215,7 +215,6 @@ def split_by_ext(files: list[str]) -> dict[str, list[str]]:
         "go": [],
         "html": [],
         "markdown": [],
-        "design": [],
         "php": [],
         "python": [],
         "shell": [],
@@ -230,8 +229,6 @@ def split_by_ext(files: list[str]) -> dict[str, list[str]]:
             groups["html"].append(file)
         if suffix in MARKDOWN_EXTS:
             groups["markdown"].append(file)
-        if suffix in FRONTEND_DESIGN_EXTS:
-            groups["design"].append(file)
         if suffix in PHP_EXTS:
             groups["php"].append(file)
         if suffix in PYTHON_EXTS:
@@ -375,14 +372,6 @@ def build_commands(
         lint_cmds.append(
             ("lint-markdown-edited", [f"{command} {files}"], True, 24, "generic")
         )
-    impeccable = local_impeccable_command(root)
-    if groups["design"] and impeccable:
-        detector_args = " ".join(
-            shlex.quote(part) for part in impeccable + ["detect", *groups["design"]]
-        )
-        lint_cmds.append(
-            ("design-impeccable-edited", [detector_args], True, 30, "generic")
-        )
     if groups["php"]:
         files = quote_files(groups["php"])
         syntax_loop = (
@@ -473,10 +462,6 @@ def build_commands(
 
 
 def missing_tools(root: Path, groups: dict[str, list[str]]) -> list[str]:
-    design_configured = any(
-        (root / scope / "skills" / "impeccable").exists()
-        for scope in (".agents", ".claude", ".codex")
-    )
     required = {
         "biome": (have_path(root, "node_modules/.bin/biome"), "project Biome"),
         "html": (have_path(root, "node_modules/.bin/htmlhint"), "project HTMLHint"),
@@ -487,10 +472,6 @@ def missing_tools(root: Path, groups: dict[str, list[str]]) -> list[str]:
         "shell": (
             have_command("shfmt", root) and have_command("shellcheck", root),
             "shfmt and ShellCheck",
-        ),
-        "design": (
-            not design_configured or bool(local_impeccable_command(root)),
-            "Impeccable design detector",
         ),
     }
     return [
@@ -587,14 +568,6 @@ def check_files(root: Path, selected: list[str], *, timeout: float = 100) -> dic
     priority = {"passed": 0, "findings": 1, "not_checked": 2, "tool_failure": 3}
     status = max((value["status"] for value in results), key=priority.get)
     summary = []
-    if (
-        groups["design"]
-        and not local_impeccable_command(root)
-        and not any("Impeccable" in item for item in missing)
-    ):
-        summary.append(
-            "Optional Impeccable detector skipped: not configured in this project."
-        )
     for value in sorted(results, key=lambda item: -priority[item["status"]]):
         if value["status"] == "passed":
             summary.append(f"{value['label']}: passed")

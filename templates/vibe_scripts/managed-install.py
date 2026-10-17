@@ -84,6 +84,8 @@ def recognizable(path, provider):
             return bool(commands) and all(
                 ".claude/hooks/" in command
                 or "/vibe_scripts/claude/quality-hook.py" in command
+                or command
+                == 'root="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0; helper="$root/vibe_scripts/claude/project-memory.py"; [ -f "$helper" ] || exit 0; exec python3 "$helper" hook --provider claude --root "$root"'
                 for command in commands
             )
         except (ValueError, TypeError, KeyError):

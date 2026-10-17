@@ -10,9 +10,11 @@ import importlib.util
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
+from html.parser import HTMLParser
 from pathlib import Path
 
 
@@ -125,6 +127,348 @@ def changed_since(baseline: dict[str, str], current: dict[str, str]) -> list[str
         for name in baseline.keys() | current.keys()
         if baseline.get(name, "absent") != current.get(name, "absent")
     )
+
+
+def without_handlers(text: str) -> str:
+    """Ignore event callbacks and tracking metadata, including balanced JSX values."""
+    pattern = r"(?:\bon[\w:|]+|\bdata-(?:track|analytics|gtm)[\w-]*|@[\w:.-]+)\s*=\s*"
+    for match in reversed(list(re.finditer(pattern, text))):
+        start = end = match.end()
+        if start >= len(text):
+            continue
+        quote, depth = None, 0
+        if text[start] in "\"'`{":
+            for end in range(start, len(text)):
+                char = text[end]
+                if quote:
+                    if char == quote and (end == 0 or text[end - 1] != "\\"):
+                        quote = None
+                elif char in "\"'`":
+                    quote = char
+                elif char == "{":
+                    depth += 1
+                elif char == "}":
+                    depth -= 1
+                if quote is None and depth == 0:
+                    end += 1
+                    break
+        else:
+            while end < len(text) and not text[end].isspace() and text[end] != ">":
+                end += 1
+        text = text[: match.start()] + text[end:]
+    return text
+
+
+class DesignContent(HTMLParser):
+    """Source-level markup projection, not a browser or a JavaScript evaluator."""
+
+    def __init__(self):
+        super().__init__()
+        self.parts = []
+        self.depth = 0
+        self.tags = set()
+
+    def handle_starttag(self, tag, attrs):
+        if tag not in self.tags:
+            return
+        self.parts.append((tag, sorted(attrs, key=lambda item: item[0])))
+        if tag not in {
+            "area",
+            "base",
+            "br",
+            "col",
+            "embed",
+            "hr",
+            "img",
+            "input",
+            "link",
+            "meta",
+            "param",
+            "source",
+            "track",
+            "wbr",
+        }:
+            self.depth += 1
+
+    def handle_startendtag(self, tag, attrs):
+        self.parts.append((tag, sorted(attrs, key=lambda item: item[0])))
+
+    def handle_endtag(self, tag):
+        if tag not in self.tags:
+            return
+        self.parts.append(("/" + tag, []))
+        self.depth = max(0, self.depth - 1)
+
+    def handle_data(self, data):
+        if self.depth and data.strip():
+            self.parts.append(" ".join(data.split()))
+
+
+def jsx_markup(text: str, deadline: float) -> str:
+    """Extract JSX roots in expression positions; skip JS strings and comparisons."""
+    parts = []
+    index = 0
+    while index < len(text):
+        if time.monotonic() >= deadline:
+            raise OSError("JSX source inspection exceeded the hook time budget")
+        if text[index] in "\"'`":
+            quote = text[index]
+            index += 1
+            while index < len(text):
+                if text[index] == "\\":
+                    index += 2
+                    continue
+                index += 1
+                if text[index - 1] == quote:
+                    break
+            continue
+        if text[index] != "<" or (
+            text[:index].strip()
+            and not re.search(
+                r"(?:\breturn|=>|=|\?|:|\(|\[|,|&&|\|\|)\s*$", text[:index]
+            )
+        ):
+            index += 1
+            continue
+        opening = re.match(r"<([A-Za-z][\w:.-]*)(?=[\s/>])", text[index:])
+        fragment = text.startswith("<>", index)
+        if not opening and not fragment:
+            index += 1
+            continue
+        tag = "" if fragment else opening[1]
+        tokens = re.finditer(
+            r"</?" + re.escape(tag) + (r"(?=[\s/>])[^>]*>" if tag else r">"),
+            text[index:],
+        )
+        depth = 0
+        end = None
+        for token in tokens:
+            if time.monotonic() >= deadline:
+                raise OSError("JSX source inspection exceeded the hook time budget")
+            if token[0].startswith("</"):
+                depth -= 1
+            elif not token[0].endswith("/>"):
+                depth += 1
+            if depth == 0:
+                end = index + token.end()
+                break
+        if end is None:
+            index += 1
+            continue
+        parts.append(
+            text[index:end].replace("<>", "<fragment>").replace("</>", "</fragment>")
+        )
+        index = end
+    return "\n".join(parts)
+
+
+def design_fingerprint(
+    path: Path, deadline: float | None = None, max_bytes: int = 131072
+) -> str:
+    deadline = deadline if deadline is not None else time.monotonic() + 8
+    content = bytearray()
+    with path.open("rb") as stream:
+        while True:
+            if time.monotonic() >= deadline:
+                raise OSError("Design source inspection exceeded the hook time budget")
+            chunk = stream.read(min(65536, max_bytes + 1 - len(content)))
+            if not chunk:
+                break
+            content.extend(chunk)
+            if len(content) > max_bytes:
+                raise OSError("Design source exceeds Impeccable hook maxFileBytes")
+    text = content.decode(errors="replace")
+    if path.suffix.lower() in {".css", ".scss", ".sass", ".less"}:
+        parts = re.sub(r"/\*.*?\*/", "", text, flags=re.DOTALL).strip() or []
+    else:
+        text = re.sub(
+            r"<script\b[^>]*>.*?</script\s*>", "", text, flags=re.DOTALL | re.IGNORECASE
+        )
+        text = re.sub(r"<!--.*?-->|/\*.*?\*/", "", text, flags=re.DOTALL)
+        if path.suffix.lower() in {".js", ".ts", ".jsx", ".tsx"}:
+            text = re.sub(r"(?m)^\s*//.*$", "", text)
+            text = jsx_markup(without_handlers(text), deadline)
+        parser = DesignContent()
+        parser.tags = set(re.findall(r"</([\w:.-]+)\s*>", text.lower())) | {
+            "area",
+            "base",
+            "br",
+            "col",
+            "embed",
+            "hr",
+            "img",
+            "input",
+            "link",
+            "meta",
+            "param",
+            "source",
+            "track",
+            "wbr",
+        }
+        parser.feed(without_handlers(text))
+        parts = parser.parts
+    if time.monotonic() >= deadline:
+        raise OSError("Design source inspection exceeded the hook time budget")
+    return hashlib.sha256(json.dumps(parts).encode()).hexdigest()
+
+
+def design_snapshot(
+    root: Path, paths: list[str], remaining: float = 8
+) -> dict[str, str | None]:
+    deadline = time.monotonic() + min(8, max(0, remaining))
+    max_bytes = 131072  # Impeccable's existing automatic-hook limit.
+    for filename in ("config.json", "config.local.json"):
+        try:
+            options = json.loads((root / ".impeccable" / filename).read_text())
+            configured = (
+                options.get("hook", {}).get("limits", {}).get("maxFileBytes", max_bytes)
+            )
+            if type(configured) is int and configured > 0:
+                max_bytes = configured
+        except (OSError, ValueError, AttributeError):
+            pass  # Malformed configuration is reported only when design work needs review.
+    values = {}
+    for name in paths:
+        path = root / name
+        if (
+            path.suffix.lower() not in CHECKER.FRONTEND_DESIGN_EXTS
+            or not path.is_file()
+            or path.is_symlink()
+        ):
+            continue
+        try:
+            values[name] = design_fingerprint(path, deadline, max_bytes)
+        except OSError:
+            values[name] = None
+    return values
+
+
+def design_enabled(root: Path) -> bool:
+    if os.environ.get("IMPECCABLE_HOOK_DISABLED", "").lower() in {"1", "true", "yes"}:
+        return False
+    options = {}
+    for name in ("config.json", "config.local.json"):
+        path = root / ".impeccable" / name
+        if path.is_file():
+            options.update(json.loads(path.read_text()).get("hook", {}))
+    return (
+        options.get("enabled") is not False
+        and options.get("consent", "accepted") == "accepted"
+    )
+
+
+def review_design(root: Path, paths: list[str], state: dict, remaining: float):
+    started = time.monotonic()
+    executable = CHECKER.local_impeccable_command(root)
+    if not executable:
+        for scope in (".agents", ".claude", ".codex"):
+            launcher = root / scope / "skills/impeccable/scripts/impeccable"
+            if launcher.is_file() and os.access(launcher, os.X_OK):
+                executable = [str(launcher)]
+                break
+    if not executable and not any(
+        (root / scope / "skills/impeccable").exists()
+        for scope in (".agents", ".claude", ".codex")
+    ):
+        return None
+    try:
+        if not design_enabled(root):
+            return None
+    except (OSError, ValueError, TypeError, AttributeError):
+        pass  # Report malformed settings below only if UI work requires review.
+    current = design_snapshot(root, paths, remaining - 2)
+    if not current:
+        return None
+    baseline = state.get("design_baseline")
+    if not isinstance(baseline, dict):
+        if all(
+            digest == hashlib.sha256(b"[]").hexdigest() for digest in current.values()
+        ) or not design_enabled(root):
+            return None
+        return QUALITY.result(
+            "not_checked",
+            "UI design review",
+            [
+                "Design baseline unavailable; start a new session before automatic design review. No whole-project scan was run."
+            ],
+        )
+    unavailable = [
+        name
+        for name, digest in current.items()
+        if digest is None or (name in baseline and baseline[name] is None)
+    ]
+    if unavailable and design_enabled(root):
+        return QUALITY.result(
+            "not_checked",
+            "UI design review",
+            [
+                "Design source inspection unavailable within the hook budget/maxFileBytes; review these files explicitly: "
+                + ", ".join(unavailable)
+            ],
+        )
+    reviewed = state.setdefault("design_reviewed", {})
+    selected = [
+        name
+        for name, digest in current.items()
+        if digest != baseline.get(name, hashlib.sha256(b"[]").hexdigest())
+        and digest != reviewed.get(name)
+    ]
+    if not selected:
+        return None
+    if not design_enabled(root):
+        return None
+    if not executable:
+        return QUALITY.result(
+            "not_checked",
+            "UI design review",
+            [
+                "UI markup/styles changed, but Impeccable is unavailable. Review these UI changes explicitly: "
+                + ", ".join(selected)
+            ],
+        )
+    remaining -= time.monotonic() - started
+    if remaining <= 2:
+        return QUALITY.result(
+            "not_checked",
+            "UI design review",
+            [
+                "Design review deferred: hook time budget exhausted. Recheck before completing."
+            ],
+        )
+    value = QUALITY.run_quality(
+        [*executable, "detect", *selected],
+        cwd=root,
+        label="UI design review",
+        timeout=min(remaining - 1, 30),
+        max_lines=25,
+    )
+    if value["status"] == "passed":
+        reviewed.update({name: current[name] for name in selected})
+    return value
+
+
+def merge_review(value: dict, review: dict | None) -> dict:
+    if review is None:
+        return value
+    priority = {"passed": 0, "findings": 1, "not_checked": 2, "tool_failure": 3}
+    value["status"] = max((value["status"], review["status"]), key=priority.get)
+    value["summary"].extend(
+        [f"UI design review: {review['status']}", *review["summary"]]
+    )
+    if review.get("log"):
+        value["summary"].append(f"Full log: {review['log']}")
+    for metric in ("command_count", "duration_seconds", "output_bytes"):
+        value[metric] += review[metric]
+    value["diagnostic_signature"] = hashlib.sha256(
+        json.dumps(
+            [
+                value.get("diagnostic_signature"),
+                review.get("diagnostic_signature"),
+                review["status"],
+            ]
+        ).encode()
+    ).hexdigest()
+    return value
 
 
 def response(provider: str, event: str, value: dict, attempts: int = 0) -> dict:
@@ -267,8 +611,10 @@ def handle(root: Path, provider: str, event: str, payload: dict) -> dict:
             )
         if event == "SessionStart":
             if not state:
+                baseline = snapshot(root)
                 state = {
-                    "baseline": snapshot(root),
+                    "baseline": baseline,
+                    "design_baseline": design_snapshot(root, list(baseline)),
                     "paths": [],
                     "attempts": 0,
                     "history": [],
@@ -309,6 +655,12 @@ def handle(root: Path, provider: str, event: str, payload: dict) -> dict:
             if event == "Stop":
                 value = check_deletions(
                     root, provider, paths, value, 55 - (time.monotonic() - started)
+                )
+                value = merge_review(
+                    value,
+                    review_design(
+                        root, paths, state, 55 - (time.monotonic() - started)
+                    ),
                 )
                 if baseline_missing and value["status"] == "passed":
                     value["status"] = "not_checked"
@@ -378,13 +730,215 @@ def handle(root: Path, provider: str, event: str, payload: dict) -> dict:
         return result
 
 
+def native_design_commands(provider: str) -> set[str]:
+    folder = ".agents" if provider == "codex" else ".claude"
+    base = folder + "/skills/impeccable/scripts/"
+    commands = set()
+    for prefix in ("", "${CLAUDE_PROJECT_DIR}/"):
+        path = prefix + base
+        commands.update(
+            {
+                f'node "{path}hook.mjs"',
+                f'[ ! -f "{path}hook.mjs" ] || node "{path}hook.mjs"',
+                f'[ ! -f "{path}impeccable" ] || "{path}impeccable" hook',
+            }
+        )
+    commands.add(
+        'root="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0; hook="$root/'
+        + base
+        + 'hook.mjs"; [ -f "$hook" ] || exit 0; exec node "$hook"'
+    )
+    return commands
+
+
+def stop_adapter(provider: str) -> str:
+    return f'''#!/usr/bin/env python3
+"""Provider adapter for the shared quality-result implementation."""
+import os
+import sys
+from pathlib import Path
+
+helper = Path(__file__).resolve().parents[2] / "vibe_scripts" / "{provider}" / "quality-hook.py"
+os.execv(sys.executable, [sys.executable, str(helper), "--provider", "{provider}", "--event", "Stop"])
+'''
+
+
+def stop_command(provider: str) -> str:
+    prefix = 'root="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0; '
+    if provider == "claude":
+        prefix = 'root="${CLAUDE_PROJECT_DIR:-}"; [ -n "$root" ] || root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"; '
+    return (
+        prefix
+        + f'hook="$root/.{provider}/hooks/stop_edited_check.py"; [ -f "$hook" ] || exit 0; exec python3 "$hook"'
+    )
+
+
+def session_command(provider: str) -> str:
+    prefix = stop_command(provider).split("hook=")[0]
+    if provider == "codex":
+        prefix = prefix.replace("exit 0;", "exit 1;")
+    return (
+        prefix
+        + f'exec python3 "$root/vibe_scripts/{provider}/quality-hook.py" --provider {provider} --event SessionStart'
+    )
+
+
+def install_design_scope(root: Path, provider: str) -> None:
+    """Replace known duplicate native scans only after the shared runtime is current."""
+
+    def unversioned(text):
+        return re.sub(r"(?m)^# (?:Codex|Claude)Helper-Version:.*\n", "", text)
+
+    commands = native_design_commands(provider)
+    configs = (
+        [root / ".codex/config.toml", root / ".codex/hooks.json"]
+        if provider == "codex"
+        else [root / ".claude/settings.json", root / ".claude/settings.local.json"]
+    )
+
+    def filter_groups(groups):
+        result = []
+        for group in groups:
+            kept = [
+                h for h in group.get("hooks", []) if h.get("command") not in commands
+            ]
+            if kept == group.get("hooks", []):
+                result.append(group)
+            elif kept:
+                result.append(dict(group, hooks=kept))
+        return result
+
+    def confirm_replacement():
+        for filename in ("quality-hook.py", "agent-check-edited.py"):
+            runtime = root / "vibe_scripts" / provider / filename
+            if not runtime.is_file() or unversioned(runtime.read_text()) != unversioned(
+                Path(__file__).with_name(filename).read_text()
+            ):
+                raise ValueError(
+                    f"Preserved older quality hook/checker ({filename}); refresh managed files before migrating design hooks"
+                )
+        adapter = root / f".{provider}/hooks/stop_edited_check.py"
+        if (
+            not adapter.is_file()
+            or unversioned(adapter.read_text()).strip()
+            != stop_adapter(provider).strip()
+        ):
+            raise ValueError(
+                "Preserved native design hooks: shared Stop adapter is unavailable; run the full installer"
+            )
+        registered = set()
+        for config in configs:
+            if not config.is_file():
+                continue
+            if config.suffix == ".json":
+                document = json.loads(config.read_text())
+            else:
+                import tomllib
+
+                document = tomllib.loads(config.read_text())
+            for event, command in (
+                ("Stop", stop_command(provider)),
+                ("SessionStart", session_command(provider)),
+            ):
+                for group in document.get("hooks", {}).get(event, []):
+                    if any(
+                        hook.get("command") == command
+                        for hook in group.get("hooks", [])
+                    ):
+                        registered.add(event)
+        if registered != {"SessionStart", "Stop"}:
+            raise ValueError(
+                "Preserved native design hooks: shared SessionStart/Stop registration is unavailable; run the full installer"
+            )
+
+    for path in configs:
+        if not path.is_file():
+            continue
+        if path.is_symlink() or path.parent.is_symlink():
+            raise ValueError(f"Preserved symlinked hook config: {path}")
+        original = path.read_text()
+        if path.suffix == ".json":
+            data = json.loads(original)
+            changed = False
+            for event in ("PostToolUse", "Stop"):
+                groups = data.get("hooks", {}).get(event, [])
+                filtered = filter_groups(groups)
+                if filtered != groups:
+                    data["hooks"][event] = filtered
+                    changed = True
+            text = json.dumps(data, indent=2) + "\n" if changed else original
+        else:
+            import copy
+            import tomllib
+
+            expected = copy.deepcopy(tomllib.loads(original))
+            for event in ("PostToolUse", "Stop"):
+                if event in expected.get("hooks", {}):
+                    expected["hooks"][event] = filter_groups(expected["hooks"][event])
+
+            def toml_value(value):
+                if isinstance(value, dict):
+                    return (
+                        "{ "
+                        + ", ".join(
+                            json.dumps(k) + " = " + toml_value(v)
+                            for k, v in value.items()
+                        )
+                        + " }"
+                    )
+                if isinstance(value, list):
+                    return "[" + ", ".join(toml_value(v) for v in value) + "]"
+                return json.dumps(value)
+
+            def replace(match):
+                event = match[1] or match[2]
+                groups = tomllib.loads(match[0])["hooks"][event]
+                filtered = filter_groups(groups)
+                if filtered == groups:
+                    return match[0]
+                return "".join(
+                    "[[hooks."
+                    + json.dumps(event)
+                    + "]]\n"
+                    + "\n".join(
+                        json.dumps(k) + " = " + toml_value(v) for k, v in g.items()
+                    )
+                    + "\n\n"
+                    for g in filtered
+                )
+
+            pattern = r'(?m)^\[\[hooks\.(?:"(PostToolUse|Stop)"|(PostToolUse|Stop))\]\][^\n]*\n.*?(?=^\[(?!\[?hooks\.(?:"[^"\n]+"|[\w]+)\.hooks)|\Z)'
+            text = re.sub(pattern, replace, original, flags=re.DOTALL)
+            parsed = tomllib.loads(text)
+            for data in (parsed, expected):
+                if "hooks" in data:
+                    data["hooks"] = {k: v for k, v in data["hooks"].items() if v}
+            if parsed != expected:
+                raise ValueError(f"Unsupported hook layout; preserved {path}")
+        if text != original:
+            confirm_replacement()
+            shutil.copy2(path, str(path) + f".bak.{time.time_ns()}")
+            path.write_text(text)
+            print(
+                f"Configured scoped design review; removed duplicate native scans from {path.relative_to(root)}"
+            )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--provider", choices=("codex", "claude"), required=True)
-    parser.add_argument(
-        "--event", choices=("SessionStart", "PostToolUse", "Stop"), required=True
-    )
+    parser.add_argument("--install-design-scope", action="store_true")
+    parser.add_argument("--event", choices=("SessionStart", "PostToolUse", "Stop"))
     args = parser.parse_args()
+    if args.install_design_scope:
+        try:
+            install_design_scope(Path.cwd().resolve(), args.provider)
+            return 0
+        except (OSError, ValueError, TypeError, KeyError) as error:
+            print(f"Design hook migration incomplete: {error}", file=sys.stderr)
+            return 1
+    if args.event is None:
+        parser.error("--event is required for hook execution")
     payload = {}
     try:
         payload = json.load(sys.stdin)
