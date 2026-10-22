@@ -197,7 +197,7 @@ configure_design_hook() {
 
 install_runtime_assets() {
 	local name source destination found
-	for name in ai-quality-wrapper.py agent-check-edited.py agent-verify.sh quality-hook.py fallow.py; do
+	for name in ai-quality-wrapper.py agent-check-edited.py agent-verify.sh quality-hook.py test-verification.py fallow.py; do
 		found=0
 		for source in "$INSTALLER_DIR/../../templates/vibe_scripts/$name" "$INSTALLER_DIR/../templates/vibe_scripts/$name"; do
 			[[ -f "$source" ]] || continue
@@ -370,7 +370,7 @@ has_any() {
 		-o -name 'dist' \
 		-o -name 'build' \
 		-o -name 'coverage' \
-		-o -name 'graphify-out' \
+		-o -name '.graphify' -o -name 'graphify-out' \
 		-o -name '.cache' \
 		-o -name '.venv' \
 		-o -name 'obsidian' \) -prune \
@@ -733,7 +733,7 @@ detect_file_signals() {
 		-o -name 'dist' \
 		-o -name 'build' \
 		-o -name 'coverage' \
-		-o -name 'graphify-out' \
+		-o -name '.graphify' -o -name 'graphify-out' \
 		-o -name '.cache' \
 		-o -name '.venv' \
 		-o -name '__pycache__' \
@@ -854,8 +854,8 @@ PHP:
 
   Then you can wire:
     php -l path/to/file.php
-    vendor/bin/phpcs --standard=PSR12 --extensions=php --ignore=.agents/*,.claude/*,.codex/*,vendor/*,node_modules/*,dist/*,build/*,coverage/*,graphify-out/*,.git/*,.cache/*,.venv/*,obsidian/* .
-    find . \( -name '.agents' -o -name '.claude' -o -name '.codex' -o -name 'vendor' -o -name 'node_modules' -o -name 'dist' -o -name 'build' -o -name 'coverage' -o -name 'graphify-out' -o -name '.git' -o -name '.cache' -o -name '.venv' -o -name 'obsidian' \) -prune -o -name '*.php' -print0 | xargs -0 vendor/bin/phpstan analyse --memory-limit=1G --no-progress --
+    vendor/bin/phpcs --standard=PSR12 --extensions=php --ignore=.agents/*,.claude/*,.codex/*,vendor/*,node_modules/*,dist/*,build/*,coverage/*,.graphify/*,graphify-out/*,.git/*,.cache/*,.venv/*,obsidian/* .
+    find . \( -name '.agents' -o -name '.claude' -o -name '.codex' -o -name 'vendor' -o -name 'node_modules' -o -name 'dist' -o -name 'build' -o -name 'coverage' -o -name '.graphify' -o -name 'graphify-out' -o -name '.git' -o -name '.cache' -o -name '.venv' -o -name 'obsidian' \) -prune -o -name '*.php' -print0 | xargs -0 vendor/bin/phpstan analyse --memory-limit=1G --no-progress --
 PHPREC
 	fi
 
@@ -1066,7 +1066,7 @@ detect_available_checks() {
 			add_check format phpcbf "$(selected_files_command .php "$(tool_cmd phpcbf) --standard=PSR12 --extensions=php")"
 		fi
 		if tool_exists phpstan; then
-			add_check type phpstan "find . \\( -name '.agents' -o -name '.claude' -o -name '.codex' -o -name 'vendor' -o -name 'node_modules' -o -name 'dist' -o -name 'build' -o -name 'coverage' -o -name 'graphify-out' -o -name '.git' -o -name '.cache' -o -name '.venv' -o -name 'obsidian' \\) -prune -o -name '*.php' -print0 | xargs -0 $(tool_cmd phpstan) analyse --memory-limit=1G --no-progress --" native:phpstan-json "find . \\( -name '.agents' -o -name '.claude' -o -name '.codex' -o -name 'vendor' -o -name 'node_modules' -o -name 'dist' -o -name 'build' -o -name 'coverage' -o -name 'graphify-out' -o -name '.git' -o -name '.cache' -o -name '.venv' -o -name 'obsidian' \\) -prune -o -name '*.php' -print0 | xargs -0 $(tool_cmd phpstan) analyse --memory-limit=1G --no-progress --error-format=json --"
+			add_check type phpstan "find . \\( -name '.agents' -o -name '.claude' -o -name '.codex' -o -name 'vendor' -o -name 'node_modules' -o -name 'dist' -o -name 'build' -o -name 'coverage' -o -name '.graphify' -o -name 'graphify-out' -o -name '.git' -o -name '.cache' -o -name '.venv' -o -name 'obsidian' \\) -prune -o -name '*.php' -print0 | xargs -0 $(tool_cmd phpstan) analyse --memory-limit=1G --no-progress --" native:phpstan-json "find . \\( -name '.agents' -o -name '.claude' -o -name '.codex' -o -name 'vendor' -o -name 'node_modules' -o -name 'dist' -o -name 'build' -o -name 'coverage' -o -name '.graphify' -o -name 'graphify-out' -o -name '.git' -o -name '.cache' -o -name '.venv' -o -name 'obsidian' \\) -prune -o -name '*.php' -print0 | xargs -0 $(tool_cmd phpstan) analyse --memory-limit=1G --no-progress --error-format=json --"
 		fi
 	fi
 
@@ -1151,7 +1151,7 @@ print_available_checks() {
 ensure_cache_gitignored() {
 	local marker="# VibeHelper local AI/dev tooling"
 	local block
-	block=$'# VibeHelper local AI/dev tooling\n*.bak\n*.bak.*\n.cache/\n.agents/\n.claude/\n.codex/\n.unlazy/\n.mcp.json\nAGENTS.md\nCLAUDE.md\nagent/\nagents/\ncodebase-wiki/\ngraphify-out/\nnode_modules/\nnotes/\nobsidian/\nvendor/\nvibe_scripts/\nskills-lock.json\nbiome.json\n'
+	block=$'# VibeHelper local AI/dev tooling\n*.bak\n*.bak.*\n.cache/\n.agents/\n.claude/\n.codex/\n.unlazy/\n.mcp.json\nAGENTS.md\nCLAUDE.md\nagent/\nagents/\ncodebase-wiki/\n.graphify/\ngraphify-out/\nnode_modules/\nnotes/\nobsidian/\nvendor/\nvibe_scripts/\nskills-lock.json\nbiome.json\n'
 	if [[ "$DRY_RUN" -eq 1 ]]; then
 		log "Would ensure .gitignore has VibeHelper local-file entries."
 		return 0
@@ -1400,6 +1400,7 @@ write_biome_config() {
       "!!**/dist",
       "!!**/build",
       "!!**/coverage",
+      "!!**/.graphify",
       "!!**/graphify-out",
       "!!**/.cache",
       "!!**/.venv",

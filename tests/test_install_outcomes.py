@@ -144,6 +144,34 @@ def test_cleanup_decline_preserves_owned_file(tmp_path, provider):
     assert owned.exists()
 
 
+@pytest.mark.parametrize(
+    "name,original",
+    [
+        ("biome.json", '{"formatter": {"indentWidth": 4}}\n'),
+        ("biome.json", '{// keep this comment\n"files": {"includes": []}}\n'),
+        ("biome.jsonc", '{// keep this comment\n"files": {"includes": []}}\n'),
+    ],
+)
+def test_markdownlint_preserves_biome_defaults_and_custom_formats(
+    tmp_path, name, original
+):
+    path = write(tmp_path / name, original)
+    MANAGED.configure_markdownlint(tmp_path)
+    assert path.read_text() == original
+    assert not list(tmp_path.glob("biome*.bak.*"))
+    assert json.loads((tmp_path / ".markdownlint.json").read_text()) == {
+        "MD013": {"line_length": 200}
+    }
+
+
+def test_markdownlint_does_not_follow_biome_symlink(tmp_path):
+    external = write(tmp_path / "external.json", '{"files": {"includes": []}}\n')
+    (tmp_path / "biome.json").symlink_to(external)
+    MANAGED.configure_markdownlint(tmp_path)
+    assert external.read_text() == '{"files": {"includes": []}}\n'
+    assert not list(tmp_path.glob("biome.json.bak.*"))
+
+
 def test_receipt_without_begin_and_concurrent_runs(tmp_path):
     result = invoke(
         sys.executable, str(HELPER), "finish", "--provider", "codex", cwd=tmp_path
@@ -320,10 +348,31 @@ def test_standalone_quality_phase_installs_runtime(tmp_path, provider, platform)
         "agent-check-edited.py",
         "agent-verify.sh",
         "quality-hook.py",
+        "test-verification.py",
     ]:
         assert (repo / "vibe_scripts" / kind / name).read_bytes() == (
             ROOT / "templates/vibe_scripts" / name
         ).read_bytes()
+
+    assert invoke("git", "init", "-q", cwd=repo).returncode == 0
+    deleted = write(repo / "deleted.py", "before\n")
+    runtime = repo / "vibe_scripts" / kind / "quality-hook.py"
+    payload = json.dumps({"cwd": str(repo), "session_id": "installed-deletion"})
+    for event in ("SessionStart", "Stop"):
+        if event == "Stop":
+            deleted.unlink()
+        checked = subprocess.run(
+            [sys.executable, str(runtime), "--provider", kind, "--event", event],
+            cwd=repo,
+            input=payload,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        assert checked.returncode == 0, checked.stderr
+        assert json.loads(checked.stdout) == {}, checked.stderr
+    assert "Tests were not run by this hook" in checked.stderr
 
 
 def test_cleanup_rejects_outside_scope_and_symlink_parent(tmp_path):
@@ -451,11 +500,37 @@ command = "printf custom"
         word in recorded.split() for word in ["install", "upgrade", "update", "setup"]
     )
     kind = provider.removesuffix("Helper").lower()
+    instruction_path = repo / ("AGENTS.md" if kind == "codex" else "CLAUDE.md")
+    source = (ROOT / "CodexHelper/MacOS/part1.sh").read_text()
+    priority = (
+        "## Required working priorities\n"
+        + source.split("## Required working priorities\n", 1)[1].split(
+            "For any failure,", 1
+        )[0]
+    )
+    instructions = instruction_path.read_text()
+    assert instructions.count(priority) == 1
+    assert instructions.index(priority) < instructions.index(
+        "## Task scope and guardrail consent"
+    )
+    normalized = " ".join(priority.split())
+    for requirement in [
+        "authoritative project workflow priorities for every model and delegated agent",
+        "Reuse scripts first",
+        "create or extend the smallest reusable script",
+        "Keep detailed logs on disk; abbreviate only the output sent to the LLM",
+        "preserve the nonzero exit status",
+        "Check scope before implementation",
+        "ask whether the user wants it included",
+        "Routine steps needed for the agreed outcome remain authorized",
+    ]:
+        assert requirement in normalized
     for name in [
         "ai-quality-wrapper.py",
         "agent-check-edited.py",
         "agent-verify.sh",
         "quality-hook.py",
+        "test-verification.py",
     ]:
         assert (repo / "vibe_scripts" / kind / name).is_file()
     assert (
@@ -474,6 +549,7 @@ command = "printf custom"
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert custom.read_text() == "user content\n"
+    assert instruction_path.read_text().count(priority) == 1
     if provider == "CodexHelper":
         config = tomllib.loads((repo / ".codex/config.toml").read_text())
         original = tomllib.loads(custom_codex)

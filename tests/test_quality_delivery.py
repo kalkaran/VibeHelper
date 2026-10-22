@@ -213,6 +213,58 @@ def test_provider_delivery_preserves_edit_and_requests_stop_repair(provider):
     assert "blocked/unverified" in exhausted["stopReason"]
 
 
+@pytest.mark.parametrize("provider", ["codex", "claude"])
+@pytest.mark.parametrize("status", ["findings", "tool_failure", "not_checked"])
+def test_scope_guidance_preserves_failure_diagnostics_and_blocks(provider, status):
+    value = WRAPPER.result(status, "lint", ["demo.py:4 F821 undefined name"])
+    original = json.loads(json.dumps(value))
+    edit = HOOK.response(provider, "PostToolUse", value)
+    messages = [edit["hookSpecificOutput"]["additionalContext"]]
+    for attempts in (0, 3, 4):
+        stopped = HOOK.response(provider, "Stop", value, attempts)
+        if attempts < 4:
+            assert stopped["decision"] == "block"
+            assert "continue" not in stopped
+            messages.append(stopped["reason"])
+        else:
+            assert stopped["continue"] is False
+            messages.append(stopped["stopReason"])
+    for message in messages:
+        assert "original goal and agreed scope" in message
+        assert "Before each repair" in message
+        assert "ask for explicit scope approval and wait" in message
+        assert "Keep unresolved verification blocked" in message
+        assert "demo.py:4 F821 undefined name" in message
+    assert value == original
+
+
+@pytest.mark.parametrize("event", ["SessionStart", "PostToolUse", "Stop"])
+@pytest.mark.parametrize("repeated", [False, True])
+def test_unavailable_hook_keeps_scope_guidance_and_blocking(event, repeated):
+    reply = HOOK.unavailable_response(event, "Missing session baseline", repeated)
+    if event == "Stop":
+        if repeated:
+            assert reply["continue"] is False
+            message = reply["stopReason"]
+        else:
+            assert reply["decision"] == "block"
+            message = reply["reason"]
+    else:
+        assert set(reply) == {"hookSpecificOutput"}
+        message = reply["hookSpecificOutput"]["additionalContext"]
+    assert "ask for explicit scope approval and wait" in message
+    assert "Missing session baseline" in message
+
+
+def test_scope_guidance_does_not_turn_passes_or_explicit_skips_into_failures():
+    passed = WRAPPER.result("passed", "lint", ["passed"])
+    assert HOOK.response("codex", "Stop", passed) == {}
+    edit = HOOK.response("codex", "PostToolUse", passed)
+    assert "Task scope:" not in edit["hookSpecificOutput"]["additionalContext"]
+    skipped = WRAPPER.result("not_checked", "lint", [], explicitly_skipped=True)
+    assert HOOK.response("claude", "Stop", skipped, 4) == {}
+
+
 def git(root, *args):
     return subprocess.run(["git", *args], cwd=root, capture_output=True, check=True)
 
@@ -559,22 +611,27 @@ def test_concurrent_lock_contention_is_bounded(tmp_path):
 
 
 @pytest.mark.parametrize("provider", ["codex", "claude"])
-def test_deleted_file_tests_fail_then_pass(tmp_path, provider):
+def test_deleted_files_do_not_run_tests_but_explicit_failures_remain(
+    tmp_path, provider
+):
     git(tmp_path, "init", "-q")
     (tmp_path / "deleted.py").write_text("old code")
     makefile = tmp_path / "vibe_scripts" / provider / "Makefile"
     makefile.parent.mkdir(parents=True)
-    makefile.write_text("test-ai:\n\t@test -f repaired\n")
+    makefile.write_text("test-ai:\n\t@echo explicit-test-marker\n\t@false\n")
     payload = {"session_id": "deletion"}
     HOOK.handle(tmp_path, provider, "SessionStart", payload)
     (tmp_path / "deleted.py").unlink()
-    failed = HOOK.handle(tmp_path, provider, "Stop", payload)
-    assert failed["decision"] == "block"
-    assert "deleted-file tests" in failed["reason"]
-    # Keep the repair marker outside the monitored source paths.
-    (tmp_path / ".gitignore").write_text("repaired\n.gitignore\n")
-    (tmp_path / "repaired").touch()
     assert HOOK.handle(tmp_path, provider, "Stop", payload) == {}
+    result = subprocess.run(
+        ["make", "-f", str(makefile), "test-ai"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "explicit-test-marker" in result.stdout
 
 
 def test_restricted_child_discovery_reports_cleanup_limit(tmp_path, monkeypatch):

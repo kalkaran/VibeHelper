@@ -45,7 +45,9 @@ def function(script, name):
     return script[start : start + 1 + following.start()]
 
 
-def assert_quality_recovery(agents):
+def assert_quality_recovery(agents, procedures):
+    assert "read `/agent/codex/procedures.md`" in agents
+    agents = procedures
     guidance = agents.split("Quality command recovery:\n", 1)[1].split(
         "Before final answer:", 1
     )[0]
@@ -128,15 +130,17 @@ def test_installer_upgrade(tmp_path, platform):
     assert not config.exists() and hooks.exists()
     install()
     agents = repo / "AGENTS.md"
-    assert_quality_recovery(agents.read_text())
+    assert_quality_recovery(
+        agents.read_text(), (repo / "agent/codex/procedures.md").read_text()
+    )
     parsed = tomllib.loads(config.read_text())
     for event, groups in HOOKS.items():
         assert all(group in parsed["hooks"][event] for group in groups)
     pre_hooks = parsed["hooks"]["PreToolUse"]
-    assert len(pre_hooks) == 2
+    assert len(pre_hooks) == 1
     commands = [hook["command"] for group in pre_hooks for hook in group["hooks"]]
     assert sum("pre_tool_use_policy.py" in command for command in commands) == 1
-    assert sum("project-memory.py" in command for command in commands) == 1
+    assert sum("project-memory.py" in command for command in commands) == 0
     assert not hooks.exists()
     assert list(hooks.parent.glob("hooks.json.bak.*"))
     installed = config.read_bytes()
@@ -152,7 +156,9 @@ def test_installer_upgrade(tmp_path, platform):
     assert agents.read_text() == previous_agents
     install("--force")
     assert tomllib.loads(config.read_text()) == parsed
-    assert_quality_recovery(agents.read_text())
+    assert_quality_recovery(
+        agents.read_text(), (repo / "agent/codex/procedures.md").read_text()
+    )
     assert any(
         path.read_text() == previous_agents for path in repo.glob("AGENTS.md.bak.*")
     )
@@ -179,10 +185,10 @@ def test_installer_upgrade(tmp_path, platform):
     install("--force", "--dry-run")
     assert global_hook.read_text() == stale
     install("--force")
-    assert (
-        global_hook.read_bytes()
-        == (repo / ".codex/hooks/pre_tool_use_policy.py").read_bytes()
-    )
+    global_policy = global_hook.read_text()
+    assert "def mutation_reason" in global_policy
+    assert "def quality_violation" not in global_policy
+    assert "git-policy-command-v1" in global_policy
     assert user_config.read_bytes() == global_config_before
     assert any(
         p.read_text() == stale
@@ -229,9 +235,11 @@ record_install_failed() { echo "$*" >&2; exit 1; }
 have() { [[ "$1" == npx || "$1" == codex ]]; }
 have_cli() { return 1; }
 codex_plugin_installed() { return 0; }
+codex_plugin_marketplace_configured() { return 0; }
 patch_codex_ponytail_hooks() { :; }
 code_review_graph_version() { :; }
 install_with_uv_or_pipx() { :; }
+install_graphify_skill() { :; }
 require_cli_available() { :; }
 has_source_file() { return 1; }
 setup_chrome_mcp() { :; }

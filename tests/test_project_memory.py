@@ -235,13 +235,18 @@ def test_hook_merge_preserves_custom_and_deduplicates(repo, provider):
     data = tomllib.loads(first) if provider == "codex" else json.loads(first)
     assert custom in data["hooks"]["PostToolUse"]
     assert legacy not in data["hooks"]["PostToolUse"]
+    for groups in data["hooks"].values():
+        for group in groups:
+            for hook in group["hooks"]:
+                if hook.get("command") == INSTALL.command(provider):
+                    assert hook["timeout"] == 200
     assert (
         sum(
             h.get("command") == INSTALL.command(provider)
             for g in data["hooks"]["PostToolUse"]
             for h in g["hooks"]
         )
-        == 1
+        == 0
     )
     if provider == "codex":
         assert data["features"]["hooks"] is False
@@ -293,6 +298,7 @@ def test_installer_delivery_and_rerun(tmp_path, provider, folder, platform):
         )
         assert result.returncode == 0, result.stdout[-4000:] + result.stderr[-2000:]
     assert (repo / f"vibe_scripts/{provider}/project-memory.py").exists()
+    assert (repo / f"vibe_scripts/{provider}/cleanup-cache.py").exists()
     config = repo / (
         ".codex/config.toml" if provider == "codex" else ".claude/settings.local.json"
     )
@@ -307,7 +313,7 @@ def test_installer_delivery_and_rerun(tmp_path, provider, folder, platform):
         for hook in group["hooks"]
     ]
     assert sum("pre_tool_use_policy.py" in command for command in pre_commands) == 1
-    assert sum("project-memory.py" in command for command in pre_commands) == 1
+    assert not any("project-memory.py" in command for command in pre_commands)
     assert not any("graph_first_policy.py" in command for command in pre_commands)
     stop_commands = [
         hook["command"]
@@ -315,6 +321,7 @@ def test_installer_delivery_and_rerun(tmp_path, provider, folder, platform):
         for hook in group["hooks"]
     ]
     assert sum("stop_edited_check.py" in command for command in stop_commands) == 1
+    assert sum("cleanup-cache.py" in command for command in stop_commands) == 1
     strategy = (repo / f"agent/{provider}/context-strategy.md").read_text()
     assert "context --task" in strategy and "accept-semantic" in strategy
     policy = json.loads(
@@ -323,11 +330,51 @@ def test_installer_delivery_and_rerun(tmp_path, provider, folder, platform):
     if provider == "claude":
         assert policy == {
             "_managed": "ClaudeHelper-Version: project-memory-v1",
-            "hooks": True,
+            "hooks": False,
             "crg": False,
             "graphify": False,
         }
     assert not (home / ".codex/config.toml").exists()
+
+    instructions = (
+        repo / ("AGENTS.md" if provider == "codex" else "CLAUDE.md")
+    ).read_text()
+    docs = repo / f"agent/{provider}"
+    procedures = (docs / "procedures.md").read_text()
+    assert f"read `/agent/{provider}/procedures.md`" in instructions.lower()
+    assert "git-add.txt" in procedures
+    assert "Manifest review is mandatory" in procedures
+    assert "Do not remove validation" in instructions
+    usage = (docs / "usage.md").read_text()
+    assert "@PROVIDER@" not in usage
+    assert f"vibe_scripts/{provider}/project-memory.py usage" in usage
+    assert len(json.loads((docs / "evaluation.json").read_text())["cases"]) == 12
+    assert (
+        "def usage_report("
+        in (repo / f"vibe_scripts/{provider}/project-memory.py").read_text()
+    )
+
+    # A later managed refresh must preserve custom docs and global model choices.
+    custom = usage + "\nUser-owned workflow guidance\n"
+    (docs / "usage.md").write_text(custom)
+    global_config = home / ".codex/config.toml"
+    global_config.parent.mkdir(exist_ok=True)
+    model_config = 'model = "user-selected-model"\n'
+    global_config.write_text(model_config)
+    refreshed = subprocess.run(
+        command + ["--refresh-managed"],
+        check=False,
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=45,
+    )
+    assert refreshed.returncode == 0, (
+        refreshed.stdout[-4000:] + refreshed.stderr[-2000:]
+    )
+    assert (docs / "usage.md").read_text() == custom
+    assert global_config.read_text() == model_config
 
 
 @pytest.mark.parametrize("custom", [False, True])
@@ -392,20 +439,20 @@ def test_live_graphify_deletion_and_semantic_marker(repo):
     request.architecture = True
     value = MEMORY.handle(repo, request)
     assert value["freshness"]["graphify"]["status"] == "current", value
-    assert "track" in (repo / "graphify-out/graph.json").read_text()
+    assert "track" in MEMORY.backend_path(repo, "graphify").read_text()
     (repo / "tracking.py").write_text("def track():\n    return 2\n")
     value = MEMORY.handle(repo, request)
     assert value["freshness"]["graphify"]["status"] == "current", value
     (repo / "tracking.py").write_text("def replacement():\n    return 2\n")
     value = MEMORY.handle(repo, request)
-    graph = json.loads((repo / "graphify-out/graph.json").read_text())
+    graph = json.loads(MEMORY.backend_path(repo, "graphify").read_text())
     labels = [node.get("label") for node in graph["nodes"]]
     assert "track()" not in labels and "replacement()" in labels
     assert value["freshness"]["semantic"]["status"] == "needs review"
     (repo / "tracking.py").unlink()
     value = MEMORY.handle(repo, request)
     assert value["freshness"]["graphify"]["status"] == "current", value
-    graph = json.loads((repo / "graphify-out/graph.json").read_text())
+    graph = json.loads(MEMORY.backend_path(repo, "graphify").read_text())
     assert not graph["nodes"]
 
 
@@ -472,12 +519,19 @@ def test_installer_refuses_symlink_parent_and_preserves_custom_exclusions(
     assert first.startswith("private-docs/")
 
 
-def test_snapshot_deadline_covers_reading_large_files(repo, monkeypatch):
+def test_snapshot_uses_metadata_without_reading_file_contents(repo, monkeypatch):
     path = repo / "large.txt"
     path.write_bytes(b"x" * 131072)
-    monkeypatch.setattr(MEMORY.time, "monotonic", lambda: 10)
-    with pytest.raises(RuntimeError, match="time budget"):
-        MEMORY.digest(path, deadline=9)
+    before = MEMORY.snapshot(repo)
+
+    def no_read(*args, **kwargs):
+        raise AssertionError("snapshot must not read source contents")
+
+    monkeypatch.setattr(Path, "read_bytes", no_read)
+    monkeypatch.setattr(Path, "open", no_read)
+    assert MEMORY.snapshot(repo) == before
+    path.touch()
+    assert MEMORY.snapshot(repo)["large.txt"] != before["large.txt"]
 
 
 def test_failed_backend_exit_zero_and_mid_update_edits_remain_pending(
@@ -536,6 +590,41 @@ def test_live_crg_updates_reverts_and_deletions(repo):
     (repo / "tracking.py").unlink()
     value = MEMORY.handle(repo, args("refresh"))
     assert value["freshness"]["crg"]["status"] == "current", value
+
+
+def test_graph_refresh_timeouts(repo, monkeypatch):
+    backend(monkeypatch, repo)
+    refresh = MEMORY.run
+    timeouts = []
+
+    def run(root, command, timeout=30):
+        if command[0] != "git":
+            timeouts.append(timeout)
+        return refresh(root, command, timeout)
+
+    monkeypatch.setattr(MEMORY, "run", run)
+    request = args("refresh")
+    request.architecture = True
+    MEMORY.handle(repo, request)
+    assert timeouts == [80, 80]
+
+
+def test_hook_budget_and_deadline_restoration(repo, monkeypatch):
+    clock = [0]
+    monkeypatch.setattr(MEMORY.time, "monotonic", lambda: clock[0])
+    previous = MEMORY.DEADLINE
+
+    def work(*_args):
+        assert MEMORY.remaining(200) == 110
+        clock[0] = 80
+        assert MEMORY.remaining(80) == 30
+        clock[0] = 111
+        MEMORY.remaining(1)
+
+    monkeypatch.setattr(MEMORY, "handle_locked", work)
+    with pytest.raises(RuntimeError, match="budget exhausted"):
+        MEMORY.handle(repo, args("hook"))
+    assert MEMORY.DEADLINE == previous
 
 
 def test_timeout_permission_fallback_and_total_budget(repo, monkeypatch):

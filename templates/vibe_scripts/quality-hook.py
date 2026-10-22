@@ -78,46 +78,67 @@ def payload_paths(root: Path, payload: dict) -> list[str]:
     return sorted({name for value in names if (name := project_path(root, value))})
 
 
-def snapshot(root: Path) -> dict[str, str]:
+def file_stamp(path: Path) -> str:
+    info = path.stat()
+    return f"stat:{info.st_mtime_ns}:{info.st_ctime_ns}:{info.st_size}:{info.st_ino}"
+
+
+def snapshot(root: Path, *, nested: bool = False) -> dict[str, str]:
     ensure_helpers()
     deadline = time.monotonic() + 8
-    paths = subprocess.run(
-        ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
-        cwd=root,
-        capture_output=True,
-        check=False,
-        timeout=5,
-    )
-    if paths.returncode:
-        raise OSError(
-            "Cannot read the Git session baseline; initialize or repair the repository."
-        )
     values = {}
-    for raw in paths.stdout.split(b"\0"):
+    pending = [root]
+    while pending:
+        directory = pending.pop()
         if time.monotonic() >= deadline:
             raise OSError(
-                "Session snapshot exceeded 8 seconds; use explicit file verification and inspect repository size."
+                "Session snapshot exceeded 8 seconds; verification remains unavailable."
             )
-        if not raw:
-            continue
-        name = os.fsdecode(raw)
-        if CHECKER.is_excluded(name):
-            continue
-        path = root / name
-        if path.is_symlink():
-            values[name] = "symlink:" + os.readlink(path)
-        elif path.is_file():
-            digest = hashlib.sha256()
-            with path.open("rb") as stream:
-                for chunk in iter(lambda: stream.read(65536), b""):
-                    if time.monotonic() >= deadline:
-                        raise OSError(
-                            "Session snapshot exceeded 8 seconds; use explicit file verification and inspect large files."
-                        )
-                    digest.update(chunk)
-            values[name] = digest.hexdigest()
-        else:
-            values[name] = "absent"
+        paths = subprocess.run(
+            ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+            cwd=directory,
+            capture_output=True,
+            check=False,
+            timeout=max(0.1, min(5, deadline - time.monotonic())),
+        )
+        if paths.returncode:
+            raise OSError(
+                "Cannot read the Git session baseline; repair the repository."
+            )
+        for raw in paths.stdout.split(b"\0"):
+            if time.monotonic() >= deadline:
+                raise OSError(
+                    "Session snapshot exceeded 8 seconds; verification remains unavailable."
+                )
+            if not raw:
+                continue
+            path = directory / os.fsdecode(raw)
+            name = path.relative_to(root).as_posix()
+            if CHECKER.is_excluded(name):
+                continue
+            if path.is_symlink():
+                if nested and path.is_dir():
+                    raise OSError(f"Cannot verify directory symlink inputs: {name}")
+                values[name] = (
+                    "symlink:"
+                    + os.readlink(path)
+                    + (
+                        (file_stamp(path) if path.exists() else "absent")
+                        if nested
+                        else ""
+                    )
+                )
+            elif path.is_file():
+                values[name] = file_stamp(path)
+            elif path.is_dir():
+                if not nested:
+                    values[name] = "absent"
+                    continue
+                if not (path / ".git").exists():
+                    raise OSError(f"Cannot verify nested repository inputs: {name}")
+                pending.append(path)
+            else:
+                values[name] = "absent"
     return values
 
 
@@ -471,9 +492,35 @@ def merge_review(value: dict, review: dict | None) -> dict:
     return value
 
 
-def response(provider: str, event: str, value: dict, attempts: int = 0) -> dict:
+SCOPE_GUIDANCE = (
+    "Task scope: keep the user's original goal and agreed scope as the target. "
+    "Before each repair, explain how the finding prevents that goal or was caused by the task's changes. "
+    "A hook finding does not authorize unrelated cleanup, refactoring, tool installation, or environment changes. "
+    "For findings outside that scope, including unrelated pre-existing issues, or uncertain relevance, "
+    "report the location, cause, and smallest proposed next step; "
+    "ask for explicit scope approval and wait before doing that work. Continue independent work within the agreed scope. "
+    "Review automatic fixes for unintended changes. Keep unresolved verification blocked; "
+    "do not suppress findings, weaken checks, or claim completion."
+)
+
+
+def response(
+    provider: str, event: str, value: dict, attempts: int = 0, *, repeated=False
+) -> dict:
     ensure_helpers()
-    message = QUALITY.render_result(value, 22)
+    if value["status"] == "passed":
+        message = f"[ai-quality] {value['label']}: passed ({value['command_count']} commands, {value['duration_seconds']}s)"
+        notices = [line for line in value["summary"] if not line.endswith(": passed")]
+        if notices:
+            message += "\n" + "\n".join(notices)
+    else:
+        message = QUALITY.render_result(value, 8 if repeated else 22)
+    if value.get("evidence"):
+        message += f"\nFull result: {value['evidence']}"
+    if repeated and value["status"] != "passed":
+        message = "Rechecked; diagnostics unchanged.\n" + message
+    if value["status"] != "passed" and not value.get("explicitly_skipped"):
+        message = SCOPE_GUIDANCE + "\n" + message
     if event == "PostToolUse":
         return {
             "hookSpecificOutput": {
@@ -488,7 +535,8 @@ def response(provider: str, event: str, value: dict, attempts: int = 0) -> dict:
             message += (
                 f"\nReassessment after {attempts} unsuccessful final rechecks: the diagnostic signature is unchanged. "
                 f"Likely category: {value['status']}. Inspect the first failing command's full log and its tool prerequisites before another edit. "
-                "Use compaction only for context loss; use an agent for a separable investigation. DNS, authentication and permissions require fixing the environment."
+                "Stop repeating the same repair. Reassess the cause against the original task; "
+                "report any environment blocker and ask before work outside the agreed scope."
             )
         if attempts >= 4:
             # End the automatic loop explicitly without turning unresolved work into success.
@@ -498,7 +546,8 @@ def response(provider: str, event: str, value: dict, attempts: int = 0) -> dict:
             }
         return {
             "decision": "block",
-            "reason": "Correct the findings and recheck before completing.\n" + message,
+            "reason": "Verification remains blocked; resolve findings within the agreed scope and recheck.\n"
+            + message,
         }
     return {}
 
@@ -518,6 +567,7 @@ def acquire_lock(stream, timeout: float = 2) -> None:
 
 
 def unavailable_response(event: str, message: str, repeated: bool = False) -> dict:
+    message = SCOPE_GUIDANCE + "\n" + message
     if event == "Stop":
         if repeated:
             return {
@@ -530,55 +580,129 @@ def unavailable_response(event: str, message: str, repeated: bool = False) -> di
     }
 
 
-def check_deletions(
-    root: Path, provider: str, paths: list[str], value: dict, remaining: float
-) -> dict:
-    deleted = [name for name in paths if not (root / name).exists()]
-    if not deleted:
-        return value
-    makefile = root / "vibe_scripts" / provider / "Makefile"
-    if not makefile.exists():
-        makefile = root / "Makefile"
-    if (
-        not makefile.is_file()
-        or not re.search(r"(?m)^test-ai\s*:", makefile.read_text())
-        or remaining <= 2
-    ):
-        tests = QUALITY.result(
-            "not_checked",
-            "deleted-file tests",
-            [
-                "Deleted files require tests, but the controlled test-ai target or hook time budget is unavailable. Run the project tests explicitly and recheck."
-            ],
+def test_receipt(root: Path, makefile: Path) -> Path:
+    return root / ".cache" / "quality-tests" / (makefile.parent.name + ".json")
+
+
+def test_signature(root: Path, makefile: Path) -> str:
+    ensure_helpers()
+    helpers = [Path(__file__), Path(CHECKER.__file__), Path(QUALITY.__file__)]
+    helpers.extend(makefile.parent.glob("*.py"))
+    files = snapshot(root, nested=True)
+    # Include installed local dependencies; bytecode and tool caches are run output.
+    parents = {root}
+    for name in files:
+        parents.update(
+            parent for parent in (root / name).parents if parent.is_relative_to(root)
         )
-    else:
-        tests = QUALITY.run_quality(
-            ["make", "-f", str(makefile), "test-ai"],
-            cwd=root,
-            label="deleted-file tests",
-            timeout=min(remaining - 1, 45),
+    dependencies = {
+        parent / name
+        for parent in parents
+        for name in ("node_modules", ".venv", "venv", "vendor")
+        if (parent / name).is_dir()
+    }
+    dependencies.update((root / ".cache").glob("*/node_modules"))
+    deadline = time.monotonic() + 8
+
+    def unreadable(error):
+        raise error
+
+    for dependency in sorted(dependencies):
+        for directory, dirs, names in os.walk(dependency, onerror=unreadable):
+            if time.monotonic() >= deadline:
+                raise OSError(
+                    "Dependency snapshot exceeded 8 seconds; verification remains unavailable."
+                )
+            dirs[:] = sorted(
+                name for name in dirs if name not in {"__pycache__", ".cache", ".git"}
+            )
+            if any((Path(directory) / name).is_symlink() for name in dirs):
+                raise OSError(
+                    "Dependency directory symlinks require explicit verification; reuse unavailable."
+                )
+            for name in names:
+                if time.monotonic() >= deadline:
+                    raise OSError(
+                        "Dependency snapshot exceeded 8 seconds; verification remains unavailable."
+                    )
+                if name.endswith((".pyc", ".pyo")):
+                    continue
+                path = Path(directory) / name
+                files[str(path.relative_to(root))] = (
+                    file_stamp(path) if path.exists() else "absent"
+                )
+    configs = [
+        root / name
+        for name in (
+            "biome.json",
+            "biome.jsonc",
+            "pyproject.toml",
+            "ruff.toml",
+            ".ruff.toml",
+            "setup.cfg",
+            "tox.ini",
+            ".editorconfig",
+            ".shellcheckrc",
+            ".markdownlint.json",
+            ".markdownlint.yaml",
+            ".markdownlint-cli2.jsonc",
+            ".markdownlint-cli2.yaml",
+            ".htmlhintrc",
+            "phpstan.neon",
+            "phpstan.neon.dist",
+            "tsconfig.json",
+            "package.json",
+            "package-lock.json",
+            "pnpm-lock.yaml",
+            "yarn.lock",
+            "composer.json",
+            "composer.lock",
+            ".impeccable/config.json",
+            ".impeccable/config.local.json",
         )
-    if not CHECKER.existing_project_files(root, paths):
-        return tests
-    priority = {"passed": 0, "findings": 1, "not_checked": 2, "tool_failure": 3}
-    value["status"] = max((value["status"], tests["status"]), key=priority.get)
-    value["summary"].extend(
-        [f"Deleted-file tests: {tests['status']}", *tests["summary"]]
-    )
-    if tests.get("log"):
-        value["summary"].append(f"Full log: {tests['log']}")
-    for metric in ("command_count", "duration_seconds", "output_bytes"):
-        value[metric] += tests[metric]
-    value["diagnostic_signature"] = hashlib.sha256(
-        json.dumps(
-            [
-                value.get("diagnostic_signature"),
-                tests.get("diagnostic_signature"),
-                tests["status"],
-            ]
-        ).encode()
-    ).hexdigest()
-    return value
+    ]
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if key
+        not in {
+            "_",
+            "SHLVL",
+            "PWD",
+            "OLDPWD",
+            "MAKELEVEL",
+            "MAKEFLAGS",
+            "MFLAGS",
+            "MAKEOVERRIDES",
+            "VIBEHELPER_TEST_RUN",
+            "MANPATH",
+            "CODEX_SESSION_ID",
+            "CODEX_THREAD_ID",
+            "CODEX_TOOL_CALL_ID",
+            "TERM_SESSION_ID",
+        }
+    }
+    path_entries = environment.get("PATH", "").split(os.pathsep)
+    # Match the generated Makefile's tool lookup, including when Stop runs directly.
+    if "export PATH := $(HOME)/.local/bin:$(PATH)" in makefile.read_text():
+        path_entries.insert(0, str(Path.home() / ".local/bin"))
+    environment["PATH"] = os.pathsep.join(dict.fromkeys(path_entries))
+    inputs = [
+        files,
+        [
+            sys.version,
+            str(Path(sys.executable).resolve()),
+            file_stamp(Path(sys.executable)),
+        ],
+        {str(path): file_stamp(path) for path in [makefile, *helpers]},
+        {
+            str(path): file_stamp(path) if path.is_file() else "absent"
+            for path in configs
+        },
+        environment,
+    ]
+    # shortcut: external services and global tool upgrades need a fresh explicit run.
+    return hashlib.sha256(json.dumps(inputs, sort_keys=True).encode()).hexdigest()
 
 
 def handle(root: Path, provider: str, event: str, payload: dict) -> dict:
@@ -610,27 +734,36 @@ def handle(root: Path, provider: str, event: str, payload: dict) -> dict:
                 "Malformed session state; preserve its file for diagnosis and start a new session."
             )
         if event == "SessionStart":
-            if not state:
+            if state.get("baseline_format") != "stat-v1":
                 baseline = snapshot(root)
-                state = {
-                    "baseline": baseline,
-                    "design_baseline": design_snapshot(root, list(baseline)),
-                    "paths": [],
-                    "attempts": 0,
-                    "history": [],
-                }
+                state.update(
+                    baseline=baseline,
+                    baseline_format="stat-v1",
+                    design_baseline=design_snapshot(root, list(baseline)),
+                )
+                state.setdefault("paths", [])
+                state.setdefault("attempts", 0)
+                state.setdefault("history", [])
             state_path.write_text(json.dumps(state), encoding="utf-8")
             return {}
-        explicit = payload_paths(root, payload)
+        explicit = CHECKER.project_paths(root, payload_paths(root, payload))
         if event == "PostToolUse" and not explicit:
             return {}
         paths = sorted(set(state.get("paths", [])) | set(explicit))
-        if event == "Stop" and "baseline" in state:
+        baseline_missing = (
+            "baseline" not in state or state.get("baseline_format") != "stat-v1"
+        )
+        if event == "Stop" and not baseline_missing:
             paths = sorted(
                 set(paths) | set(changed_since(state["baseline"], snapshot(root)))
             )
         paths = CHECKER.project_paths(root, paths)
-        baseline_missing = "baseline" not in state
+        # Old test receipts must not gate automatic edited-file checks.
+        state.pop("verified_inputs", None)
+        state.pop("deletion_tests", None)
+        selected = explicit if event == "PostToolUse" else paths
+        existing = CHECKER.existing_project_files(root, selected)
+        deleted = [name for name in selected if not (root / name).exists()]
         if not paths:
             value = QUALITY.result(
                 "not_checked",
@@ -642,39 +775,48 @@ def handle(root: Path, provider: str, event: str, payload: dict) -> dict:
                 ],
                 explicitly_skipped=not baseline_missing,
             )
+        elif deleted and len(deleted) == len(selected):
+            value = QUALITY.result(
+                "not_checked",
+                "session quality",
+                [
+                    "Explicitly skipped edited-file checks: selected files were removed or moved."
+                ],
+                explicitly_skipped=not baseline_missing,
+            )
         else:
             value = CHECKER.check_files(
-                root, paths, timeout=max(1, min(45, 55 - (time.monotonic() - started)))
+                root,
+                existing,
+                timeout=max(1, min(45, 55 - (time.monotonic() - started))),
             )
-            if baseline_missing and event == "Stop" and value["status"] == "passed":
-                value["status"] = "not_checked"
-                value["summary"].insert(
-                    0,
-                    "Recorded edits passed, but SessionStart baseline is missing; shell changes remain unverified.",
-                )
             if event == "Stop":
-                value = check_deletions(
-                    root, provider, paths, value, 55 - (time.monotonic() - started)
-                )
                 value = merge_review(
                     value,
                     review_design(
                         root, paths, state, 55 - (time.monotonic() - started)
                     ),
                 )
-                if baseline_missing and value["status"] == "passed":
-                    value["status"] = "not_checked"
-                    value["summary"].insert(
-                        0,
-                        "Recorded checks passed, but the missing SessionStart baseline leaves shell changes unverified.",
-                    )
+        if deleted:
+            value["summary"].append(
+                f"{len(deleted)} removed/moved path(s) recorded. Tests were not run by this hook. "
+                f"Verify the refactor explicitly with make -f vibe_scripts/{provider}/Makefile test-ai "
+                "or the project's test command; test failures are reported there."
+            )
+        if baseline_missing and event == "Stop":
+            if value["status"] == "passed":
+                value["status"] = "not_checked"
+            value["summary"].insert(
+                0,
+                "SessionStart baseline is missing; shell changes remain unverified. Start a new session and verify explicitly.",
+            )
         signature = (
             value.get("diagnostic_signature")
             or hashlib.sha256(json.dumps(value["summary"]).encode()).hexdigest()
         )
         attempts = state.get("attempts", 0)
         previous = state.get("stop_signature")
-        if value["status"] == "passed":
+        if value["status"] == "passed" or value.get("explicitly_skipped"):
             attempts = 0
         elif event == "Stop":
             attempts = attempts + 1 if signature == previous else 1
@@ -717,8 +859,29 @@ def handle(root: Path, provider: str, event: str, payload: dict) -> dict:
                     or "none recorded; repeated checks alone are not repair attempts"
                 ),
             )
-        result = response(provider, event, value, attempts)
-        user_summary = QUALITY.render_result(value, 8)
+        # Keep full findings available even when repeated messages are compact.
+        evidence_dir = cache / "results"
+        evidence_dir.mkdir(exist_ok=True)
+        evidence = evidence_dir / (key + f"-{time.time_ns()}.json")
+        evidence.write_text(json.dumps(value), encoding="utf-8")
+        value["evidence"] = str(evidence.relative_to(root))
+        repeated = (
+            state.get("reported_signature") == signature
+            and state.get("reported_status") == value["status"]
+        )
+        result = response(provider, event, value, attempts, repeated=repeated)
+        state["reported_signature"] = signature
+        state["reported_status"] = value["status"]
+        # Failure details already travel in the structured response.
+        user_summary = f"[ai-quality] {value['label']}: {value['status']}"
+        if value["status"] == "passed":
+            notices = [
+                line for line in value["summary"] if not line.endswith(": passed")
+            ]
+            if notices:
+                user_summary += "\n" + "\n".join(notices)
+        if value.get("explicitly_skipped"):
+            user_summary = QUALITY.render_result(value, 8)
         history[-1]["emitted_bytes"] = len(
             (json.dumps(result) + "\n" + user_summary + "\n").encode()
         )

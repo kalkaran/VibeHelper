@@ -195,6 +195,15 @@ for `code`, `edit`, `summary` or `extract` using capability and name hints. Use
 without inference. Ranking is heuristic and every proposal needs main-agent
 review and the normal project checks. Token savings are not yet measured.
 
+The generated `agent/codex/usage.md` (or Claude equivalent) describes a fixed
+12-task comparison across Python, JavaScript and PHP. Startup instructions load
+detailed quality and staging procedures when needed. Hook reports keep full
+diagnostics on disk; compact messages do not skip checks or unblock failures.
+`python3 vibe_scripts/codex/project-memory.py usage` reports local text sizes
+separately from unknown token and weekly-allowance savings. After reviewing an
+OmniRoute proposal, use `review --attempt-id ID --outcome accepted` (or `revised`
+or `rejected`) to record its quality outcome without changing route ranking.
+
 Add accounts through the dashboard. Use `report` to find connection IDs, then
 `confirm-free CONNECTION_ID --billing-disabled` only after verifying free-only
 API usage, disabled paid billing and no spendable paid credits. `all` confirms
@@ -240,6 +249,51 @@ Depending on the helper and options you choose, VibeHelper can add:
 
 ## Project memory and planning
 
+To preview cleanup of legacy automatic graph hooks and repeated quality checks:
+
+```bash
+python3 fix-hooks.py /path/to/project --include-global
+```
+
+The same command accepts a parent folder, such as `/Users/n/Code`, to find
+installed repositories. Add `--clean-caches` to apply the same retention as the
+background Stop hook: remove diagnostic logs and repair reports older than 72
+hours, keeping the newest file in each group. Session locks, state, graph indexes
+and recent evidence remain. Media backup retention keeps the newest completed
+archive of each type under `.cache/between-backups`; database and curation
+snapshots also keep anything from the past three days. Unknown files and distinct
+media encodings remain. To delete a specific cache directory completely, name it
+with `--remove-cache NAME`; this overrides retention for that path and can remove
+recovery backups.
+
+Every installed provider gets `vibe_scripts/<provider>/cleanup-cache.py` and one
+Stop registration. The launcher detaches the worker and returns immediately; a
+shared lock prevents overlapping cleanup. The worker writes its last result to
+`.cache/cleanup-cache-last.json`. Backup completion checks use producer markers;
+legacy media exports without a marker require a successful gzip integrity read
+before older copies are removed. That read happens only while duplicates exist.
+
+Add `--apply` to install the reviewed changes with backups. Omit `--include-global`
+to leave user configuration alone. The cleanup preserves custom hooks and refuses
+unrecognized quality helpers or Git blockers. Start a new agent session afterward.
+Graph refresh remains available through the project-memory commands below.
+Automatic hooks format and lint existing edited files. Moves are checked at the
+new path; removed paths remain recorded in session history. Deletion-only changes
+skip edited-file checks with an explicit reminder that tests have not run. Hooks
+do not launch test suites, require test receipts, or scan installed dependencies.
+Real edited-file findings and missing session baselines still block completion.
+
+After deleting, moving or refactoring files, run the project's tests explicitly:
+
+```bash
+make -f vibe_scripts/codex/Makefile test-ai
+```
+
+Use `vibe_scripts/claude/Makefile` for Claude, or `verify-ai` for the full controlled
+verification. Test failures retain their nonzero exit status. Both providers' macOS
+and WSL installers deliver this separation; existing installations receive it on
+managed refresh. No session reset or cache deletion is required.
+
 Both helpers install `project-memory.py` in their provider directory. Before
 substantial planning, request a brief for the task and the files being inspected:
 
@@ -253,10 +307,10 @@ context helps. The brief links relevant wiki pages, queries code relationships
 and tests, and reports freshness. Confirm the source before relying on a graph
 finding; inspection does not authorize unrelated edits or design work.
 
-Hooks record changes after edits and shell commands, then batch graph refreshes
-before graph queries and at task boundaries. Missing tools and failed updates
-remain visible without blocking completion. Existing custom or global graph
-watchers may still run independently. Graphify's code refresh can rebuild all
+Automatic memory hooks are disabled by default. Installers remove known legacy
+registrations and retain explicit `context`, `status` and `refresh` commands.
+Missing tools and failed updates remain visible without blocking completion.
+Custom graph watchers remain untouched. Graphify's code refresh can rebuild all
 code; semantic document updates require separate extraction and source review.
 The `status` command lists pending work, while `refresh --architecture` requests
 both code indexes. Neither command installs or upgrades tools.
@@ -265,6 +319,24 @@ Generated reports, caches and session logs are excluded from Graphify inputs.
 Use `wiki-ai` only for durable knowledge, review its generated diff, and preserve
 handwritten sections. See `agent/codex/context-strategy.md` or its Claude
 equivalent for recording a completed semantic review.
+
+Hook repair changes on 2026-10-19:
+
+- Removed automatic graph updates and the graph-first file-read blockade.
+- Limited each edit check to its edited paths. The 2026-10-20 update removes the
+  test-dependent Stop cache and checks surviving edited files on each Stop.
+- Replaced full-file hashing in quality snapshots with file metadata.
+- Separated the global Git mutation blocker from project-specific quality rules.
+  Quoted command names are accepted; compound shell execution keeps conservative
+  checks. The mutation strings in regression tests are parsed, never executed.
+- Added repeatable repair previews, backups, per-repository results and background
+  Stop cleanup. Both providers' macOS and WSL installers receive the shared fixes.
+
+The review also found unsupported-file Stop retries and mandatory agent/delegation
+prompts. Those policies remain unchanged. Deleted-file testing was separated from
+automatic hooks on 2026-10-20 as described above. Configured
+graph timeouts showed a potential long wait; the review did not establish actual
+historical latency. New sessions load the repaired registrations.
 
 ## What it can install
 

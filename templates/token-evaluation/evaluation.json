@@ -1,0 +1,162 @@
+{
+  "_managed": "@HELPER@-Version: token-evaluation-v1",
+  "schema": 1,
+  "cases": [
+    {
+      "id": "python-mechanical",
+      "language": "python",
+      "kind": "mechanical",
+      "source": "def doubled(values):\n    result = []\n    for item in values:\n        result.append(item * 2)\n    return result\n",
+      "task": "Rename the local accumulator to doubled_values; preserve the function API.",
+      "acceptance": [
+        "[] returns []",
+        "[0, -2, 3] returns [0, -4, 6]",
+        "Only the local name changes"
+      ],
+      "reference": "Replace result with doubled_values within doubled."
+    },
+    {
+      "id": "python-behavior",
+      "language": "python",
+      "kind": "behavior",
+      "source": "def limit(value, maximum=None):\n    if maximum:\n        return min(value, maximum)\n    return value\n",
+      "task": "Support zero as an explicit maximum.",
+      "acceptance": [
+        "limit(3, 0) == 0",
+        "limit(3, None) == 3",
+        "limit(-2, 0) == -2"
+      ],
+      "reference": "Use if maximum is not None."
+    },
+    {
+      "id": "python-debug",
+      "language": "python",
+      "kind": "debug",
+      "source": "def collect(value, items=[]):\n    items.append(value)\n    return items\n",
+      "task": "Stop independent calls from sharing the default list; preserve explicit list mutation.",
+      "acceptance": [
+        "Two default calls return separate one-item lists",
+        "An explicit list receives the new value",
+        "An explicitly supplied empty list is mutated and returned by identity"
+      ],
+      "reference": "Default items to None and allocate [] only when items is None."
+    },
+    {
+      "id": "python-review",
+      "language": "python",
+      "kind": "review",
+      "source": "def allowed(role):\n    return role == \"admin\" or \"owner\"\n",
+      "task": "Review this access check without editing code.",
+      "acceptance": [
+        "Identify the always-truthy string operand",
+        "Explain that unauthorized roles pass",
+        "Suggest explicit comparison or membership"
+      ],
+      "reference": "Use role in (\"admin\", \"owner\"); the current owner string is truthy for non-admin roles."
+    },
+    {
+      "id": "javascript-mechanical",
+      "language": "javascript",
+      "kind": "mechanical",
+      "source": "function doubled(values) {\n  const result = [];\n  for (const item of values) result.push(item * 2);\n  return result;\n}\n",
+      "task": "Rename the local accumulator to doubledValues; preserve the function API.",
+      "acceptance": [
+        "[] returns []",
+        "[0, -2, 3] returns [0, -4, 6]",
+        "Only the local name changes"
+      ],
+      "reference": "Replace result with doubledValues within doubled."
+    },
+    {
+      "id": "javascript-behavior",
+      "language": "javascript",
+      "kind": "behavior",
+      "source": "function retries(options) { return options.retries || 3; }\n",
+      "task": "Allow retries: 0 to disable retries while defaulting missing/null values to 3.",
+      "acceptance": [
+        "{retries: 0} returns 0",
+        "{} and {retries: null} return 3",
+        "{retries: 2} returns 2"
+      ],
+      "reference": "Return options.retries ?? 3."
+    },
+    {
+      "id": "javascript-debug",
+      "language": "javascript",
+      "kind": "debug",
+      "source": "async function sendAll(items, send) {\n  items.forEach(async item => { await send(item); });\n}\n",
+      "task": "Wait for all sends and propagate failures, preserving sequential delivery order.",
+      "acceptance": [
+        "The returned promise resolves only after each send",
+        "Rejected sends reject sendAll",
+        "Later sends do not start after a rejection"
+      ],
+      "reference": "Use for (const item of items) { await send(item); }."
+    },
+    {
+      "id": "javascript-review",
+      "language": "javascript",
+      "kind": "review",
+      "source": "function allowed(role) { return role === \"admin\" || \"owner\"; }\n",
+      "task": "Review this access check without editing code.",
+      "acceptance": [
+        "Identify the truthy owner string",
+        "Explain authorization bypass for other roles",
+        "Suggest two comparisons or membership"
+      ],
+      "reference": "Use role === \"admin\" || role === \"owner\"; the current second operand is always truthy."
+    },
+    {
+      "id": "php-mechanical",
+      "language": "php",
+      "kind": "mechanical",
+      "source": "<?php\nfunction doubled($values) {\n    $result = [];\n    foreach ($values as $item) { $result[] = $item * 2; }\n    return $result;\n}\n",
+      "task": "Rename only the local accumulator to $doubledValues; preserve parameter names.",
+      "acceptance": [
+        "[] returns []",
+        "[0, -2, 3] returns [0, -4, 6]",
+        "The public parameter name stays values"
+      ],
+      "reference": "Replace $result with $doubledValues inside doubled."
+    },
+    {
+      "id": "php-behavior",
+      "language": "php",
+      "kind": "behavior",
+      "source": "<?php\nfunction contains($text, $needle) { return (bool) strpos($text, $needle); }\n",
+      "task": "Recognize matches at the start of the string.",
+      "acceptance": [
+        "contains(\"abc\", \"a\") is true",
+        "contains(\"abc\", \"b\") is true",
+        "contains(\"abc\", \"z\") is false"
+      ],
+      "reference": "Return strpos($text, $needle) !== false."
+    },
+    {
+      "id": "php-debug",
+      "language": "php",
+      "kind": "debug",
+      "source": "<?php\nfunction hasId($id) { return !empty($id); }\n",
+      "task": "Accept the string identifier \"0\" while rejecting null and the empty string.",
+      "acceptance": [
+        "hasId(\"0\") is true",
+        "hasId(null) and hasId(\"\") are false",
+        "hasId(\"abc\") is true"
+      ],
+      "reference": "Return $id !== null && $id !== \"\"."
+    },
+    {
+      "id": "php-review",
+      "language": "php",
+      "kind": "review",
+      "source": "<?php\nfunction allowed($role) { return $role === \"admin\" || \"owner\"; }\n",
+      "task": "Review this access check without editing code.",
+      "acceptance": [
+        "Identify the truthy owner string",
+        "Explain authorization bypass for other roles",
+        "Suggest strict comparisons or strict membership"
+      ],
+      "reference": "Use $role === \"admin\" || $role === \"owner\"; arbitrary roles currently pass."
+    }
+  ]
+}

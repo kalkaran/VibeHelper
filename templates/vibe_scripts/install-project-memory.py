@@ -17,19 +17,22 @@ def command(provider):
     return f'root="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0; helper="$root/vibe_scripts/{provider}/project-memory.py"; [ -f "$helper" ] || exit 0; exec python3 "$helper" hook --provider {provider} --root "$root"'
 
 
+def cleanup_command(provider):
+    return f'root="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0; helper="$root/vibe_scripts/{provider}/cleanup-cache.py"; [ -f "$helper" ] || exit 0; exec python3 "$helper" --root "$root"'
+
+
 def desired(provider):
     return {
         event: [
             {
                 "matcher": matcher,
                 "hooks": [
-                    {"type": "command", "command": command(provider), "timeout": 100}
+                    {"type": "command", "command": command(provider), "timeout": 200}
                 ],
             }
         ]
         for event, matcher in {
             "SessionStart": ".*",
-            "PostToolUse": "^(Bash|Edit|Write|NotebookEdit|apply_patch|exec_command|write_stdin)$",
             "PreToolUse": "^mcp__.*(?:code[-_]review[-_]graph|graphify).*",
             "Stop": ".*",
         }.items()
@@ -47,9 +50,11 @@ def legacy_commands(root):
     }
 
 
-def update_hooks(hooks, root, provider, install=True):
+def update_hooks(hooks, root, provider, install=True, cleanup=False):
     result = copy.deepcopy(hooks)
     for event, groups in result.items():
+        if not isinstance(groups, list):
+            continue
         retained = []
         for group in groups:
             original = group.get("hooks", [])
@@ -57,7 +62,8 @@ def update_hooks(hooks, root, provider, install=True):
                 hook
                 for hook in original
                 if hook.get("command")
-                not in legacy_commands(root) | {command(provider)}
+                not in legacy_commands(root)
+                | {command(provider), cleanup_command(provider)}
             ]
             if group["hooks"] or not original:
                 retained.append(group)
@@ -65,6 +71,19 @@ def update_hooks(hooks, root, provider, install=True):
     if install:
         for event, groups in desired(provider).items():
             result.setdefault(event, []).extend(groups)
+    if cleanup:
+        result.setdefault("Stop", []).append(
+            {
+                "matcher": ".*",
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": cleanup_command(provider),
+                        "timeout": 10,
+                    }
+                ],
+            }
+        )
     return result
 
 
@@ -91,20 +110,24 @@ def save(path, text):
     path.write_text(text)
 
 
-def configure(path, root, provider, install=True):
+def configure(path, root, provider, install=True, cleanup=False):
     if not path.resolve().is_relative_to(root):
         raise ValueError(f"Configuration path leaves repository: {path}")
     original = path.read_text() if path.exists() else ""
     if path.suffix == ".json":
         data = json.loads(original or "{}")
-        data["hooks"] = update_hooks(data.get("hooks", {}), root, provider, install)
+        data["hooks"] = update_hooks(
+            data.get("hooks", {}), root, provider, install, cleanup
+        )
         save(path, json.dumps(data, indent=2) + "\n")
         return
     import tomllib
 
     data = tomllib.loads(original)
     expected = copy.deepcopy(data)
-    expected["hooks"] = update_hooks(data.get("hooks", {}), root, provider, install)
+    expected["hooks"] = update_hooks(
+        data.get("hooks", {}), root, provider, install, cleanup
+    )
     # Preserve all unrelated TOML text. Rewrite only recognized hook groups;
     # validation below refuses uncommon layouts that cannot be preserved.
     pattern = r'(?m)^\[\[hooks\.(?:"([^"]+)"|([\w]+))\]\][^\n]*\n.*?(?=^\[(?!\[?hooks\.(?:"[^"\n]+"|[\w]+)\.hooks)|\Z)'
@@ -113,7 +136,8 @@ def configure(path, root, provider, install=True):
         event = match[1] or match[2]
         groups = tomllib.loads(match[0])["hooks"][event]
         if any(
-            h.get("command") in legacy_commands(root) | {command(provider)}
+            h.get("command")
+            in legacy_commands(root) | {command(provider), cleanup_command(provider)}
             for g in groups
             for h in g.get("hooks", [])
         ):
@@ -122,13 +146,10 @@ def configure(path, root, provider, install=True):
         return match[0]
 
     text = re.sub(pattern, remove, original, flags=re.DOTALL)
-    if install:
-        for event, groups in desired(provider).items():
-            text = (
-                text.rstrip()
-                + "\n\n"
-                + "".join(render(event, group) for group in groups)
-            )
+    for event, groups in update_hooks({}, root, provider, install, cleanup).items():
+        text = (
+            text.rstrip() + "\n\n" + "".join(render(event, group) for group in groups)
+        )
     # Empty event arrays and absent arrays are equivalent; normalize for comparison.
     parsed = tomllib.loads(text)
     for doc in (parsed, expected):
@@ -147,7 +168,7 @@ def render(event, group):
     )
 
 
-def install(root, provider, hooks=True, crg=True, graphify=True):
+def install(root, provider, hooks=False, crg=True, graphify=True, configure_hooks=True):
     helper = root / f"vibe_scripts/{provider}"
     for path in (helper, root / ".graphifyignore", root / f".{provider}"):
         if not path.resolve().is_relative_to(root):
@@ -165,26 +186,36 @@ def install(root, provider, hooks=True, crg=True, graphify=True):
         )
         + "\n",
     )
-    if hooks:
+    if configure_hooks and (hooks or (root / f".{provider}").is_dir()):
         target = root / (
             ".codex/config.toml"
             if provider == "codex"
             else ".claude/settings.local.json"
         )
-        configure(target, root, provider)
+        if hooks or target.exists():
+            configure(target, root, provider, install=hooks, cleanup=True)
         secondary = root / (
             ".codex/config-snippet.toml"
             if provider == "codex"
             else ".claude/settings.json"
         )
         if secondary.exists():
-            configure(secondary, root, provider, install=provider == "codex")
+            configure(
+                secondary,
+                root,
+                provider,
+                install=hooks and provider == "codex",
+                cleanup=provider == "codex",
+            )
+        legacy = root / ".codex/hooks.json"
+        if provider == "codex" and legacy.exists():
+            configure(legacy, root, provider, install=False)
     ignore = root / ".graphifyignore"
     if graphify:
         text = ignore.read_text() if ignore.exists() else ""
         block = (
             START
-            + "\ngraphify-out/\n.code-review-graph/\n.cache/\nnotes/\nobsidian/\n"
+            + "\n.graphify/\ngraphify-out/\n.code-review-graph/\n.cache/\nnotes/\nobsidian/\n"
             + END
         )
         text = re.sub(
@@ -197,7 +228,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--provider", required=True, choices=("codex", "claude"))
     parser.add_argument("--root", type=Path, default=Path.cwd())
-    parser.add_argument("--hooks", type=int, choices=(0, 1), default=1)
+    parser.add_argument("--hooks", type=int, choices=(0, 1), default=0)
+    parser.add_argument("--configure-hooks", type=int, choices=(0, 1), default=1)
     parser.add_argument("--crg", type=int, choices=(0, 1), default=1)
     parser.add_argument("--graphify", type=int, choices=(0, 1), default=1)
     parser.add_argument("--template-json", action="store_true")
@@ -205,7 +237,11 @@ if __name__ == "__main__":
     if args.template_json:
         template = json.load(sys.stdin)
         template["hooks"] = update_hooks(
-            template.get("hooks", {}), args.root.resolve(), args.provider
+            template.get("hooks", {}),
+            args.root.resolve(),
+            args.provider,
+            install=bool(args.hooks),
+            cleanup=True,
         )
         print(json.dumps(template, indent=2))
     else:
@@ -215,4 +251,5 @@ if __name__ == "__main__":
             bool(args.hooks),
             bool(args.crg),
             bool(args.graphify),
+            bool(args.configure_hooks),
         )

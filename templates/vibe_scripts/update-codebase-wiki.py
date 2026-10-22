@@ -10,7 +10,14 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 WIKI_DIR = ROOT / "codebase-wiki"
-GRAPH_REPORT = ROOT / "graphify-out" / "GRAPH_REPORT.md"
+GRAPH_REPORT = next(
+    (
+        ROOT / directory / "GRAPH_REPORT.md"
+        for directory in (".graphify", "graphify-out")
+        if (ROOT / directory / "GRAPH_REPORT.md").is_file()
+    ),
+    ROOT / ".graphify" / "GRAPH_REPORT.md",
+)
 CLAUDE_MD = ROOT / "CLAUDE.md"
 
 
@@ -200,7 +207,7 @@ def main() -> int:
             "architecture",
             f"""## Generated Repo Map
 
-Source: CLAUDE.md and graphify-out/GRAPH_REPORT.md.
+Source: CLAUDE.md and {GRAPH_REPORT.relative_to(ROOT)}.
 
 ### Project Shape
 {keep(heading_block(agents, "Project Structure & Module Organization"), 10, "No project-structure guidance found in CLAUDE.md.")}
@@ -262,7 +269,7 @@ Source: CLAUDE.md.
             "known-issues",
             f"""## Generated Known-Issue Candidates
 
-Source: graphify-out/GRAPH_REPORT.md. These are review prompts, not confirmed bugs.
+Source: {GRAPH_REPORT.relative_to(ROOT)}. These are review prompts, not confirmed bugs.
 
 ### Surprising Connections To Review
 {keep(surprising, 8, "No surprising connections found.")}
@@ -277,7 +284,7 @@ Source: graphify-out/GRAPH_REPORT.md. These are review prompts, not confirmed bu
             "risky-areas",
             f"""## Generated Risk Map
 
-Source: CLAUDE.md and graphify-out/GRAPH_REPORT.md.
+Source: CLAUDE.md and {GRAPH_REPORT.relative_to(ROOT)}.
 
 ### Security Baseline
 {keep(heading_block(agents, "Security & Configuration Tips"), 8, "No security baseline found in CLAUDE.md.")}

@@ -157,6 +157,8 @@ def route_identity(route):
 def blocked_routes(events):
     blocked = {}
     for event in events:
+        if "review_outcome" in event:
+            continue
         if event["route"] is None:
             continue
         key = route_identity(event["route"])
@@ -173,6 +175,43 @@ def record_attempt(stream, event):
     stream.write(json.dumps(event, ensure_ascii=True) + "\n")
     stream.flush()
     os.fsync(stream.fileno())
+
+
+def review_attempt(attempt_id, outcome, seconds=None, main_tokens=None):
+    """Record human/supervisor acceptance separately from gateway completion."""
+    if not isinstance(attempt_id, str) or not attempt_id:
+        raise Unavailable("review requires --attempt-id from a completed proposal.")
+    if outcome not in ("accepted", "revised", "rejected"):
+        raise Unavailable("Choose accepted, revised or rejected.")
+    for value in (seconds, main_tokens):
+        if value is not None and (type(value) is not int or value < 0):
+            raise Unavailable(
+                "Review measurements must be nonnegative integers or unknown."
+            )
+    with attempt_history() as (stream, events):
+        event = next(
+            (item for item in reversed(events) if item.get("attempt_id") == attempt_id),
+            None,
+        )
+        if event is None or event["status"] != "succeeded":
+            raise Unavailable("Only a completed proposal can receive a review outcome.")
+        event = dict(
+            event,
+            review_outcome=outcome,
+            review_seconds=seconds,
+            main_agent_tokens=main_tokens,
+            reviewed_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        )
+        record_attempt(stream, event)
+        return {
+            key: event[key]
+            for key in (
+                "attempt_id",
+                "review_outcome",
+                "review_seconds",
+                "main_agent_tokens",
+            )
+        }
 
 
 def reset_route(connection_id, model):
@@ -469,6 +508,7 @@ def route_observations(events, route, task):
         and route_identity(event["route"]) == route_identity(route)
         and event.get("task") == task
         and event["status"] in ("succeeded", "failed", "needs_context")
+        and "review_outcome" not in event
     ]
     return {
         status: sum(event["status"] == status for event in completed)
@@ -1239,6 +1279,7 @@ def main():
             "confirm-free",
             "revoke-free",
             "history",
+            "review",
             "reset-route",
             "rank",
         ),
@@ -1249,6 +1290,14 @@ def main():
     parser.add_argument("--json", action="store_true", help="Report/history as JSON")
     parser.add_argument("--model", help="Exact provider/model ID for reset-route")
     parser.add_argument("--task", choices=TASKS, help="Task type for ask/route")
+    parser.add_argument("--attempt-id", help="Completed attempt ID for review")
+    parser.add_argument("--outcome", choices=("accepted", "revised", "rejected"))
+    parser.add_argument("--review-seconds", type=int)
+    parser.add_argument(
+        "--main-tokens",
+        type=int,
+        help="Measured supervising-agent tokens, if available",
+    )
     parser.add_argument(
         "--billing-disabled",
         action="store_true",
@@ -1261,6 +1310,18 @@ def main():
     )
     args = parser.parse_args()
     try:
+        if args.command == "review":
+            print(
+                json.dumps(
+                    review_attempt(
+                        args.attempt_id,
+                        args.outcome,
+                        args.review_seconds,
+                        args.main_tokens,
+                    )
+                )
+            )
+            return 0
         if args.command == "history":
             with attempt_history() as (_, events):
                 print(

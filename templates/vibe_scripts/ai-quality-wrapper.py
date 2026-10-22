@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime as dt
+import fcntl
 import hashlib
 import json
 import os
@@ -781,8 +783,34 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
+@contextlib.contextmanager
+def receipt_guard(receipt: Path):
+    receipt.parent.mkdir(parents=True, exist_ok=True)
+    with receipt.with_suffix(".guard").open("a") as guard:
+        fcntl.flock(guard, fcntl.LOCK_EX)
+        yield
+
+
 def main() -> int:
     args = parse_args()
+    if args.label.startswith("test-"):
+        receipt = (
+            Path.cwd()
+            / ".cache"
+            / "quality-tests"
+            / (Path(__file__).parent.name + ".json")
+        )
+        with receipt_guard(receipt):
+            try:
+                current = json.loads(receipt.read_text())
+            except (OSError, ValueError):
+                current = {}
+            if (
+                not isinstance(current, dict)
+                or not os.environ.get("VIBEHELPER_TEST_RUN")
+                or current.get("token") != os.environ.get("VIBEHELPER_TEST_RUN")
+            ):
+                receipt.unlink(missing_ok=True)
     value = run_quality(
         args.command,
         label=args.label,

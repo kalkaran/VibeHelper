@@ -8,7 +8,7 @@ INSTALLER_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 IFS=$'\n\t'
 
 SCRIPT_NAME="$(basename "$0")"
-SCRIPT_VERSION="2026-10-12-v23"
+SCRIPT_VERSION="2026-10-19-v24"
 DRY_RUN=0
 FORCE=0
 REFRESH_MANAGED=0
@@ -428,6 +428,18 @@ write_file() {
 	local rel="$1"
 	local content="$2"
 	local mode="${3:-0644}"
+	case "$rel" in
+	agent/claude/usage.md | agent/claude/evaluation.json | agent/claude/procedures.md)
+		if [[ "$REFRESH_MANAGED" == "1" ]]; then
+			local ownership_helper="$INSTALLER_DIR/../../templates/vibe_scripts/managed-install.py"
+			[[ -f "$ownership_helper" ]] || ownership_helper="$INSTALLER_DIR/../templates/vibe_scripts/managed-install.py"
+			if ! python3 "$ownership_helper" resource-writable --provider claude --root "$ROOT" --path "$rel"; then
+				warn "Preserving custom workflow resource: $rel"
+				return 0
+			fi
+		fi
+		;;
+	esac
 	local dest="$ROOT/$rel"
 	local existing_version marker
 
@@ -630,7 +642,7 @@ append_gitignore_block() {
 	local marker="# VibeHelper local AI/dev tooling"
 	local block
 	local existed=0
-	block=$'# VibeHelper local AI/dev tooling\n*.bak\n*.bak.*\n.cache/\n.agents/\n.claude/\n.codex/\n.mcp.json\nAGENTS.md\nCLAUDE.md\nagent/\nagents/\ncodebase-wiki/\ngraphify-out/\nnode_modules/\nnotes/\nobsidian/\nvendor/\n/vibe_scripts/\n/skills-lock.json\nbiome.json\n'
+	block=$'# VibeHelper local AI/dev tooling\n*.bak\n*.bak.*\n.cache/\n.agents/\n.claude/\n.codex/\n.mcp.json\nAGENTS.md\nCLAUDE.md\nagent/\nagents/\ncodebase-wiki/\n.graphify/\ngraphify-out/\nnode_modules/\nnotes/\nobsidian/\nvendor/\n/vibe_scripts/\n/skills-lock.json\nbiome.json\n'
 	if [[ "$DRY_RUN" -eq 1 ]]; then
 		log "Would ensure .gitignore has VibeHelper local-file entries"
 		return 0
@@ -788,54 +800,16 @@ npx_ready() {
 
 install_graphify_skill() {
 	[[ "$RUN_GRAPHIFY" -eq 1 ]] || return 0
-	if [[ -f "$HOME/.claude/skills/graphify/SKILL.md" ]]; then
-		if [[ "$REFRESH_TOOLS" -eq 0 ]]; then
-			log "graphify skill already installed."
+	local src
+	for src in "$HELPER_ROOT/../templates/vibe_scripts/install-graphify.py" "$HELPER_ROOT/templates/vibe_scripts/install-graphify.py"; do
+		if [[ -f "$src" ]]; then
+			if ! python3 "$src" --platform claude --refresh "$REFRESH_TOOLS" --dry-run "$DRY_RUN"; then
+				record_failure "Graphify setup failed."
+			fi
 			return 0
 		fi
-	fi
-	if [[ "$DRY_RUN" -eq 1 ]]; then
-		if uv_tool_installed graphifyy; then
-			run_tool uv tool upgrade graphifyy
-		elif pipx_package_installed graphifyy; then
-			run_tool pipx upgrade graphifyy
-		else
-			log "Would install or refresh graphifyy with its current package owner."
-		fi
-		log "Would run: graphify install"
-		return 0
-	fi
-
-	# graphifyy ships the `graphify` CLI; `graphify install` registers the skill for
-	# Claude Code (~/.claude/skills/graphify). See github.com/Graphify-Labs/graphify.
-	if command -v graphify >/dev/null 2>&1 && [[ "$REFRESH_TOOLS" -eq 1 ]]; then
-		if uv_tool_installed graphifyy; then
-			uv tool upgrade graphifyy || record_failure "graphifyy refresh via uv failed."
-		elif pipx_package_installed graphifyy; then
-			pipx upgrade graphifyy || record_failure "graphifyy refresh via pipx failed."
-		elif python3 -m pip show graphifyy >/dev/null 2>&1; then
-			python3 -m pip install --user --upgrade graphifyy || record_failure "graphifyy refresh via pip failed."
-		else
-			warn "graphify is installed but its package owner is unknown; leaving the package unchanged."
-		fi
-	elif ! command -v graphify >/dev/null 2>&1; then
-		if command -v uv >/dev/null 2>&1; then
-			uv tool install graphifyy || true
-			export PATH="$HOME/.local/bin:$PATH"
-		elif command -v pipx >/dev/null 2>&1; then
-			pipx install graphifyy || true
-			export PATH="$HOME/.local/bin:$PATH"
-		else
-			python3 -m pip install --user graphifyy || true
-			export PATH="$HOME/.local/bin:$PATH"
-		fi
-	fi
-	if command -v graphify >/dev/null 2>&1; then
-		graphify install || record_failure "'graphify install' failed; run it manually."
-		log "graphify installed."
-	else
-		warn "Could not install graphifyy. Install manually: 'uv tool install graphifyy && graphify install'."
-	fi
+	done
+	record_failure "Graphify installer template missing."
 }
 
 maybe_install_ponytail() {
@@ -965,7 +939,7 @@ install_crg() {
 			log "code-review-graph package would remain unchanged."
 		fi
 		if [[ "$EXISTING_HELPER_INSTALL" != "1" || "$FRESH_INSTALL" -eq 1 || -z "$crg_version_before" ]]; then
-			log "Would register it: code-review-graph install --platform claude-code --no-instructions -y"
+			log "Would register it: code-review-graph install --platform claude-code --no-hooks --no-instructions -y"
 		elif [[ "$REFRESH_TOOLS" -eq 1 ]]; then
 			if uv_tool_installed code-review-graph || pipx_package_installed code-review-graph; then
 				log "Would register code-review-graph only if its version changes during the upgrade."
@@ -1000,7 +974,7 @@ install_crg() {
 	if command -v code-review-graph >/dev/null 2>&1; then
 		if [[ "$EXISTING_HELPER_INSTALL" != "1" || "$FRESH_INSTALL" -eq 1 || (-n "$crg_version_after" && "$crg_version_before" != "$crg_version_after") ]]; then
 			log "Registering code-review-graph for Claude Code."
-			code-review-graph install --platform claude-code --no-instructions -y || record_failure "code-review-graph Claude Code registration failed."
+			code-review-graph install --platform claude-code --no-hooks --no-instructions -y || record_failure "code-review-graph Claude Code registration failed."
 		else
 			log "code-review-graph package unchanged; keeping the existing Claude Code MCP configuration."
 		fi
@@ -1957,6 +1931,35 @@ install_agent_scaffold_files() {
 
 Use this repository with minimal, verifiable changes.
 
+## Required working priorities
+
+These are the authoritative project workflow priorities for every model and
+delegated agent. Apply them before optional tool or skill suggestions, while
+following explicit user instructions and required safety and verification checks.
+
+1. Reuse scripts first. Before repeating a task, check the project's documented
+   commands and existing scripts. Run the maintained script that covers the task;
+   do not recreate its steps manually or spend LLM tokens doing its work again.
+2. When repeated work lacks a suitable script, create or extend the smallest
+   reusable script that completes the authorized task. Parameterize inputs that
+   actually vary, handle failures and safe reruns, and document its invocation in
+   the existing command documentation. Avoid speculative options, frameworks and
+   new dependencies when existing helpers or the standard library suffice.
+3. Keep detailed logs on disk; abbreviate only the output sent to the LLM. On
+   success, return a short status, required result, duration and log path. On
+   failure, add the failing step, relevant diagnostic excerpt and next action;
+   preserve the nonzero exit status. Redact secrets from logs and summaries.
+   Read only the relevant log section when more context is needed. Do not dump
+   full logs or rerun a task just to obtain more verbose output.
+4. Check scope before implementation, when new findings suggest extra work, and
+   before completion. Compare the plan and final diff with the user's requested
+   outcome. Findings do not authorize unrelated fixes, refactors, investigations
+   or deployment changes. Before expanding scope, explain the proposed addition,
+   why it matters and its tradeoff, then ask whether the user wants it included.
+   Wait before doing that extra work; continue independent authorized work.
+   Routine steps needed for the agreed outcome remain authorized. If work has
+   drifted, stop the extra work and report it without discarding existing edits.
+
 For any failure, read the diagnostic first. Prefer formatted or structured
 output; use its reported cause, location and suggested correction to choose the
 next step. Read only relevant code or log sections when details are missing.
@@ -1998,15 +2001,7 @@ work already authorized by the user without adding approval steps.
 
 ## Simple tasks through OmniRoute
 
-For a simple bounded task, if OmniRoute use is not already authorized, ask once:
-"Do you want to try OmniRoute for this task to save tokens?"
-Wait for the user's reply before sending any task or context. If they decline,
-continue with the current agent. After approval, try one bounded request using
-`python3 vibe_scripts/claude/omniroute.py ask --task edit` with the task on stdin.
-Choose `code`, `edit`, `summary` or `extract` to match the bounded task.
-Read `/agent/claude/omniroute.md` for the delegation and mandatory review rules.
-If the helper is unavailable or its proposal fails review, continue with the
-current agent; do not spend this task repeatedly trying free models.
+Before delegation, read `/agent/claude/omniroute.md`. Obtain consent before sending task/context, honor existing consent, attempt once, and review the proposal and actual checks. Prefer local scripts when they settle the task.
 
 ## Project Structure & Module Organization
 
@@ -2069,6 +2064,37 @@ Implementation rules:
 - Write or update tests for behavior changes.
 
 Before final answer:
+- After substantive coding, always spawn a separate reviewer agent to inspect the final implementation for breaking changes, scope creep, and alignment with the user request. Address its findings before replying.
+- Read `/agent/claude/procedures.md` and complete its diff, manifest, review and verification requirements.
+- Report changed files, checks, blockers and remaining risks. Never stage automatically.
+
+Session logging:
+- Append each user query to `notes/queries.md` with the current date and keep prior entries intact.
+- Append each user query and assistant reply to `notes/conversation-log.md` with the current date and keep prior entries intact.
+CLAUDEMD_EOF
+	content="${content%$'\n'}"
+	if [[ "$UPDATE_INSTRUCTIONS" -eq 1 && "$EXISTING_HELPER_INSTALL" -eq 1 ]]; then
+		FORCE=1
+	fi
+	local usage_asset usage_source usage_content
+	for usage_asset in usage.md evaluation.json; do
+		usage_source="$INSTALLER_DIR/../../templates/token-evaluation/$usage_asset"
+		[[ -f "$usage_source" ]] || usage_source="$INSTALLER_DIR/../templates/token-evaluation/$usage_asset"
+		[[ -f "$usage_source" ]] || {
+			err "Required usage resource missing: $usage_asset"
+			return 1
+		}
+		usage_content="$(cat "$usage_source")"
+		usage_content="${usage_content//@PROVIDER@/claude}"
+		usage_content="${usage_content//@HELPER@/ClaudeHelper}"
+		write_file "agent/claude/$usage_asset" "$usage_content" 0644
+	done
+
+	local procedures_md
+	IFS= read -r -d '' procedures_md <<'EOF_QUALITY_PROCEDURES' || :
+# Quality and delivery procedures
+
+Before final answer:
 - After code changes, create or replace `git-add.txt` at the repository root. Inspect each candidate diff and include only files necessary for the intended change: source, relevant tests, required configuration, documentation and requested assets. Include additions, modifications and deletions, and both paths for renames. Never fill the list blindly from all Git status output.
 - Exclude ignored files, secrets, local agent settings, session notes, logs, backups, caches, installed dependencies, build output, temporary screenshots/reports and the manifest itself. Include package manifests only for intentional package configuration changes, and lockfiles only when required by intentional dependency or toolchain changes; requested deliverables and fixtures may be included after review.
 - Write one repository-relative path per line prefixed with `:(top,literal)`. Use Git C-style quoting for quotes, backslashes or newlines in filenames. Do not list directories or add comments. Leave the file empty when there is nothing to stage.
@@ -2083,14 +2109,9 @@ Before final answer:
 - Summarize tests/checks run.
 - Explain remaining risks.
 
-Session logging:
-- Append each user query to `notes/queries.md` with the current date and keep prior entries intact.
-- Append each user query and assistant reply to `notes/conversation-log.md` with the current date and keep prior entries intact.
-CLAUDEMD_EOF
-	content="${content%$'\n'}"
-	if [[ "$UPDATE_INSTRUCTIONS" -eq 1 && "$EXISTING_HELPER_INSTALL" -eq 1 ]]; then
-		FORCE=1
-	fi
+EOF_QUALITY_PROCEDURES
+	write_file "agent/claude/procedures.md" "$procedures_md" 0644
+
 	write_file "CLAUDE.md" "$content" 0644
 	FORCE="$original_force"
 
@@ -2100,13 +2121,7 @@ CLAUDEMD_EOF
 
 This folder contains durable instructions for AI coding agents. Keep `CLAUDE.md` short and put details here.
 
-Read order for non-trivial tasks:
-1. `CLAUDE.md`
-2. `/agent/claude/commands.md`
-3. `/agent/claude/context-strategy.md`
-4. `/agent/claude/coding-rules.md`
-5. `/agent/claude/verify.md`
-6. Relevant pages in `/codebase-wiki/`
+Read startup instructions once. For non-trivial planning, read `/agent/claude/context-strategy.md` and relevant wiki pages. Read coding rules before implementation, commands and verification guidance before checks, and procedures before delivery. Reuse already-read guidance unless it changes. Read `/agent/claude/usage.md` when measuring allowance or choosing model/routing workflows.
 
 Default workflow:
 1. Understand the task and expected behavior.
@@ -2126,6 +2141,9 @@ AGENTIDX_EOF
 # Repository commands for agents
 
 Prefer existing project commands. These standard targets may exist after bootstrap:
+
+Allowance measurements: `python3 vibe_scripts/claude/project-memory.py usage`. Read
+`/agent/claude/usage.md` for the fixed comparison pack and model/routing trials.
 
 ```bash
 make -f vibe_scripts/claude/Makefile edited-ai
@@ -2243,8 +2261,8 @@ scope is separate from graph coverage and the files needed for inspection.
 4. State the planned change and affected tests using that evidence. Inspection
    paths do not authorize edits, design reviews or changes outside the request.
 
-Memory hooks record actual changes after edits and shell commands. Graph queries
-and task boundaries batch refreshes; unchanged content does not trigger a rebuild.
+Automatic memory hooks are disabled. Use the context or refresh command explicitly;
+ordinary edits, reads and completion do not trigger graph maintenance.
 Graphify's supported code refresh may rebuild all code. Documents have separate
 semantic freshness; code refresh never completes document review. Hooks do not
 run semantic inference or install tools. Existing global/custom graph watchers
@@ -2562,6 +2580,7 @@ Model claims about tests are not evidence.
 Apply only the reviewed changes, run the normal controlled edited and relevant
 quality checks, and inspect their actual results. Keep the required independent
 sentinel review. Delegation never relaxes the repository quality rules.
+After review, record the attempt outcome with `python3 vibe_scripts/claude/omniroute.py review --attempt-id ID --outcome accepted` (or revised/rejected). Omit unknown measurements; see `/agent/claude/usage.md`.
 Summarize accepted work and review findings concisely; do not paste the entire
 worker response into the conversation. Usage returned by the gateway describes
 that call only; do not claim measured main-model savings without a baseline.
@@ -2699,6 +2718,7 @@ install_shared_vibe_script "agent-check-edited.py"
 install_shared_vibe_script "update-codebase-wiki.py"
 install_shared_vibe_script "project-memory.py"
 install_shared_vibe_script "install-project-memory.py"
+install_shared_vibe_script "cleanup-cache.py"
 install_generated_repo_files
 install_agent_scaffold_files
 install_shared_vibe_script "agent-verify.sh"
@@ -2727,7 +2747,7 @@ else
 fi
 
 if [[ "$DRY_RUN" -eq 1 ]]; then
-	log "Would configure scoped project memory hooks and exclusions."
+	log "Would remove automatic memory hooks; keep explicit graph commands and exclusions."
 else
 	python3 vibe_scripts/claude/install-project-memory.py --provider claude --crg "$RUN_CRG" --graphify "$RUN_GRAPHIFY"
 fi

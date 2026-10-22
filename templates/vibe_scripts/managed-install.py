@@ -86,6 +86,8 @@ def recognizable(path, provider):
                 or "/vibe_scripts/claude/quality-hook.py" in command
                 or command
                 == 'root="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0; helper="$root/vibe_scripts/claude/project-memory.py"; [ -f "$helper" ] || exit 0; exec python3 "$helper" hook --provider claude --root "$root"'
+                or command
+                == 'root="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0; helper="$root/vibe_scripts/claude/cleanup-cache.py"; [ -f "$helper" ] || exit 0; exec python3 "$helper" --root "$root"'
                 for command in commands
             )
         except (ValueError, TypeError, KeyError):
@@ -182,6 +184,84 @@ def merge_codex(path, snippet):
     print(
         "configured: Codex hooks merged; existing settings and custom hooks preserved"
     )
+
+
+def configure_test_verification(root, provider, dry_run=False):
+    path = safe(root, f"vibe_scripts/{provider}/Makefile")
+    if path is None or not path.is_file():
+        return
+    original = path.read_text()
+    if "test-verification.py" in original or "test-run-ai:" in original:
+        return
+    match = re.search(r"(?m)^test-ai:\s*\n((?:\t[^\n]*\n)+)", original)
+    if not match:
+        return
+    for line in match[1].splitlines():
+        try:
+            words = shlex.split(line.lstrip("\t@"))
+        except ValueError:
+            return
+        if (
+            len(words) < 5
+            or words[:3]
+            != ["python3", f"vibe_scripts/{provider}/ai-quality-wrapper.py", "--label"]
+            or not words[3].startswith("test-")
+        ):
+            print(
+                "needs action: custom test-ai recipe preserved; verification reuse unavailable"
+            )
+            return
+    if dry_run:
+        print("needs action: would record complete controlled test verification")
+        return
+    if not (path.parent / "test-verification.py").is_file():
+        raise OSError(
+            "Test verification driver must be installed before wiring test-ai"
+        )
+    replacement = (
+        f"test-ai:\n\t@python3 vibe_scripts/{provider}/test-verification.py --provider {provider}\n\n"
+        ".PHONY: test-run-ai\ntest-run-ai:\n" + match[1]
+    )
+    shutil.copy2(path, path.with_name(path.name + f".bak.{time.time_ns()}"))
+    path.write_text(original[: match.start()] + replacement + original[match.end() :])
+    print("configured: full test target verification; existing test recipes preserved")
+
+
+def configure_markdownlint(root, dry_run=False):
+    if not any(root.glob(".markdownlint*")):
+        if dry_run:
+            print("needs action: would create .markdownlint.json with line length 200")
+        else:
+            (root / ".markdownlint.json").write_text(
+                json.dumps({"MD013": {"line_length": 200}}, indent=2) + "\n"
+            )
+            print("configured: Markdownlint line length 200")
+    path = safe(root, "biome.json")
+    if path is None or (root / "biome.jsonc").exists():
+        print(
+            "needs action: custom/symlinked Biome config preserved; review Markdownlint coverage"
+        )
+        return
+    if not path.is_file():
+        return
+    original = path.read_text()
+    try:
+        data = json.loads(original)
+        includes = data.get("files", {}).get("includes")
+    except (ValueError, AttributeError):
+        print(
+            "needs action: custom Biome config preserved; review Markdownlint coverage"
+        )
+        return
+    if not isinstance(includes, list) or ".markdownlint.json" in includes:
+        return
+    if dry_run:
+        print("needs action: would include .markdownlint.json in Biome")
+        return
+    includes.append(".markdownlint.json")
+    shutil.copy2(path, path.with_name(path.name + f".bak.{time.time_ns()}"))
+    path.write_text(json.dumps(data, indent=2) + "\n")
+    print("configured: Biome includes .markdownlint.json; other settings preserved")
 
 
 def migrate(root, dry_run=False):
@@ -339,11 +419,38 @@ def recover_stale_lock(root, lock, provider):
     )
 
 
+def resource_writable(root, provider, name):
+    """Refresh new workflow resources only while their installed bytes are owned."""
+    path = safe(root, name)
+    receipt = safe(root, f".cache/vibehelper-install/{provider}.json")
+    if path is None or receipt is None:
+        return False
+    if not path.exists():
+        return True
+    try:
+        owned = json.loads(receipt.read_text())
+        return (
+            isinstance(owned, dict)
+            and path.is_file()
+            and owned.get(name) == digest(path)
+        )
+    except (OSError, ValueError):
+        return False
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "operation",
-        choices=["begin", "finish", "abort", "cleanup", "migrate", "merge-codex"],
+        choices=[
+            "begin",
+            "finish",
+            "abort",
+            "cleanup",
+            "migrate",
+            "merge-codex",
+            "resource-writable",
+        ],
     )
     parser.add_argument("--provider", choices=["codex", "claude"], required=True)
     parser.add_argument("--root", type=Path, default=Path.cwd())
@@ -353,8 +460,13 @@ def main():
     parser.add_argument("--run-id", default=str(os.getppid()))
     parser.add_argument("--skipped", action="append", default=[])
     parser.add_argument("--quality-only", action="store_true")
+    parser.add_argument("--path")
     args = parser.parse_args()
     root = args.root.resolve()
+    if args.operation == "resource-writable":
+        if not args.path or not resource_writable(root, args.provider, args.path):
+            raise SystemExit(1)
+        return
     if args.operation == "merge-codex":
         path = safe(root, ".codex/config.toml")
         if not path:
@@ -454,6 +566,9 @@ def main():
             if not args.dry_run:
                 lock.rmdir()
     if args.dry_run:
+        if args.operation == "finish":
+            configure_markdownlint(root, dry_run=True)
+            configure_test_verification(root, args.provider, dry_run=True)
         print("explicitly skipped: managed receipts and validation during dry run")
         return
     directory.mkdir(parents=True, exist_ok=True)
@@ -638,6 +753,8 @@ def main():
         )
         if failures:
             raise SystemExit(1)
+        configure_markdownlint(root)
+        configure_test_verification(root, args.provider)
     finally:
         before.unlink(missing_ok=True)
         (lock / "run-id").unlink(missing_ok=True)

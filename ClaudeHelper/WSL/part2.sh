@@ -120,7 +120,7 @@ PY
 has_markdown_files() {
 	local match
 	match="$(find . \
-		\( -name .agents -o -name .claude -o -name .codex -o -name node_modules -o -name vendor -o -name dist -o -name build -o -name coverage -o -name graphify-out -o -name .git -o -name .cache -o -name .venv \) -prune \
+		\( -name .agents -o -name .claude -o -name .codex -o -name node_modules -o -name vendor -o -name dist -o -name build -o -name coverage -o -name .graphify -o -name graphify-out -o -name .git -o -name .cache -o -name .venv \) -prune \
 		-o \( -name '*.md' -o -name '*.markdown' \) -print -quit 2>/dev/null)"
 	[[ -n "$match" ]]
 }
@@ -147,7 +147,7 @@ configure_design_hook() {
 
 install_runtime_assets() {
 	local name source destination found
-	for name in ai-quality-wrapper.py agent-check-edited.py agent-verify.sh quality-hook.py fallow.py; do
+	for name in ai-quality-wrapper.py agent-check-edited.py agent-verify.sh quality-hook.py test-verification.py fallow.py; do
 		found=0
 		for source in "$INSTALLER_DIR/../../templates/vibe_scripts/$name" "$INSTALLER_DIR/../templates/vibe_scripts/$name"; do
 			[[ -f "$source" ]] || continue

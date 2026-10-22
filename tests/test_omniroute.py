@@ -20,6 +20,39 @@ SPEC.loader.exec_module(OMNI)
 TEST_MODEL = "openrouter/example/code:free"
 
 
+def test_review_records_acceptance_without_affecting_ranking(gateway):
+    client, _, _ = gateway
+    proposal = OMNI.ask(client, "Small mechanical edit")
+    with OMNI.attempt_history() as (_, events):
+        route = events[-1]["route"]
+        before = OMNI.route_observations(events, route, "edit")
+    review = OMNI.review_attempt(proposal["attempt_id"], "accepted")
+    assert review["review_seconds"] is None
+    assert review["main_agent_tokens"] is None
+    corrected = OMNI.review_attempt(proposal["attempt_id"], "revised", 20, 100)
+    assert corrected["review_outcome"] == "revised"
+    with OMNI.attempt_history() as (_, events):
+        assert OMNI.route_observations(events, route, "edit") == before
+        assert OMNI.blocked_routes(events) == {}
+        assert [
+            event["review_outcome"] for event in events if "review_outcome" in event
+        ] == ["accepted", "revised"]
+
+
+@pytest.mark.parametrize(
+    "attempt,outcome,seconds",
+    [
+        (None, "accepted", None),
+        ("missing", "accepted", None),
+        ("missing", "passed", None),
+        ("missing", "rejected", -1),
+    ],
+)
+def test_review_rejects_invalid_or_unknown_attempt(attempt, outcome, seconds):
+    with pytest.raises(OMNI.Unavailable):
+        OMNI.review_attempt(attempt, outcome, seconds)
+
+
 @pytest.fixture(autouse=True)
 def isolated_runtime(tmp_path, monkeypatch):
     """Keep mocked attempts and route failures out of the user's runtime."""

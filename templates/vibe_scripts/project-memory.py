@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import traceback
 from pathlib import Path
 
 CODE = {
@@ -66,6 +67,7 @@ EXCLUDE = {
     ".git",
     ".cache",
     ".code-review-graph",
+    ".graphify",
     "graphify-out",
     "notes",
     "node_modules",
@@ -83,21 +85,107 @@ BACKENDS = {"crg": ".code-review-graph/graph.db", "graphify": "graphify-out/grap
 DEADLINE = None
 
 
+class MemoryTimeout(RuntimeError):
+    def __init__(self, message, **details):
+        super().__init__(message)
+        self.details = details
+
+
+def timeout_message(root, error):
+    if not isinstance(error, (MemoryTimeout, subprocess.TimeoutExpired)):
+        return str(error)
+    if not hasattr(error, "timeout_log"):
+        try:
+            root = root.resolve()
+            directory = root / ".cache/project-memory"
+            if not directory.resolve().is_relative_to(root.resolve()):
+                raise OSError("timeout log directory leaves repository")
+            directory.mkdir(parents=True, exist_ok=True)
+            record = {
+                "time_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "root": str(root),
+                "error": str(error),
+                "details": getattr(error, "details", {}),
+                "traceback": "".join(traceback.format_exception(error)),
+            }
+            secrets = [
+                value
+                for key, value in os.environ.items()
+                if value
+                and re.search(
+                    r"token|secret|password|api.?key|credential", key, re.IGNORECASE
+                )
+            ]
+
+            def redact(value):
+                if isinstance(value, dict):
+                    return {key: redact(item) for key, item in value.items()}
+                if isinstance(value, list):
+                    return [redact(item) for item in value]
+                if not isinstance(value, str):
+                    return value
+                for secret in secrets:
+                    value = value.replace(secret, "[REDACTED]")
+                value = re.sub(r"(?i)(Bearer\s+)\S+", r"\1[REDACTED]", value)
+                value = re.sub(
+                    r"(?i)((?:token|secret|password|api[_-]?key)[\w-]*[\"']?\s*[=:]\s*)([\"'])(.*?)\2",
+                    r"\1[REDACTED]",
+                    value,
+                )
+                return re.sub(
+                    r"(?i)((?:token|secret|password|api[_-]?key)[\w-]*[\"']?[ =:]+[\"']?)([^\s\"',]+)",
+                    r"\1[REDACTED]",
+                    value,
+                )
+
+            text = json.dumps(redact(record), indent=2)
+            fd, name = tempfile.mkstemp(
+                prefix="timeout-", suffix=".json", dir=directory
+            )
+            with os.fdopen(fd, "w") as stream:
+                stream.write(text + "\n")
+            error.timeout_log = str(Path(name).relative_to(root))
+        except OSError as failure:
+            error.timeout_log = f"unavailable ({failure})"
+    reason = (
+        f"Command timed out after {error.timeout:g} seconds"
+        if isinstance(error, subprocess.TimeoutExpired)
+        else str(error)
+    )
+    return f"Timeout log: {error.timeout_log}. {reason}"
+
+
 def remaining(maximum):
     if DEADLINE is None:
         return maximum
     left = DEADLINE - time.monotonic()
     if left <= 0:
-        raise RuntimeError("memory time budget exhausted; remaining work stays pending")
+        raise MemoryTimeout(
+            "memory time budget exhausted; remaining work stays pending",
+            operation="total budget",
+            deadline=DEADLINE,
+            overdue_seconds=-left,
+        )
     return min(maximum, left)
 
 
 def run(root, args, timeout=30):
-    timeout = remaining(timeout)
+    started = time.monotonic()
+    try:
+        timeout = remaining(timeout)
+    except MemoryTimeout as error:
+        error.details["command"] = args
+        timeout_message(root, error)
+        raise
+    env = os.environ.copy()
+    if Path(args[0]).name == "graphify":
+        output = backend_path(root, "graphify").parent
+        if output.is_dir():
+            env["GRAPHIFY_OUT"] = str(output)
     # Temporary streams avoid pipe deadlocks if a backend leaves children alive.
     with (
-        tempfile.TemporaryFile(mode="w+") as out,
-        tempfile.TemporaryFile(mode="w+") as err,
+        tempfile.TemporaryFile(mode="w+", errors="replace") as out,
+        tempfile.TemporaryFile(mode="w+", errors="replace") as err,
     ):
         process = subprocess.Popen(
             args,
@@ -106,10 +194,11 @@ def run(root, args, timeout=30):
             stdout=out,
             stderr=err,
             start_new_session=True,
+            env=env,
         )
         try:
             process.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
+        except subprocess.TimeoutExpired as error:
             for sig in (signal.SIGTERM, signal.SIGKILL):
                 try:
                     os.killpg(process.pid, sig)
@@ -124,6 +213,17 @@ def run(root, args, timeout=30):
                     process.wait(timeout=1)
                 except subprocess.TimeoutExpired:
                     pass
+            out.seek(0)
+            err.seek(0)
+            error.details = {
+                "operation": "subprocess",
+                "command": args,
+                "budget_seconds": timeout,
+                "elapsed_seconds": time.monotonic() - started,
+                "stdout": out.read(),
+                "stderr": err.read(),
+            }
+            timeout_message(root, error)
             raise
         if process.returncode:
             raise subprocess.CalledProcessError(process.returncode, args)
@@ -131,17 +231,9 @@ def run(root, args, timeout=30):
         return out.read()
 
 
-def digest(path, deadline=None):
-    deadline = min(deadline or float("inf"), time.monotonic() + remaining(8))
-    result = hashlib.sha256()
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(65536), b""):
-            if deadline is not None and time.monotonic() > deadline:
-                raise RuntimeError(
-                    "memory scan exceeded its time budget; freshness remains pending"
-                )
-            result.update(chunk)
-    return result.hexdigest()
+def file_stamp(path):
+    info = path.stat()
+    return f"stat:{info.st_mtime_ns}:{info.st_ctime_ns}:{info.st_size}:{info.st_ino}"
 
 
 def write_json(path, value):
@@ -171,8 +263,10 @@ def included(name):
 
 
 def snapshot(root):
-    """Content, not mtimes: catches old checkouts, shell edits and deletions."""
-    deadline = time.monotonic() + remaining(8)
+    """Compare file metadata without reading source or asset contents."""
+    started = time.monotonic()
+    budget = remaining(8)
+    deadline = started + budget
     paths = run(
         root, ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"], 5
     ).split("\0")
@@ -180,15 +274,26 @@ def snapshot(root):
     for directory in ("codebase-wiki", "agent"):
         for path in (root / directory).rglob("*.md"):
             if time.monotonic() > deadline:
-                raise RuntimeError(
-                    "memory scan exceeded 8 seconds; freshness remains pending"
+                raise MemoryTimeout(
+                    "memory scan exceeded 8 seconds; freshness remains pending",
+                    operation="guidance traversal",
+                    path=str(path),
+                    budget_seconds=budget,
+                    elapsed_seconds=time.monotonic() - started,
                 )
             paths.append(str(path.relative_to(root)))
     values = {}
     for name in sorted(set(paths)):
+        if not name:
+            continue
         if time.monotonic() > deadline:
-            raise RuntimeError(
-                "memory scan exceeded 8 seconds; previous freshness retained"
+            raise MemoryTimeout(
+                "memory scan exceeded 8 seconds; previous freshness retained",
+                operation="source scan",
+                path=name,
+                files_hashed=len(values),
+                budget_seconds=budget,
+                elapsed_seconds=time.monotonic() - started,
             )
         path = root / name
         if (
@@ -198,7 +303,7 @@ def snapshot(root):
             or not path.is_file()
         ):
             continue
-        values[name] = digest(path, deadline)
+        values[name] = file_stamp(path)
     return values
 
 
@@ -232,9 +337,20 @@ def code_files(files):
     }
 
 
+def backend_path(root, backend):
+    if backend == "graphify":
+        for directory in (".graphify", "graphify-out"):
+            path = root / directory / "graph.json"
+            if path.is_file():
+                return path
+        if (root / ".graphify").is_dir():
+            return root / ".graphify/graph.json"
+    return root / BACKENDS[backend]
+
+
 def artifact(root, backend):
-    path = root / BACKENDS[backend]
-    return digest(path, time.monotonic() + 5) if path.is_file() else None
+    path = backend_path(root, backend)
+    return file_stamp(path) if path.is_file() else None
 
 
 def prune_graphify(root, current):
@@ -243,7 +359,7 @@ def prune_graphify(root, current):
     Graphify's older code rebuild keeps semantic nodes and returns early when no
     code remains. Reconcile those cases without inferring any new relationships.
     """
-    path = root / BACKENDS["graphify"]
+    path = backend_path(root, "graphify")
     if not path.exists():
         return
     graph = read_json(path)
@@ -281,7 +397,7 @@ def prune_graphify(root, current):
                 if not removed.intersection(edge.get("nodes", []))
             ]
     write_json(path, graph)
-    (root / "graphify-out/GRAPH_REPORT.md").write_text(
+    path.with_name("GRAPH_REPORT.md").write_text(
         "# Graphify refresh\n\nDeleted or generated sources were removed from graph.json.\nRegenerate the semantic report before using it as wiki evidence.\n"
     )
 
@@ -332,7 +448,8 @@ def refresh(root, state, current, repo, backends):
             if not executable:
                 raise RuntimeError(f"{backend} is unavailable; inspect source directly")
             before = artifact(root, backend)
-            index_path = root / BACKENDS[backend]
+            index_path = backend_path(root, backend)
+            before_path = index_path
             before_mtime = (
                 index_path.stat().st_mtime_ns if index_path.exists() else None
             )
@@ -346,11 +463,11 @@ def refresh(root, state, current, repo, backends):
                     if not previous or previous.get("identity") != repo or deleted
                     else "update"
                 )
-                output = run(root, [executable, mode, "--repo", str(root)], 40)
+                output = run(root, [executable, mode, "--repo", str(root)], 80)
             else:
                 # Installed Graphify 0.4.13 exposes a full code rebuild here.
                 # Do not use the mtime-only incremental skill merge for checkouts.
-                existing = read_json(root / BACKENDS["graphify"])
+                existing = read_json(index_path)
                 if existing and (
                     not isinstance(existing, dict)
                     or not isinstance(existing.get("nodes"), list)
@@ -363,18 +480,21 @@ def refresh(root, state, current, repo, backends):
                         "Malformed Graphify index preserved; inspect it before rebuilding"
                     )
                 if code_files(current):
-                    output = run(root, [executable, "update", str(root)], 40)
+                    output = run(root, [executable, "update", str(root)], 80)
                 else:
                     output = "No code sources remain; pruning stale code nodes."
-                    if not (root / BACKENDS["graphify"]).exists():
-                        write_json(
-                            root / BACKENDS["graphify"], {"nodes": [], "links": []}
-                        )
-                prune_graphify(root, current)
+                    if not index_path.exists():
+                        write_json(index_path, {"nodes": [], "links": []})
+                    prune_graphify(root, current)
+            index_path = backend_path(root, backend)
             after = artifact(root, backend)
             if (
                 not after
-                or (before == after and index_path.stat().st_mtime_ns == before_mtime)
+                or (
+                    before_path == index_path
+                    and before == after
+                    and index_path.stat().st_mtime_ns == before_mtime
+                )
                 or re.search(
                     r"rebuild failed|Traceback \(most recent call last",
                     output,
@@ -384,6 +504,9 @@ def refresh(root, state, current, repo, backends):
                 raise RuntimeError(
                     "backend did not produce a verified changed index; freshness remains pending"
                 )
+            if backend == "graphify" and code_files(current):
+                prune_graphify(root, current)
+                after = artifact(root, backend)
             latest = snapshot(root)
             if code_files(latest) != code_files(current) or identity(root) != repo:
                 raise RuntimeError(
@@ -407,7 +530,57 @@ def refresh(root, state, current, repo, backends):
             RuntimeError,
             subprocess.SubprocessError,
         ) as error:
-            state.setdefault("errors", {})[backend] = str(error)[:500]
+            state.setdefault("errors", {})[backend] = timeout_message(root, error)[:500]
+
+
+def query_brief(output, words):
+    """Keep source locations and uncertainty; the complete response stays on disk."""
+    try:
+        data = json.loads(output)
+        if not isinstance(data, dict):
+            return output[:1000]
+    except ValueError:
+        return output[:1000]
+    lines = [str(data.get("summary", data.get("status", "Graph query")))[:400]]
+    if data.get("error"):
+        lines.append(str(data["error"])[:500])
+    if data.get("confidence"):
+        lines.append(str(data["confidence"])[:500])
+    rows = data.get("results", [])
+    if not isinstance(rows, list):
+        rows = []
+    rows = [row for row in rows if isinstance(row, dict)]
+    rows.sort(key=lambda row: -sum(word in str(row).lower() for word in words))
+    for row in rows[:5]:
+        lines.append(
+            json.dumps(
+                {
+                    key: row[key]
+                    for key in (
+                        "name",
+                        "file_path",
+                        "line_start",
+                        "call_site",
+                        "importer",
+                        "file",
+                        "via_package",
+                        "indirect",
+                        "inferred_by",
+                    )
+                    if key in row
+                },
+                ensure_ascii=True,
+            )
+        )
+    count = data.get("result_count")
+    if type(count) is not int or count < len(rows):
+        count = len(rows)
+    omitted = max(0, count - min(5, len(rows)))
+    if omitted:
+        lines.append(
+            f"{omitted} more results; inspect the full evidence before concluding absence."
+        )
+    return "\n".join(lines)
 
 
 def context(root, task, files, status, architecture=False):
@@ -441,6 +614,8 @@ def context(root, task, files, status, architecture=False):
     }
     if selected and status["crg"]["status"] == "current":
         value["code_context"] = []
+        evidence_dir = root / ".cache/project-memory/context"
+        evidence_dir.mkdir(parents=True, exist_ok=True)
         for name in selected[:5]:
             for query in ("file_summary", "importers_of", "tests_for"):
                 try:
@@ -456,33 +631,76 @@ def context(root, task, files, status, architecture=False):
                         ],
                         5,
                     )
+                    evidence = evidence_dir / (
+                        hashlib.sha256(output.encode()).hexdigest() + ".txt"
+                    )
+                    evidence.write_text(output, encoding="utf-8")
                     value["code_context"].append(
-                        {"file": name, "query": query, "output": output[:2500]}
+                        {
+                            "file": name,
+                            "query": query,
+                            "output": query_brief(output, words),
+                            "evidence": str(evidence.relative_to(root)),
+                            "raw_chars": len(output),
+                        }
                     )
                 except (OSError, subprocess.SubprocessError) as error:
                     value["code_context"].append(
-                        {"file": name, "query": query, "error": str(error)[:250]}
+                        {
+                            "file": name,
+                            "query": query,
+                            "error": timeout_message(root, error)[:250],
+                        }
                     )
     if (
         architecture
         and status["graphify"]["status"] != "disabled"
-        and (root / BACKENDS["graphify"]).exists()
+        and backend_path(root, "graphify").exists()
     ):
         try:
             value["architecture_context"] = run(
-                root, ["graphify", "query", task, "--budget", "1500"], 15
+                root,
+                [
+                    "graphify",
+                    "query",
+                    task,
+                    "--budget",
+                    "1500",
+                    "--graph",
+                    str(backend_path(root, "graphify")),
+                ],
+                15,
             )[:8000]
         except (OSError, subprocess.SubprocessError) as error:
-            value["architecture_context"] = str(error)[:250]
+            value["architecture_context"] = timeout_message(root, error)[:250]
+    records = value.get("code_context", [])
+    metrics = {
+        "query_count": len(records),
+        "raw_chars": sum(item.get("raw_chars", 0) for item in records),
+        "context_payload_chars": len(json.dumps(value)),
+        "measured_tokens": None,
+    }
+    metrics_path = root / ".cache/project-memory/context-usage.jsonl"
+    metrics_path.parent.mkdir(parents=True, exist_ok=True)
+    with metrics_path.open("a", encoding="utf-8") as stream:
+        stream.write(json.dumps(metrics) + "\n")
     return value
 
 
 def handle(root, args, payload=None):
+    if (
+        args.action == "hook"
+        and (payload or {}).get("hook_event_name") == "PostToolUse"
+    ):
+        return {}
     global DEADLINE
     previous = DEADLINE
-    DEADLINE = time.monotonic() + (55 if args.action == "hook" else 120)
+    DEADLINE = time.monotonic() + (110 if args.action == "hook" else 120)
     try:
         return handle_locked(root, args, payload)
+    except MemoryTimeout as error:
+        timeout_message(root, error)
+        raise
     finally:
         DEADLINE = previous
 
@@ -493,9 +711,15 @@ def handle_locked(root, args, payload=None):
         ".cache/project-memory",
         ".cache/project-memory/state.json",
         ".cache/project-memory/lock",
+        ".cache/project-memory/context",
+        ".cache/project-memory/context-usage.jsonl",
         "graphify-out",
         "graphify-out/needs_update",
         "graphify-out/GRAPH_REPORT.md",
+        ".graphify",
+        ".graphify/graph.json",
+        ".graphify/needs_update",
+        ".graphify/GRAPH_REPORT.md",
         *BACKENDS.values(),
     ):
         if not (root / name).resolve().is_relative_to(root):
@@ -517,18 +741,13 @@ def handle_locked(root, args, payload=None):
         state["observed"] = current
         state["identity"] = repo
         backends = []
-        event = (payload or {}).get("hook_event_name", "")
-        if args.action in {"context", "refresh"} or event == "PreToolUse":
+        if args.action in {"context", "refresh"}:
             backends = ["crg"]
             if (
                 args.architecture
                 or "graphify" in (payload or {}).get("tool_name", "").lower()
             ):
                 backends.append("graphify")
-        elif event == "Stop":
-            backends = [
-                key for key, path in BACKENDS.items() if (root / path).is_file()
-            ]
         backends = [key for key in backends if policy.get(key, True)]
         refresh(root, state, current, repo, backends)
         status = freshness(root, state, current, repo)
@@ -536,9 +755,9 @@ def handle_locked(root, args, payload=None):
             backends
             and policy.get("graphify", True)
             and status["semantic"]["status"] != "reviewed"
-            and (root / "graphify-out").is_dir()
+            and backend_path(root, "graphify").parent.is_dir()
         ):
-            (root / "graphify-out/needs_update").write_text(
+            backend_path(root, "graphify").with_name("needs_update").write_text(
                 "Documents need semantic review; code refresh does not complete it.\n"
             )
         for key in BACKENDS:
@@ -567,7 +786,9 @@ def handle_locked(root, args, payload=None):
                 "evidence": args.evidence,
             }
             status = freshness(root, state, current, repo)
-            (root / "graphify-out/needs_update").unlink(missing_ok=True)
+            backend_path(root, "graphify").with_name("needs_update").unlink(
+                missing_ok=True
+            )
         write_json(cache / "state.json", state)
         value = {
             "freshness": status,
@@ -582,10 +803,92 @@ def handle_locked(root, args, payload=None):
         return value
 
 
+def usage_report(root):
+    """Local measurements, never a conversion from text size to weekly allowance."""
+    instructions = {
+        str(path.relative_to(root)): len(path.read_text(encoding="utf-8"))
+        for path in (root / "AGENTS.md", root / "CLAUDE.md")
+        if path.is_file()
+    }
+    hooks = []
+    errors = []
+    for path in (root / ".cache/quality-sessions").glob("*.json"):
+        try:
+            records = json.loads(path.read_text()).get("history", [])
+            if not isinstance(records, list) or any(
+                not isinstance(item, dict)
+                or not isinstance(item.get("event"), str)
+                or not isinstance(item.get("status"), str)
+                for item in records
+            ):
+                errors.append(f"{path.name}: invalid history")
+                continue
+            hooks.extend(records)
+        except (OSError, ValueError, AttributeError) as error:
+            errors.append(f"{path.name}: {type(error).__name__}")
+    retrieval = []
+    path = root / ".cache/project-memory/context-usage.jsonl"
+    if path.is_file():
+        try:
+            retrieval = [json.loads(line) for line in path.read_text().splitlines()]
+            if any(not isinstance(item, dict) for item in retrieval):
+                errors.append("context usage: invalid records")
+                retrieval = []
+        except (OSError, ValueError) as error:
+            errors.append(f"context usage: {type(error).__name__}")
+    groups = {}
+    for item in hooks:
+        key = f"{item['event']}:{item['status']}"
+        group = groups.setdefault(
+            key, {"events": 0, "emitted_bytes": 0, "command_count": 0}
+        )
+        group["events"] += 1
+        for field in ("emitted_bytes", "command_count"):
+            number = item.get(field)
+            if type(number) is int and number >= 0 and group[field] is not None:
+                group[field] += number
+            else:
+                group[field] = None
+    for group in groups.values():
+        group["bytes_per_event"] = (
+            round(group["emitted_bytes"] / group["events"], 1)
+            if group["emitted_bytes"] is not None
+            else None
+        )
+    retrieval_totals = {}
+    for field in ("raw_chars", "context_payload_chars"):
+        numbers = [item.get(field) for item in retrieval]
+        retrieval_totals[field] = (
+            sum(numbers)
+            if numbers
+            and all(type(number) is int and number >= 0 for number in numbers)
+            else None
+        )
+    return {
+        "schema": 1,
+        "instruction_chars": instructions,
+        "workflow_chars": sum(
+            len(path.read_text()) for path in (root / "agent").glob("*/*.md")
+        ),
+        "hook_events": groups,
+        "retrieval": {
+            "requests": len(retrieval),
+            **retrieval_totals,
+        }
+        if retrieval
+        else None,
+        "main_agent_tokens": None,
+        "weekly_allowance_saved": None,
+        "errors": errors,
+        "note": "Local text measurements only; no combined token or weekly allowance estimate. Compare identical workloads and fresh session records.",
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "action", choices=("hook", "status", "context", "refresh", "accept-semantic")
+        "action",
+        choices=("hook", "status", "context", "refresh", "accept-semantic", "usage"),
     )
     parser.add_argument(
         "--provider",
@@ -601,7 +904,12 @@ def main():
     parser.add_argument("--snapshot")
     parser.add_argument("--evidence", default="")
     args = parser.parse_args()
+    root = args.root.resolve()
     try:
+        if args.action == "usage":
+            value = usage_report(root)
+            print(json.dumps(value, indent=2))
+            return 1 if value["errors"] else 0
         if args.action == "context" and not args.task.strip():
             raise ValueError("context requires --task describing the current request")
         if args.action == "accept-semantic" and not args.evidence.strip():
@@ -671,16 +979,17 @@ def main():
         RuntimeError,
         subprocess.SubprocessError,
     ) as error:
+        message = timeout_message(root, error)
         if args.action == "hook":
             print(
                 json.dumps(
                     {
-                        "systemMessage": f"Project memory unavailable: {error}. Continue with source inspection."
+                        "systemMessage": f"Project memory unavailable: {message}. Continue with source inspection."
                     }
                 )
             )
             return 0
-        print(f"Project memory unavailable: {error}", file=sys.stderr)
+        print(f"Project memory unavailable: {message}", file=sys.stderr)
         return 1
 
 

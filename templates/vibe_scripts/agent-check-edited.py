@@ -26,6 +26,7 @@ EXCLUDED_DIRS = {
     "build",
     "coverage",
     "dist",
+    ".graphify",
     "graphify-out",
     "node_modules",
     "obsidian",

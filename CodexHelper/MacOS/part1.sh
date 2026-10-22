@@ -17,7 +17,7 @@ INSTALLER_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 IFS=$'\n\t'
 
 SCRIPT_NAME="$(basename "$0")"
-SCRIPT_VERSION="2026-10-12-v44"
+SCRIPT_VERSION="2026-10-19-v45"
 YES=0
 DRY_RUN=0
 FORCE=0
@@ -522,6 +522,11 @@ version_marker_for_path() {
 add_managed_version_marker() {
 	local path="$1"
 	local content="$2"
+	# This resource carries its managed marker inside valid JSON.
+	if [[ "$path" == "agent/codex/evaluation.json" ]]; then
+		printf '%s' "$content"
+		return
+	fi
 	local marker
 	marker="$(version_marker_for_path "$path")"
 
@@ -587,6 +592,18 @@ write_file() {
 	local path="$1"
 	local content="$2"
 	local mode="${3:-0644}"
+	case "$path" in
+	agent/codex/usage.md | agent/codex/evaluation.json | agent/codex/procedures.md)
+		if [[ "$REFRESH_MANAGED" == "1" ]]; then
+			local ownership_helper="$INSTALLER_DIR/../../templates/vibe_scripts/managed-install.py"
+			[[ -f "$ownership_helper" ]] || ownership_helper="$INSTALLER_DIR/../templates/vibe_scripts/managed-install.py"
+			if ! python3 "$ownership_helper" resource-writable --provider codex --path "$path"; then
+				warn "Preserving custom workflow resource: $path"
+				return 0
+			fi
+		fi
+		;;
+	esac
 	local existing_version versioned_content
 
 	# Shared project memory is never replaced by installer scaffolding.
@@ -1653,6 +1670,21 @@ setup_adhd() {
 	fi
 }
 
+install_graphify_skill() {
+	local src
+	for src in "$HELPER_ROOT/../templates/vibe_scripts/install-graphify.py" "$HELPER_ROOT/templates/vibe_scripts/install-graphify.py"; do
+		if [[ -f "$src" ]]; then
+			if python3 "$src" --platform codex --refresh "$FORCE" --dry-run "$DRY_RUN" --binary "$(resolve_binary graphify 2>/dev/null || true)"; then
+				[[ "$DRY_RUN" == "1" ]] || record_install_ok "Graphify Codex skill ready"
+			else
+				record_install_failed "Graphify setup failed"
+			fi
+			return 0
+		fi
+	done
+	record_install_failed "Graphify installer template missing"
+}
+
 install_global_tools() {
 	if [[ "$SKIP_GLOBAL" == "1" ]]; then
 		log "Skipping global tool installs (--repo-only/--skip-global)."
@@ -1740,7 +1772,7 @@ install_global_tools() {
 		log "Verified code-review-graph executable: $(resolve_binary code-review-graph)"
 		if [[ "$EXISTING_HELPER_INSTALL" != "1" || "$FRESH_INSTALL" == "1" || "$configure_crg" == "1" ]]; then
 			if confirm "Configure code-review-graph for Codex MCP?"; then
-				if run_cli code-review-graph install --platform codex --no-instructions; then
+				if run_cli code-review-graph install --platform codex --no-hooks --no-instructions; then
 					record_install_ok "code-review-graph Codex integration configured"
 				else
 					warn "code-review-graph Codex install failed."
@@ -1772,21 +1804,7 @@ install_global_tools() {
 		warn "Skipping code-review-graph Codex setup because the executable is missing."
 	fi
 
-	if [[ "$FORCE" == "1" ]] && have_cli graphify; then
-		if uv_tool_installed graphifyy; then
-			run uv uv tool upgrade graphifyy || record_install_failed "graphifyy refresh failed via uv"
-		elif pipx_package_installed graphifyy; then
-			run pipx pipx upgrade graphifyy || record_install_failed "graphifyy refresh failed via pipx"
-		else
-			warn "graphify is installed but is not owned by uv or pipx; leaving the package unchanged."
-			record_install_skipped "graphifyy refresh skipped: unmanaged installation"
-		fi
-		if run_cli graphify install --platform codex; then
-			record_install_ok "Graphify Codex skill refreshed"
-		else
-			record_install_failed "Graphify Codex skill refresh failed"
-		fi
-	fi
+	install_graphify_skill
 
 	# part2.sh handles installation and Makefile wiring.
 
@@ -1881,6 +1899,8 @@ has_source_file() {
 		-o -name 'dist' \
 		-o -name 'build' \
 		-o -name 'coverage' \
+		-o -name '.graphify' \
+		-o -name 'graphify-out' \
 		-o -name '.cache' \
 		-o -name '.venv' \
 		-o \( -type d -exec test -f '{}/pyvenv.cfg' \; \) \) -prune \
@@ -1970,6 +1990,8 @@ detect_file_signals() {
 		-o -name 'dist' \
 		-o -name 'build' \
 		-o -name 'coverage' \
+		-o -name '.graphify' \
+		-o -name 'graphify-out' \
 		-o -name '.cache' \
 		-o -name '.venv' \
 		-o -name '__pycache__' \
@@ -2002,6 +2024,35 @@ create_agent_files() {
 # Agent instructions
 
 Use this repository with minimal, verifiable changes.
+
+## Required working priorities
+
+These are the authoritative project workflow priorities for every model and
+delegated agent. Apply them before optional tool or skill suggestions, while
+following explicit user instructions and required safety and verification checks.
+
+1. Reuse scripts first. Before repeating a task, check the project's documented
+   commands and existing scripts. Run the maintained script that covers the task;
+   do not recreate its steps manually or spend LLM tokens doing its work again.
+2. When repeated work lacks a suitable script, create or extend the smallest
+   reusable script that completes the authorized task. Parameterize inputs that
+   actually vary, handle failures and safe reruns, and document its invocation in
+   the existing command documentation. Avoid speculative options, frameworks and
+   new dependencies when existing helpers or the standard library suffice.
+3. Keep detailed logs on disk; abbreviate only the output sent to the LLM. On
+   success, return a short status, required result, duration and log path. On
+   failure, add the failing step, relevant diagnostic excerpt and next action;
+   preserve the nonzero exit status. Redact secrets from logs and summaries.
+   Read only the relevant log section when more context is needed. Do not dump
+   full logs or rerun a task just to obtain more verbose output.
+4. Check scope before implementation, when new findings suggest extra work, and
+   before completion. Compare the plan and final diff with the user's requested
+   outcome. Findings do not authorize unrelated fixes, refactors, investigations
+   or deployment changes. Before expanding scope, explain the proposed addition,
+   why it matters and its tradeoff, then ask whether the user wants it included.
+   Wait before doing that extra work; continue independent authorized work.
+   Routine steps needed for the agreed outcome remain authorized. If work has
+   drifted, stop the extra work and report it without discarding existing edits.
 
 For any failure, read the diagnostic first. Prefer formatted or structured
 output; use its reported cause, location and suggested correction to choose the
@@ -2044,15 +2095,7 @@ work already authorized by the user without adding approval steps.
 
 ## Simple tasks through OmniRoute
 
-For a simple bounded task, if OmniRoute use is not already authorized, ask once:
-"Do you want to try OmniRoute for this task to save tokens?"
-Wait for the user's reply before sending any task or context. If they decline,
-continue with the current agent. After approval, try one bounded request using
-`python3 vibe_scripts/codex/omniroute.py ask --task edit` with the task on stdin.
-Choose `code`, `edit`, `summary` or `extract` to match the bounded task.
-Read `/agent/codex/omniroute.md` for the delegation and mandatory review rules.
-If the helper is unavailable or its proposal fails review, continue with the
-current agent; do not spend this task repeatedly trying free models.
+Before delegation, read `/agent/codex/omniroute.md`. Obtain consent before sending task/context, honor existing consent, attempt once, and review the proposal and actual checks. Prefer local scripts when they settle the task.
 
 Before editing:
 - Read relevant `/codebase-wiki/` pages for durable repo memory.
@@ -2069,7 +2112,7 @@ Before editing:
 - Read only the minimal files needed.
 
 Repo memory workflow:
-- Treat `graphify-out/` as generated analysis, not everyday context.
+- Treat `.graphify/` and legacy `graphify-out/` as generated analysis, not everyday context.
 - Promote only stable, reusable facts into `codebase-wiki/`; do not copy raw Graphify output.
 - Use `make -f vibe_scripts/codex/Makefile wiki-ai` to draft concise wiki updates from Graphify/session context, then review the result before relying on it.
 - After changes, update `codebase-wiki/` only when the task reveals durable architecture, testing, security, or integration knowledge.
@@ -2085,6 +2128,39 @@ Implementation rules:
 - Formatting is available only through `make -f vibe_scripts/codex/Makefile edited-ai`; never add or use a `format-ai` target.
 - Never weaken or change tests, quality configuration, analyzed paths, ignore rules, baselines, hooks, wrappers, or controlled Make targets merely to make a check pass. Fix the implementation instead. Change quality infrastructure only when explicitly required by the user, and call out every such change to the sentinel.
 - When touching frontend files, apply the frontend design touch gate in `/agent/codex/coding-rules.md` even if no design skill is invoked.
+
+Quality command recovery:
+Before running a quality command, read `/agent/codex/procedures.md` for the mandatory controlled routes and recovery rules. Checks remain mandatory; blocked or skipped checks are not passes.
+
+Before final answer:
+- Read `/agent/codex/procedures.md` and complete its diff, manifest, review and verification requirements.
+- Report changed files, checks, blockers and remaining risks. Never stage automatically.
+
+Session logging:
+- Append each user query to `notes/queries.md` with the current date and keep prior entries intact.
+- Add a `Session ID:` line immediately after each query entry when a terminal session ID is available.
+- Append each user query and assistant reply to `notes/conversation-log.md` with the current date and keep prior entries intact.
+- Include the current terminal session ID on each conversation-log `User:` line when available.
+EOF_AGENTS
+	agents_md="${agents_md%$'\n'}"
+
+	local usage_asset usage_source usage_content
+	for usage_asset in usage.md evaluation.json; do
+		usage_source="$INSTALLER_DIR/../../templates/token-evaluation/$usage_asset"
+		[[ -f "$usage_source" ]] || usage_source="$INSTALLER_DIR/../templates/token-evaluation/$usage_asset"
+		[[ -f "$usage_source" ]] || {
+			err "Required usage resource missing: $usage_asset"
+			return 1
+		}
+		usage_content="$(cat "$usage_source")"
+		usage_content="${usage_content//@PROVIDER@/codex}"
+		usage_content="${usage_content//@HELPER@/CodexHelper}"
+		write_file "agent/codex/$usage_asset" "$usage_content" 0644
+	done
+
+	local procedures_md
+	IFS= read -r -d '' procedures_md <<'EOF_QUALITY_PROCEDURES' || :
+# Quality and delivery procedures
 
 Quality command recovery:
 Run approved commands from the repository root. If a hook blocks a quality command, immediately retry with the approved replacement below, inspect its output and exit status, and fix reported issues. A blocked attempt is not verification; do not silently skip the check or finish claiming it passed.
@@ -2130,13 +2206,8 @@ Before final answer:
 - Summarize tests/checks run.
 - Explain remaining risks.
 
-Session logging:
-- Append each user query to `notes/queries.md` with the current date and keep prior entries intact.
-- Add a `Session ID:` line immediately after each query entry when a terminal session ID is available.
-- Append each user query and assistant reply to `notes/conversation-log.md` with the current date and keep prior entries intact.
-- Include the current terminal session ID on each conversation-log `User:` line when available.
-EOF_AGENTS
-	agents_md="${agents_md%$'\n'}"
+EOF_QUALITY_PROCEDURES
+	write_file "agent/codex/procedures.md" "$procedures_md" 0644
 
 	write_file "AGENTS.md" "$agents_md"
 
@@ -2147,13 +2218,7 @@ EOF_AGENTS
 
 This folder contains durable instructions for AI coding agents. Keep `AGENTS.md` short and put details here.
 
-Read order for non-trivial tasks:
-1. `AGENTS.md`
-2. `/agent/codex/commands.md`
-3. `/agent/codex/context-strategy.md`
-4. `/agent/codex/coding-rules.md`
-5. `/agent/codex/verify.md`
-6. Relevant pages in `/codebase-wiki/`
+Read startup instructions once. For non-trivial planning, read `/agent/codex/context-strategy.md` and relevant wiki pages. Read coding rules before implementation, commands and verification guidance before checks, and procedures before delivery. Reuse already-read guidance unless it changes. Read `/agent/codex/usage.md` when measuring allowance or choosing model/routing workflows.
 
 Default workflow:
 1. Understand the task and expected behavior.
@@ -2179,6 +2244,9 @@ EOF_AGENT_INDEX
 # Repository commands for agents
 
 Prefer existing project commands. These standard targets should exist after bootstrap:
+
+Allowance measurements: `python3 vibe_scripts/codex/project-memory.py usage`. Read
+`/agent/codex/usage.md` for the fixed comparison pack and model/routing trials.
 
 ```bash
 make setup
@@ -2362,8 +2430,8 @@ scope is separate from graph coverage and the files needed for inspection.
 4. State the planned change and affected tests using that evidence. Inspection
    paths do not authorize edits, design reviews or changes outside the request.
 
-Memory hooks record actual changes after edits and shell commands. Graph queries
-and task boundaries batch refreshes; unchanged content does not trigger a rebuild.
+Automatic memory hooks are disabled. Use the context or refresh command explicitly;
+ordinary edits, reads and completion do not trigger graph maintenance.
 Graphify's supported code refresh may rebuild all code. Documents have separate
 semantic freshness; code refresh never completes document review. Hooks do not
 run semantic inference or install tools. Existing global/custom graph watchers
@@ -2512,7 +2580,7 @@ EOF_CONVERSATION_HEADER
 ensure_cache_gitignored() {
 	local marker="# VibeHelper local AI/dev tooling"
 	local block
-	block=$'# VibeHelper local AI/dev tooling\n*.bak\n*.bak.*\n.cache/\n.agents/\n.claude/\n.codex/\n.mcp.json\nAGENTS.md\nCLAUDE.md\nagent/\nagents/\ncodebase-wiki/\ngraphify-out/\nnode_modules/\nnotes/\nobsidian/\nvendor/\n/vibe_scripts/\n/skills-lock.json\nbiome.json\n'
+	block=$'# VibeHelper local AI/dev tooling\n*.bak\n*.bak.*\n.cache/\n.agents/\n.claude/\n.codex/\n.mcp.json\nAGENTS.md\nCLAUDE.md\nagent/\nagents/\ncodebase-wiki/\n.graphify/\ngraphify-out/\nnode_modules/\nnotes/\nobsidian/\nvendor/\n/vibe_scripts/\n/skills-lock.json\nbiome.json\n'
 	if [[ "$DRY_RUN" == "1" ]]; then
 		log "Would ensure .gitignore has VibeHelper local-file entries"
 		return 0
@@ -2562,19 +2630,19 @@ create_makefile() {
 		lint_parts+=('command -v biome >/dev/null 2>&1 && biome check . || echo "biome not installed; skipping web lint"')
 	fi
 	if [[ "$HTML_FILES" -gt 0 ]]; then
-		lint_parts+=('command -v htmlhint >/dev/null 2>&1 && htmlhint --ignore "**/.git/**,**/.agents/**,**/.claude/**,**/.codex/**,**/node_modules/**,**/vendor/**,**/dist/**,**/build/**,**/coverage/**,**/graphify-out/**,**/.cache/**,**/.venv/**" "**/*.html" || echo "htmlhint not installed; skipping HTML lint"')
+		lint_parts+=('command -v htmlhint >/dev/null 2>&1 && htmlhint --ignore "**/.git/**,**/.agents/**,**/.claude/**,**/.codex/**,**/node_modules/**,**/vendor/**,**/dist/**,**/build/**,**/coverage/**,**/.graphify/**,**/graphify-out/**,**/.cache/**,**/.venv/**" "**/*.html" || echo "htmlhint not installed; skipping HTML lint"')
 	fi
 	if [[ "$has_markdown" -eq 1 ]]; then
-		lint_parts+=('command -v markdownlint-cli2 >/dev/null 2>&1 && markdownlint-cli2 "**/*.md" "**/*.markdown" "#**/.agents/**" "#**/.claude/**" "#**/.codex/**" "#**/node_modules/**" "#**/vendor/**" "#**/dist/**" "#**/build/**" "#**/coverage/**" "#**/graphify-out/**" "#**/.git/**" "#**/.cache/**" "#**/.venv/**" "#**/obsidian/**" || echo "markdownlint-cli2 not installed; skipping Markdown lint"')
+		lint_parts+=('command -v markdownlint-cli2 >/dev/null 2>&1 && markdownlint-cli2 "**/*.md" "**/*.markdown" "#**/.agents/**" "#**/.claude/**" "#**/.codex/**" "#**/node_modules/**" "#**/vendor/**" "#**/dist/**" "#**/build/**" "#**/coverage/**" "#**/.graphify/**" "#**/graphify-out/**" "#**/.git/**" "#**/.cache/**" "#**/.venv/**" "#**/obsidian/**" || echo "markdownlint-cli2 not installed; skipping Markdown lint"')
 	fi
 	if [[ "$has_php" -eq 1 ]]; then
 		setup_parts+=('command -v composer >/dev/null 2>&1 && [ -f composer.json ] && composer install || echo "composer not installed or composer.json missing; skipping PHP dependency install"')
-		lint_parts+=('if command -v php >/dev/null 2>&1; then find . \( -name .agents -o -name .claude -o -name .codex -o -name vendor -o -name node_modules -o -name dist -o -name build -o -name coverage -o -name graphify-out -o -name .git -o -name .cache -o -name .venv \) -prune -o -name "*.php" -print0 | xargs -0 -n1 php -l; else echo "php not installed; skipping PHP syntax lint"; fi')
-		lint_parts+=('if [ -x vendor/bin/phpcs ]; then vendor/bin/phpcs --standard=PSR12 --extensions=php --ignore=.agents/*,.claude/*,.codex/*,vendor/*,node_modules/*,dist/*,build/*,coverage/*,graphify-out/*,.git/*,.cache/*,.venv/* .; else echo "vendor/bin/phpcs not installed; skipping PHPCS"; fi')
-		typecheck_parts+=('if [ -x vendor/bin/phpstan ]; then find . \( -name .agents -o -name .claude -o -name .codex -o -name vendor -o -name node_modules -o -name dist -o -name build -o -name coverage -o -name graphify-out -o -name .git -o -name .cache -o -name .venv \) -prune -o -name "*.php" -print0 | xargs -0 vendor/bin/phpstan analyse --memory-limit=1G --no-progress --; else echo "vendor/bin/phpstan not installed; skipping PHPStan"; fi')
+		lint_parts+=('if command -v php >/dev/null 2>&1; then find . \( -name .agents -o -name .claude -o -name .codex -o -name vendor -o -name node_modules -o -name dist -o -name build -o -name coverage -o -name .graphify -o -name graphify-out -o -name .git -o -name .cache -o -name .venv \) -prune -o -name "*.php" -print0 | xargs -0 -n1 php -l; else echo "php not installed; skipping PHP syntax lint"; fi')
+		lint_parts+=('if [ -x vendor/bin/phpcs ]; then vendor/bin/phpcs --standard=PSR12 --extensions=php --ignore=.agents/*,.claude/*,.codex/*,vendor/*,node_modules/*,dist/*,build/*,coverage/*,.graphify/*,graphify-out/*,.git/*,.cache/*,.venv/* .; else echo "vendor/bin/phpcs not installed; skipping PHPCS"; fi')
+		typecheck_parts+=('if [ -x vendor/bin/phpstan ]; then find . \( -name .agents -o -name .claude -o -name .codex -o -name vendor -o -name node_modules -o -name dist -o -name build -o -name coverage -o -name .graphify -o -name graphify-out -o -name .git -o -name .cache -o -name .venv \) -prune -o -name "*.php" -print0 | xargs -0 vendor/bin/phpstan analyse --memory-limit=1G --no-progress --; else echo "vendor/bin/phpstan not installed; skipping PHPStan"; fi')
 	fi
 	if [[ "$has_shell" -eq 1 ]]; then
-		lint_parts+=('if command -v shellcheck >/dev/null 2>&1; then find . \( -name .agents -o -name .claude -o -name .codex -o -name vendor -o -name node_modules -o -name dist -o -name build -o -name coverage -o -name graphify-out -o -name .git -o -name .cache -o -name .venv \) -prune -o \( -name "*.sh" -o -name "*.bash" -o -name "*.zsh" \) -print0 | xargs -0 -r shellcheck; else echo "shellcheck not installed; skipping shell lint"; fi')
+		lint_parts+=('if command -v shellcheck >/dev/null 2>&1; then find . \( -name .agents -o -name .claude -o -name .codex -o -name vendor -o -name node_modules -o -name dist -o -name build -o -name coverage -o -name .graphify -o -name graphify-out -o -name .git -o -name .cache -o -name .venv \) -prune -o \( -name "*.sh" -o -name "*.bash" -o -name "*.zsh" \) -print0 | xargs -0 -r shellcheck; else echo "shellcheck not installed; skipping shell lint"; fi')
 	fi
 	if [[ "$has_go" -eq 1 ]]; then
 		setup_parts+=('go mod download')
@@ -2727,7 +2795,14 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 WIKI_DIR = ROOT / "codebase-wiki"
-GRAPH_REPORT = ROOT / "graphify-out" / "GRAPH_REPORT.md"
+GRAPH_REPORT = next(
+    (
+        ROOT / directory / "GRAPH_REPORT.md"
+        for directory in (".graphify", "graphify-out")
+        if (ROOT / directory / "GRAPH_REPORT.md").is_file()
+    ),
+    ROOT / ".graphify" / "GRAPH_REPORT.md",
+)
 AGENTS_MD = ROOT / "AGENTS.md"
 
 
@@ -2892,7 +2967,7 @@ def main() -> int:
             "architecture",
             f"""## Generated Repo Map
 
-Source: AGENTS.md and graphify-out/GRAPH_REPORT.md.
+Source: AGENTS.md and {GRAPH_REPORT.relative_to(ROOT)}.
 
 ### Project Shape
 {keep(heading_block(agents, "Project Structure & Module Organization"), 10, "No project-structure guidance found in AGENTS.md.")}
@@ -2954,7 +3029,7 @@ Source: AGENTS.md.
             "known-issues",
             f"""## Generated Known-Issue Candidates
 
-Source: graphify-out/GRAPH_REPORT.md. These are review prompts, not confirmed bugs.
+Source: {GRAPH_REPORT.relative_to(ROOT)}. These are review prompts, not confirmed bugs.
 
 ### Surprising Connections To Review
 {keep(surprising, 8, "No surprising connections found.")}
@@ -2969,7 +3044,7 @@ Source: graphify-out/GRAPH_REPORT.md. These are review prompts, not confirmed bu
             "risky-areas",
             f"""## Generated Risk Map
 
-Source: AGENTS.md and graphify-out/GRAPH_REPORT.md.
+Source: AGENTS.md and {GRAPH_REPORT.relative_to(ROOT)}.
 
 ### Security Baseline
 {keep(heading_block(agents, "Security & Configuration Tips"), 8, "No security baseline found in AGENTS.md.")}
@@ -3066,7 +3141,7 @@ create_verify_script() {
 
 create_project_memory() {
 	local name src content
-	for name in project-memory.py install-project-memory.py; do
+	for name in project-memory.py install-project-memory.py git-policy.py cleanup-cache.py; do
 		src="$INSTALLER_DIR/../../templates/vibe_scripts/$name"
 		[[ -f "$src" ]] || src="$INSTALLER_DIR/../templates/vibe_scripts/$name"
 		[[ -f "$src" ]] || {
@@ -3077,9 +3152,9 @@ create_project_memory() {
 		write_file "vibe_scripts/codex/$name" "$content" "0755"
 	done
 	if [[ "$DRY_RUN" == "1" ]]; then
-		log "Would configure scoped project memory hooks and exclusions."
+		log "Would remove automatic memory hooks; keep explicit graph commands and exclusions."
 	else
-		python3 vibe_scripts/codex/install-project-memory.py --provider codex --hooks "$CREATE_CODEX_HOOKS"
+		python3 vibe_scripts/codex/install-project-memory.py --provider codex --hooks 0 --configure-hooks "$CREATE_CODEX_HOOKS"
 	fi
 }
 
@@ -4334,7 +4409,7 @@ apply_codex_hook_config() {
 	fi
 
 	log "Searching for Codex config file"
-	local candidate target global_hook
+	local candidate target global_hook global_content
 	while IFS= read -r candidate; do
 		if [[ -f "$candidate" ]]; then
 			printf '  found:   %s\n' "$candidate"
@@ -4345,6 +4420,9 @@ apply_codex_hook_config() {
 
 	target="$(choose_codex_config_target)"
 	global_hook="$HOME/.codex/hooks/ai_git_blocker.py"
+	if [[ "$DRY_RUN" != "1" ]]; then
+		global_content="$(python3 vibe_scripts/codex/git-policy.py .codex/hooks/pre_tool_use_policy.py)" || return 1
+	fi
 
 	if [[ -f "$target" ]]; then
 		log "Selected Codex config: $target"
@@ -4357,9 +4435,9 @@ apply_codex_hook_config() {
 		grep -Fq '# CodexHelper-Version:' "$global_hook"; then
 		if [[ "$DRY_RUN" == "1" ]]; then
 			log "Would back up and refresh existing global Codex hook: $global_hook"
-		elif ! cmp -s .codex/hooks/pre_tool_use_policy.py "$global_hook"; then
+		elif [[ "$(cat "$global_hook")" != "$global_content" ]]; then
 			backup_file "$global_hook"
-			cp .codex/hooks/pre_tool_use_policy.py "$global_hook"
+			printf '%s\n' "$global_content" >"$global_hook"
 			chmod 0755 "$global_hook"
 			log "Refreshed existing global Codex hook: $global_hook"
 		fi
@@ -4395,13 +4473,13 @@ apply_codex_hook_config() {
 
 	log "Preparing global Codex hook file: $global_hook"
 	if [[ "$DRY_RUN" == "1" ]]; then
-		log "Would copy .codex/hooks/pre_tool_use_policy.py -> $global_hook"
+		log "Would generate mutation-only policy -> $global_hook"
 		log "Would update $target with hooks = true and a managed PreToolUse block"
 		return 0
 	fi
 
 	mkdir -p "$(dirname "$global_hook")" "$(dirname "$target")"
-	cp ".codex/hooks/pre_tool_use_policy.py" "$global_hook"
+	printf '%s\n' "$global_content" >"$global_hook"
 	chmod 0755 "$global_hook"
 
 	python3 - "$target" "$global_hook" <<'PY_CODEX_CONFIG'
@@ -4929,6 +5007,7 @@ Model claims about tests are not evidence.
 Apply only the reviewed changes, run the normal controlled edited and relevant
 quality checks, and inspect their actual results. Keep the required independent
 sentinel review. Delegation never relaxes the repository quality rules.
+After review, record the attempt outcome with `python3 vibe_scripts/codex/omniroute.py review --attempt-id ID --outcome accepted` (or revised/rejected). Omit unknown measurements; see `/agent/codex/usage.md`.
 Summarize accepted work and review findings concisely; do not paste the entire
 worker response into the conversation. Usage returned by the gateway describes
 that call only; do not claim measured main-model savings without a baseline.
