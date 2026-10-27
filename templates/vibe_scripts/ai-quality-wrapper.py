@@ -738,7 +738,7 @@ def run_quality(
         r"\b\d+(?:\.\d+)?\s*(?:s|seconds)\b", "<duration>", "\n".join(parsed)
     )
     signature = hashlib.sha256(stable_diagnostics.encode()).hexdigest()
-    return result(
+    value = result(
         status,
         label,
         parsed,
@@ -750,6 +750,77 @@ def run_quality(
         output_bytes=len(output),
         diagnostic_signature=signature,
     )
+    save_summary(value, root=cwd or Path.cwd(), max_lines=max_lines)
+    return value
+
+
+def save_summary(value: dict, *, root: Path, max_lines: int = 30) -> None:
+    """Keep a bounded entry point beside complete diagnostic evidence."""
+    if value.get("summary_log"):
+        path = Path(value["summary_log"])
+    elif value.get("log"):
+        path = Path(value["log"]).with_suffix(".summary.log")
+    elif value.get("evidence"):
+        path = (root / value["evidence"]).with_suffix(".summary.log")
+    else:
+        path = (
+            root
+            / ".cache/ai-quality"
+            / f"{time.time_ns()}-{os.getpid()}-{slugify(value['label'])}.summary.log"
+        )
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        value["summary_log"] = str(path)
+        if not value.get("log") and not value.get("evidence"):
+            evidence = path.with_suffix(".json")
+            value["evidence"] = str(evidence)
+            evidence.write_text(json.dumps(value), encoding="utf-8")
+        bounded = dict(value)
+        bounded["summary"] = trim_lines(
+            "\n".join(value["summary"]),
+            min(max_lines, 12),
+            preserve_failures=value["status"] != "passed",
+        )[0]
+        path.write_text(render_result(bounded, max_lines) + "\n", encoding="utf-8")
+    except OSError as exc:
+        value.pop("summary_log", None)
+        value["status"] = "tool_failure"
+        value.pop("explicitly_skipped", None)
+        value["summary"].insert(
+            0,
+            f"Cannot save summary log: {one_line(exc)}. Check disk space and permissions.",
+        )
+
+
+def bound_output(text: str, max_lines: int = 30, max_bytes: int = 4096) -> str:
+    """Bound model-facing text after metadata; complete evidence remains on disk."""
+    lines = text.splitlines()
+    if len(lines) <= max_lines and len(text.encode()) <= max_bytes:
+        return text
+    metadata = [
+        line
+        for line in lines
+        if line.startswith(
+            (
+                "Full result:",
+                "[ai-quality] summary log",
+                "[ai-quality] full log",
+                "[ai-quality] duration",
+                "Summary log",
+            )
+        )
+    ][-4:]
+    footer = "\n".join(metadata).encode()[-2000:].decode("utf-8", errors="ignore")
+    body = [line for line in lines if line not in metadata][
+        : max_lines - len(metadata) - 1
+    ]
+    notice = "\n... output abbreviated; see saved evidence ...\n"
+    budget = max_bytes - len((notice + footer).encode())
+    return (
+        "\n".join(body).encode()[:budget].decode("utf-8", errors="ignore")
+        + notice
+        + footer
+    )
 
 
 def render_result(value: dict, max_lines: int = 30) -> str:
@@ -758,9 +829,16 @@ def render_result(value: dict, max_lines: int = 30) -> str:
     lines.extend(details[:max_lines])
     if len(details) > max_lines:
         lines.append(f"... {len(details) - max_lines} diagnostics omitted ...")
+    lines.append(
+        f"[ai-quality] duration: {value.get('duration_seconds', 0)}s; exit code: {value.get('returncode', 'not available')}"
+    )
+    if value.get("summary_log"):
+        lines.append(f"[ai-quality] summary log (read first): {value['summary_log']}")
     if value.get("log"):
         lines.append(f"[ai-quality] full log: {value['log']}")
-    return "\n".join(lines)
+    if value.get("evidence"):
+        lines.append(f"Full result: {value['evidence']}")
+    return bound_output("\n".join(lines))
 
 
 def parse_args() -> argparse.Namespace:

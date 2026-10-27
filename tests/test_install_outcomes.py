@@ -159,9 +159,26 @@ def test_markdownlint_preserves_biome_defaults_and_custom_formats(
     MANAGED.configure_markdownlint(tmp_path)
     assert path.read_text() == original
     assert not list(tmp_path.glob("biome*.bak.*"))
-    assert json.loads((tmp_path / ".markdownlint.json").read_text()) == {
-        "MD013": {"line_length": 200}
-    }
+    assert json.loads((tmp_path / ".markdownlint.json").read_text()) == {"MD013": False}
+
+
+def test_markdownlint_migrates_legacy_generated_config(tmp_path):
+    path = write(
+        tmp_path / ".markdownlint.json",
+        '{"MD013": {"line_length": 200}}\n',
+    )
+    MANAGED.configure_markdownlint(tmp_path, dry_run=True)
+    assert json.loads(path.read_text()) == {"MD013": {"line_length": 200}}
+    MANAGED.configure_markdownlint(tmp_path)
+    assert json.loads(path.read_text()) == {"MD013": False}
+
+
+def test_markdownlint_migration_does_not_follow_symlink(tmp_path):
+    previous = '{"MD013": {"line_length": 200}}\n'
+    external = write(tmp_path / "external-markdownlint.json", previous)
+    (tmp_path / ".markdownlint.json").symlink_to(external)
+    MANAGED.configure_markdownlint(tmp_path)
+    assert external.read_text() == previous
 
 
 def test_markdownlint_does_not_follow_biome_symlink(tmp_path):
@@ -371,8 +388,17 @@ def test_standalone_quality_phase_installs_runtime(tmp_path, provider, platform)
             check=False,
         )
         assert checked.returncode == 0, checked.stderr
-        assert json.loads(checked.stdout) == {}, checked.stderr
-    assert "Tests were not run by this hook" in checked.stderr
+        outcome = json.loads(checked.stdout)
+        if event == "SessionStart":
+            assert outcome == {}, checked.stderr
+        elif outcome:
+            assert outcome.get("decision") == "block", outcome
+        else:
+            # A deletion may pass only after real package checks, never an empty skip.
+            evidence = sorted((repo / ".cache/quality-sessions/results").glob("*.json"))
+            final = json.loads(evidence[-1].read_text())
+            assert final["status"] == "passed" and final["command_count"] > 0, final
+    assert "Tests were not run by this hook" in checked.stderr + checked.stdout
 
 
 def test_cleanup_rejects_outside_scope_and_symlink_parent(tmp_path):

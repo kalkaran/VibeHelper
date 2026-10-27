@@ -1,6 +1,5 @@
 """Shared installer-smoke assertions for generated lint file selection."""
 
-import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -26,14 +25,9 @@ if not empty:
             (root / directory / f"installed{extension}").write_text("fixture\n")
 
 makefile = (root / f"vibe_scripts/{provider}/Makefile").read_text()
-# Preserve the generated pipeline's maintained selector and empty-input guard.
-line = next(line for line in makefile.splitlines() if f"--label lint-{kind} " in line)
-command = shlex.split(line.lstrip("\t@"))[-1]
-pipeline = shlex.split(command)[-1]
-assert "agent-check-edited.py --list-files " + " ".join(extensions) in pipeline, (
-    pipeline
-)
-assert f"xargs -0 -r {tool}" in pipeline, pipeline
+# Default lint uses task scope; full selection remains explicit and filtered.
+assert "lint-all-ai:" in makefile
+assert "agent-check-edited.py --mode lint --all" in makefile
 result = subprocess.run(
     [
         sys.executable,

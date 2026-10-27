@@ -1,0 +1,17 @@
+  warning: skill is from graphify 0.9.92, package is 0.4.13. Run 'graphify install' to update.
+  warning: skill is from graphify 0.9.92, package is 0.4.13. Run 'graphify install' to update.
+
+graphify token reduction benchmark
+──────────────────────────────────────────────────
+  Corpus:          46,300 words → ~61,733 tokens (naive)
+  Graph:           926 nodes, 1,529 edges
+  Avg query cost:  ~2,093 tokens
+  Reduction:       29.5x fewer tokens per query
+
+  Per question:
+    [29.9x] how does authentication work
+    [21.4x] what is the main entry point
+    [34.7x] how are errors handled
+    [24.4x] what connects the data layer to the api
+    [51.0x] what are the core abstractions
+

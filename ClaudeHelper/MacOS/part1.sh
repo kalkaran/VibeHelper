@@ -1329,9 +1329,9 @@ def log_hook_error(reason: str, *, raw: str = "", error: Exception | None = None
         "reason": reason,
     }
     if error is not None:
-        entry["error"] = str(error)
+        entry["error_type"] = type(error).__name__
     if raw:
-        entry["stdin_preview"] = raw[:8000]
+        entry["input_bytes"] = len(raw.encode("utf-8", errors="replace"))
     try:
         root = os.environ.get("CLAUDE_PROJECT_DIR")
         base = Path(root) if root else Path.cwd()
@@ -1616,9 +1616,9 @@ def log_hook_error(reason: str, *, raw: str = "", error: Exception | None = None
         "reason": reason,
     }
     if error is not None:
-        entry["error"] = str(error)
+        entry["error_type"] = type(error).__name__
     if raw:
-        entry["stdin_preview"] = raw[:8000]
+        entry["input_bytes"] = len(raw.encode("utf-8", errors="replace"))
     try:
         root = os.environ.get("CLAUDE_PROJECT_DIR")
         base = Path(root) if root else Path.cwd()
@@ -1761,9 +1761,9 @@ def log_hook_error(reason: str, *, raw: str = "", error: Exception | None = None
         "reason": reason,
     }
     if error is not None:
-        entry["error"] = str(error)
+        entry["error_type"] = type(error).__name__
     if raw:
-        entry["stdin_preview"] = raw[:8000]
+        entry["input_bytes"] = len(raw.encode("utf-8", errors="replace"))
     try:
         root = os.environ.get("CLAUDE_PROJECT_DIR")
         base = Path(root) if root else Path.cwd()
@@ -2037,6 +2037,30 @@ CLAUDEMD_EOF
 	IFS= read -r -d '' procedures_md <<'EOF_QUALITY_PROCEDURES' || :
 # Quality and delivery procedures
 
+Read the linked `.summary.log` first. It contains bounded diagnostics, status,
+duration and the full-log path. Open only the relevant section of a full log
+when the summary is insufficient; never concatenate full logs into agent context.
+
+`edited-ai` selects current-session edits, including shell changes since
+SessionStart. It does not include unrelated dirty/untracked files or stale edit
+lists. When session evidence is unavailable, verification remains blocked; use
+`./vibe_scripts/claude/agent-verify.sh edited PATH ...` for explicit task files.
+`lint-ai` checks current-session changes without formatting; use
+`agent-verify.sh lint PATH ...` to preserve explicit task files.
+`lint-all-ai` (or `agent-verify.sh lint --all`) explicitly checks the full project.
+`verify-ai` retains broader verification and does not format files.
+Automatic checks lint/format only supported, existing session-edited files.
+Unsupported files, metadata, media and deletions are skipped. Config changes never
+expand file targets. Missing required tools and actual lint/format failures block.
+Tests, builds, type checks, design review and Fallow run separately on request.
+Preserve explicit paths when replacing a blocked tool command: use
+`agent-verify.sh lint PATH ...` for checks and `agent-verify.sh edited PATH ...`
+for formatting/autofixes. The replacement table does not override file scope.
+Automatic hooks emit only PASS on success and nothing when no files apply.
+Failures show concise diagnostics and an evidence path. Unchanged blocked Stops
+reuse their evidence without running tools again; explicit checks always run.
+Full logs stay on disk. Do not expand task scope to repair unrelated findings.
+
 Before final answer:
 - After code changes, create or replace `git-add.txt` at the repository root. Inspect each candidate diff and include only files necessary for the intended change: source, relevant tests, required configuration, documentation and requested assets. Include additions, modifications and deletions, and both paths for renames. Never fill the list blindly from all Git status output.
 - Exclude ignored files, secrets, local agent settings, session notes, logs, backups, caches, installed dependencies, build output, temporary screenshots/reports and the manifest itself. Include package manifests only for intentional package configuration changes, and lockfiles only when required by intentional dependency or toolchain changes; requested deliverables and fixtures may be included after review.
@@ -2084,6 +2108,9 @@ AGENTIDX_EOF
 # Repository commands for agents
 
 Prefer existing project commands. These standard targets may exist after bootstrap:
+
+Codex token dashboard: `python3 vibe_scripts/claude/usage-tracker.py dashboard`.
+Setup and coverage: `vibe_scripts/claude/usage-tracker.md`. Collection is local and makes no model calls.
 
 Allowance measurements: `python3 vibe_scripts/claude/project-memory.py usage`. Read
 `/agent/claude/usage.md` for the fixed comparison pack and model/routing trials.
@@ -2662,6 +2689,9 @@ install_shared_vibe_script "update-codebase-wiki.py"
 install_shared_vibe_script "project-memory.py"
 install_shared_vibe_script "install-project-memory.py"
 install_shared_vibe_script "cleanup-cache.py"
+install_shared_vibe_script "usage-tracker.py"
+install_shared_vibe_script "usage-tracker.patch"
+install_shared_vibe_script "usage-tracker.md"
 install_generated_repo_files
 install_agent_scaffold_files
 install_shared_vibe_script "agent-verify.sh"

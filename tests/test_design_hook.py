@@ -96,7 +96,7 @@ def test_design_projection(project, name, before, after, design):
 
 
 @pytest.mark.parametrize("provider", ["codex", "claude"])
-def test_completion_only_scopes_and_deduplicates_design(project, monkeypatch, provider):
+def test_lint_completion_does_not_run_design_detection(project, monkeypatch, provider):
     (project / "theme.css").write_text("body {color:black}")
     (project / "untouched.html").write_text('<h1 class="old">Existing dirty UI</h1>')
     (project / "tracking.ts").write_text("export const track = 1;")
@@ -127,12 +127,12 @@ def test_completion_only_scopes_and_deduplicates_design(project, monkeypatch, pr
     )
     assert not calls
     assert HOOK.handle(project, provider, "Stop", payload) == {}
-    assert calls == [["impeccable", "detect", "theme.css"]]
+    assert calls == []
     assert HOOK.handle(project, provider, "Stop", payload) == {}
-    assert len(calls) == 1
+    assert calls == []
     (project / "theme.css").write_text("body {color:blue}")
     HOOK.handle(project, provider, "Stop", payload)
-    assert len(calls) == 2
+    assert calls == []
 
 
 def test_new_logic_file_does_not_become_design_work(project, monkeypatch):
@@ -146,7 +146,7 @@ def test_new_logic_file_does_not_become_design_work(project, monkeypatch):
 
 
 @pytest.mark.parametrize("status", ["findings", "tool_failure"])
-def test_failed_review_stays_pending(project, monkeypatch, status):
+def test_design_failure_does_not_enter_lint_completion(project, monkeypatch, status):
     path = project / "page.html"
     path.write_text("<h1>Before</h1>")
     payload = {"session_id": "pending"}
@@ -161,9 +161,8 @@ def test_failed_review_stays_pending(project, monkeypatch, status):
     monkeypatch.setattr(HOOK.QUALITY, "run_quality", run)
     for _ in range(2):
         result = HOOK.handle(project, "codex", "Stop", payload)
-        assert result["decision"] == "block"
-        assert "UI design review" in result["reason"]
-    assert len(calls) == 2
+        assert result == {}
+    assert calls == []
 
 
 @pytest.mark.parametrize("options", [{"enabled": False}, {"consent": "declined"}])

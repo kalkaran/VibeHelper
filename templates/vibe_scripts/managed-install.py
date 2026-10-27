@@ -3,6 +3,7 @@
 
 import argparse
 import ast
+import contextlib
 import fcntl
 import hashlib
 import json
@@ -228,14 +229,30 @@ def configure_test_verification(root, provider, dry_run=False):
 
 
 def configure_markdownlint(root, dry_run=False):
-    if not any(root.glob(".markdownlint*")):
+    configs = list(root.glob(".markdownlint*"))
+    if not configs:
         if dry_run:
-            print("needs action: would create .markdownlint.json with line length 200")
+            print("needs action: would disable Markdown line-length linting")
         else:
             (root / ".markdownlint.json").write_text(
-                json.dumps({"MD013": {"line_length": 200}}, indent=2) + "\n"
+                json.dumps({"MD013": False}, indent=2) + "\n"
             )
-            print("configured: Markdownlint line length 200")
+            print("configured: Markdown line-length linting disabled")
+    else:
+        config = safe(root, ".markdownlint.json")
+        if config is not None and config.is_file():
+            try:
+                previous = json.loads(config.read_text())
+            except (OSError, UnicodeError, ValueError):
+                previous = None
+            if previous == {"MD013": {"line_length": 200}}:
+                if dry_run:
+                    print(
+                        "needs action: would disable legacy Markdown line-length linting"
+                    )
+                else:
+                    config.write_text(json.dumps({"MD013": False}, indent=2) + "\n")
+                    print("configured: disabled legacy Markdown line-length linting")
     path = safe(root, "biome.json")
     if path is None or (root / "biome.jsonc").exists():
         print(
@@ -438,6 +455,200 @@ def resource_writable(root, provider, name):
         return False
 
 
+def quality_assets(root, provider):
+    """Prepare only quality resources; never run the general installer or fixers."""
+    source = Path(__file__).parent
+    assets = {
+        f"vibe_scripts/{provider}/{name}": (source / name).read_bytes()
+        for name in (
+            "agent-check-edited.py",
+            "agent-verify.sh",
+            "ai-quality-wrapper.py",
+            "quality-hook.py",
+        )
+    }
+    helper = "CodexHelper" if provider == "codex" else "ClaudeHelper"
+    installer = (source.parents[1] / helper / "MacOS/part1.sh").read_text()
+    procedures = installer.split("<<'EOF_QUALITY_PROCEDURES' || :\n", 1)[1].split(
+        "\nEOF_QUALITY_PROCEDURES", 1
+    )[0]
+    assets[f"agent/{provider}/procedures.md"] = (procedures + "\n").encode()
+    if provider == "codex":
+        hook = installer.split("cat <<'EOF_PRE_HOOK'\n", 1)[1].split(
+            "\nEOF_PRE_HOOK", 1
+        )[0]
+        assets[".codex/hooks/pre_tool_use_policy.py"] = (hook + "\n").encode()
+    name = f"vibe_scripts/{provider}/Makefile"
+    makefile = safe(root, name)
+    if makefile is None or not makefile.is_file():
+        raise ValueError("Quality refresh requires an existing managed Makefile")
+    text = makefile.read_text()
+    command = f"\t@python3 vibe_scripts/{provider}/agent-check-edited.py --mode lint"
+    pattern = r"(?m)^lint-ai:[^\n]*\n(?:\t[^\n]*\n|\n)*"
+    if not re.search(pattern, text):
+        raise ValueError("Quality refresh cannot locate the managed lint target")
+    text = re.sub(pattern, "lint-ai:\n" + command + "\n\n", text)
+    if not re.search(r"(?m)^lint-all-ai:", text):
+        addition = "\n.PHONY: lint-all-ai\nlint-all-ai:\n" + command + " --all\n\n"
+        marker = "# <<< ClaudeHelper managed targets"
+        text = (
+            text.replace(marker, addition + marker, 1)
+            if marker in text
+            else text + addition
+        )
+    else:
+        text = re.sub(
+            r"(?m)^lint-all-ai:[^\n]*\n(?:\t[^\n]*\n|\n)*",
+            "lint-all-ai:\n" + command + " --all\n\n",
+            text,
+        )
+
+    def verify(match):
+        return (
+            match[0]
+            .replace(" edited-ai", " lint-all-ai")
+            .replace(" lint-ai", " lint-all-ai")
+        )
+
+    text = re.sub(r"(?m)^verify-ai:[^\n]*\n(?:\t[^\n]*\n|\n)*", verify, text)
+    assets[name] = text.encode()
+    return assets
+
+
+def install_usage_tracker(
+    root,
+    provider,
+    dry_run=False,
+    *,
+    quality=False,
+    previous_source=None,
+    reviewed_makefile_sha256=None,
+):
+    """Refresh authorized assets in an existing installation, retaining ownership."""
+    label = "Quality" if quality else "Usage tracker"
+    receipt = safe(root, f".cache/vibehelper-install/{provider}.json")
+    if receipt is None or not receipt.is_file():
+        raise ValueError(f"{label} refresh requires an existing managed installation")
+    guard = safe(root, f".cache/vibehelper-install/{provider}.guard")
+    if guard is None:
+        raise ValueError("Installation guard is a symlink")
+    with contextlib.nullcontext() if dry_run else guard.open("a") as stream:
+        if stream is not None:
+            fcntl.flock(stream, fcntl.LOCK_EX)
+        if (receipt.parent / f"{provider}.lock").exists():
+            raise ValueError("An installation is already active")
+        owned = json.loads(receipt.read_text())
+        if not isinstance(owned, dict):
+            raise TypeError("Invalid installation receipt")
+        assets = {}
+        content_by_name = (
+            quality_assets(root, provider)
+            if quality
+            else {
+                f"vibe_scripts/{provider}/usage-tracker.{suffix}": (
+                    Path(__file__).parent / f"usage-tracker.{suffix}"
+                ).read_bytes()
+                for suffix in ("py", "patch", "md")
+            }
+        )
+        for name, content in content_by_name.items():
+            destination = safe(root, name)
+            previous = (
+                previous_source / Path(name).name
+                if previous_source
+                and name
+                in {
+                    f"vibe_scripts/{provider}/{asset}"
+                    for asset in (
+                        "agent-check-edited.py",
+                        "agent-verify.sh",
+                        "ai-quality-wrapper.py",
+                        "quality-hook.py",
+                    )
+                }
+                else None
+            )
+            matches_previous = bool(
+                quality
+                and destination
+                and destination.is_file()
+                and previous
+                and previous.is_file()
+                and destination.read_bytes() == previous.read_bytes()
+            )
+            if (
+                quality
+                and previous_source
+                and name == ".codex/hooks/pre_tool_use_policy.py"
+                and destination
+                and destination.is_file()
+            ):
+                old_installer = (
+                    previous_source.parents[1] / "CodexHelper/MacOS/part1.sh"
+                )
+                if old_installer.is_file():
+                    old_hook = (
+                        old_installer.read_text()
+                        .split("cat <<'EOF_PRE_HOOK'\n", 1)[1]
+                        .split("\nEOF_PRE_HOOK", 1)[0]
+                        + "\n"
+                    )
+                    installed_hook = re.sub(
+                        r"(?m)^# CodexHelper-Version: [^\n]+\n",
+                        "",
+                        destination.read_text(),
+                    )
+                    matches_previous = installed_hook == old_hook
+            if (
+                quality
+                and name == f"vibe_scripts/{provider}/Makefile"
+                and destination
+                and destination.is_file()
+                and reviewed_makefile_sha256
+            ):
+                matches_previous = digest(destination) == reviewed_makefile_sha256
+            if destination is None or not (
+                resource_writable(root, provider, name) or matches_previous
+            ):
+                raise ValueError(
+                    f"Preserving modified or symlinked managed asset: {name}"
+                )
+            assets[name] = (
+                destination,
+                content,
+            )
+        if dry_run:
+            print(f"{label} preview: {provider}, {len(assets)} assets, {root}")
+            return
+        # Back up only authorized assets; the ordinary installer owns all others.
+        previous = {
+            path: path.read_bytes() if path.exists() else None
+            for path, _ in assets.values()
+        }
+        old_receipt = receipt.read_bytes()
+        try:
+            for name, (path, content) in assets.items():
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(content)
+                if (
+                    quality
+                    and path.name == "agent-verify.sh"
+                    and previous[path] is None
+                ):
+                    path.chmod(0o755)
+                owned[name] = digest(path)
+            receipt.write_text(json.dumps(owned, indent=2) + "\n")
+        except OSError:
+            for path, content in previous.items():
+                if content is None:
+                    path.unlink(missing_ok=True)
+                else:
+                    path.write_bytes(content)
+            receipt.write_bytes(old_receipt)
+            raise
+        print(f"{label} refreshed: {provider}, {len(assets)} assets, {root}")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -450,6 +661,8 @@ def main():
             "migrate",
             "merge-codex",
             "resource-writable",
+            "usage-tracker",
+            "quality-refresh",
         ],
     )
     parser.add_argument("--provider", choices=["codex", "claude"], required=True)
@@ -461,8 +674,27 @@ def main():
     parser.add_argument("--skipped", action="append", default=[])
     parser.add_argument("--quality-only", action="store_true")
     parser.add_argument("--path")
+    parser.add_argument(
+        "--previous-source",
+        type=Path,
+        help="Explicit reviewed previous quality source; permits only exact byte matches",
+    )
+    parser.add_argument(
+        "--reviewed-makefile-sha256",
+        help="Explicit hash of the reviewed quality Makefile for a stale receipt",
+    )
     args = parser.parse_args()
     root = args.root.resolve()
+    if args.operation in {"usage-tracker", "quality-refresh"}:
+        install_usage_tracker(
+            root,
+            args.provider,
+            args.dry_run,
+            quality=args.operation == "quality-refresh",
+            previous_source=args.previous_source,
+            reviewed_makefile_sha256=args.reviewed_makefile_sha256,
+        )
+        return
     if args.operation == "resource-writable":
         if not args.path or not resource_writable(root, args.provider, args.path):
             raise SystemExit(1)

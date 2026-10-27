@@ -43,6 +43,84 @@ def test_structured_pass_and_metrics(tmp_path):
     assert value["duration_seconds"] > 0
     assert value["output_bytes"] == len("finished\n")
     assert "finished" in Path(value["log"]).read_text()
+    assert "fixture: passed" in Path(value["summary_log"]).read_text()
+
+
+@pytest.mark.parametrize("exit_code", [0, 1])
+def test_saved_summary_is_bounded_and_links_complete_log(tmp_path, exit_code):
+    value = command(
+        tmp_path,
+        f"[print('detail', i) for i in range(100)]; raise SystemExit({exit_code})",
+    )
+    summary = Path(value["summary_log"]).read_text()
+    assert len(summary.splitlines()) <= 16
+    assert "detail 50" in Path(value["log"]).read_text()
+    assert "detail 50" not in summary
+    assert str(value["log"]) in summary
+    assert f"exit code: {exit_code}" in summary and "duration:" in summary
+    assert value["status"] == ("passed" if exit_code == 0 else "findings")
+
+
+def test_summary_write_failure_stays_blocking(tmp_path, monkeypatch):
+    write = Path.write_text
+
+    def fail_summary(path, *args, **kwargs):
+        if path.name.endswith(".summary.log"):
+            raise OSError("fixture disk full")
+        return write(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", fail_summary)
+    value = command(tmp_path, "print('finished')")
+    assert value["status"] == "tool_failure"
+    assert "summary_log" not in value
+    assert "fixture disk full" in value["summary"][0]
+    assert "finished" in Path(value["log"]).read_text()
+
+
+@pytest.mark.parametrize("provider", ["codex", "claude"])
+def test_edited_scope_excludes_prior_work_and_keeps_shell_changes(
+    tmp_path, monkeypatch, provider
+):
+    git(tmp_path, "init", "-q")
+    (tmp_path / ".gitignore").write_text("__pycache__/\n")
+    scripts = tmp_path / "vibe_scripts" / provider
+    scripts.mkdir(parents=True)
+    for name in ["agent-check-edited.py", "ai-quality-wrapper.py", "quality-hook.py"]:
+        shutil.copy(TEMPLATES / name, scripts / name)
+    monkeypatch.setattr(CHECKER, "__file__", str(scripts / "agent-check-edited.py"))
+    monkeypatch.setenv(
+        "CODEX_THREAD_ID" if provider == "codex" else "CLAUDE_SESSION_ID", "current"
+    )
+    for name in ["dirty.py", "shell.py", "removed.py"]:
+        (tmp_path / name).write_text("before\n")
+    git(tmp_path, "add", "dirty.py", "shell.py", "removed.py")
+    git(
+        tmp_path,
+        "-c",
+        "user.name=Fixture",
+        "-c",
+        "user.email=fixture@example.invalid",
+        "commit",
+        "-qm",
+        "baseline",
+    )
+    (tmp_path / "dirty.py").write_text("preexisting dirty work\n")
+    (tmp_path / "untracked.py").write_text("preexisting untracked work\n")
+    HOOK.handle(tmp_path, provider, "SessionStart", {"session_id": "current"})
+    (tmp_path / "shell.py").write_text("session shell edit\n")
+    (tmp_path / "new.py").write_text("session new file\n")
+    (tmp_path / "removed.py").unlink()
+    (tmp_path / f".cache/{provider}-edited-files.txt").write_text(
+        "dirty.py\nuntracked.py\n"
+    )
+    assert CHECKER.recorded_edited_files(tmp_path) == [
+        "new.py",
+        "removed.py",
+        "shell.py",
+    ]
+    assert {"dirty.py", "untracked.py", "new.py"} <= set(
+        CHECKER.all_project_files(tmp_path)
+    )
 
 
 def test_native_findings_and_bounded_diagnostics(tmp_path):
@@ -84,6 +162,7 @@ def test_missing_tool_and_logging_failure(tmp_path):
     )
     assert value["status"] == "tool_failure"
     assert "No such file" in value["summary"][0]
+    assert "tool_failure" in Path(value["summary_log"]).read_text()
     (tmp_path / "not-a-directory").write_text("file")
     value = command(tmp_path, "print('never runs')", log_dir="not-a-directory/logs")
     assert value["status"] == "tool_failure"
@@ -97,6 +176,7 @@ def test_timeout_retains_partial_output_and_kills_children(tmp_path):
     assert value["status"] == "tool_failure"
     assert value["returncode"] == 124
     assert "partial failure" in Path(value["log"]).read_text()
+    assert "exit code: 124" in Path(value["summary_log"]).read_text()
     assert value["duration_seconds"] < 2
     time.sleep(1.1)
     assert not (tmp_path / "orphan").exists()
@@ -174,6 +254,12 @@ def test_phpcbf_version_specific_exit_status(
     (tmp_path / "demo.php").write_text("<?php")
     value = CHECKER.check_files(tmp_path, ["demo.php"])
     assert value["status"] == status
+    for step in value["results"]:
+        if step["label"] == "format-phpcbf-edited":
+            assert (
+                f"format-phpcbf-edited: {step['status']}"
+                in Path(step["summary_log"]).read_text()
+            )
 
 
 def test_required_missing_and_zero_checks_are_not_pass(tmp_path, monkeypatch):
@@ -207,40 +293,32 @@ def test_provider_delivery_preserves_edit_and_requests_stop_repair(provider):
     assert stopped["decision"] == "block"
     assert "continue" not in stopped
     assert HOOK.response(provider, "Stop", WRAPPER.result("passed", "lint", [])) == {}
-    assert "Reassessment" in HOOK.response(provider, "Stop", value, 3)["reason"]
-    exhausted = HOOK.response(provider, "Stop", value, 4)
-    assert exhausted["continue"] is False
-    assert "blocked/unverified" in exhausted["stopReason"]
+    exhausted = HOOK.response(provider, "Stop", value, repeated=True)
+    assert exhausted == {
+        "continue": False,
+        "stopReason": "BLOCKED — unchanged lint findings.",
+    }
 
 
 @pytest.mark.parametrize("provider", ["codex", "claude"])
 @pytest.mark.parametrize("status", ["findings", "tool_failure", "not_checked"])
-def test_scope_guidance_preserves_failure_diagnostics_and_blocks(provider, status):
+def test_failure_delivery_is_concise_and_still_blocks(provider, status):
     value = WRAPPER.result(status, "lint", ["demo.py:4 F821 undefined name"])
     original = json.loads(json.dumps(value))
     edit = HOOK.response(provider, "PostToolUse", value)
-    messages = [edit["hookSpecificOutput"]["additionalContext"]]
-    for attempts in (0, 3, 4):
-        stopped = HOOK.response(provider, "Stop", value, attempts)
-        if attempts < 4:
-            assert stopped["decision"] == "block"
-            assert "continue" not in stopped
-            messages.append(stopped["reason"])
-        else:
-            assert stopped["continue"] is False
-            messages.append(stopped["stopReason"])
-    for message in messages:
-        assert "original goal and agreed scope" in message
-        assert "Before each repair" in message
-        assert "ask for explicit scope approval and wait" in message
-        assert "Keep unresolved verification blocked" in message
+    stop = HOOK.response(provider, "Stop", value)
+    assert stop["decision"] == "block"
+    for message in [edit["hookSpecificOutput"]["additionalContext"], stop["reason"]]:
+        assert "Task scope:" not in message
         assert "demo.py:4 F821 undefined name" in message
+        assert len(message.splitlines()) <= 12
+        assert len(message.encode()) <= 2048
     assert value == original
 
 
 @pytest.mark.parametrize("event", ["SessionStart", "PostToolUse", "Stop"])
 @pytest.mark.parametrize("repeated", [False, True])
-def test_unavailable_hook_keeps_scope_guidance_and_blocking(event, repeated):
+def test_unavailable_hook_keeps_diagnostics_and_blocking(event, repeated):
     reply = HOOK.unavailable_response(event, "Missing session baseline", repeated)
     if event == "Stop":
         if repeated:
@@ -252,7 +330,7 @@ def test_unavailable_hook_keeps_scope_guidance_and_blocking(event, repeated):
     else:
         assert set(reply) == {"hookSpecificOutput"}
         message = reply["hookSpecificOutput"]["additionalContext"]
-    assert "ask for explicit scope approval and wait" in message
+    assert "Task scope:" not in message
     assert "Missing session baseline" in message
 
 
@@ -311,13 +389,14 @@ def test_sessions_are_isolated_and_repair_success_resets_attempts(
     monkeypatch.setattr(HOOK.CHECKER, "check_files", check)
     for _ in range(3):
         reply = HOOK.handle(tmp_path, "claude", "Stop", {"session_id": "one"})
-    assert "Reassessment" in reply["reason"]
+    assert reply["continue"] is False
     states = [
         json.loads(path.read_text())
         for path in (tmp_path / ".cache/quality-sessions").glob("*.json")
     ]
-    assert sorted(state["attempts"] for state in states) == [0, 3]
+    assert sorted(state["attempts"] for state in states) == [0, 1]
     status[0] = "passed"
+    (tmp_path / "demo.py").write_text("repaired")
     assert HOOK.handle(tmp_path, "claude", "Stop", {"session_id": "one"}) == {}
 
 
@@ -355,6 +434,23 @@ def test_targeted_verifier_validates_arguments_without_shell(tmp_path):
         ).returncode
         == 2
     )
+    assert not (tmp_path / "injected").exists()
+    (scripts / "agent-check-edited.py").write_text(
+        "import os,sys; print(os.environ['VIBEHELPER_EDITED_FILES_JSON']); sys.exit(3)"
+    )
+    (scripts / "Makefile").write_text(
+        "edited-ai:\n\t@echo custom-project-check\n\t@python3 vibe_scripts/codex/agent-check-edited.py\n"
+    )
+    edited = subprocess.run(
+        [*verifier, "edited", "file with spaces.py", "$(touch injected)"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert edited.returncode != 0
+    assert "custom-project-check" in edited.stdout
+    assert '["file with spaces.py", "$(touch injected)"]' in edited.stdout
     assert not (tmp_path / "injected").exists()
 
 
@@ -445,6 +541,7 @@ def test_native_excerpt_and_empty_test_status(tmp_path):
         tmp_path, "print('no tests ran'); raise SystemExit(5)", adapter="rtk:pytest"
     )
     assert value["status"] == "not_checked"
+    assert "not_checked" in Path(value["summary_log"]).read_text()
 
 
 def test_optional_design_detector_and_provider_record_isolation(tmp_path, monkeypatch):
@@ -464,13 +561,10 @@ def test_optional_design_detector_and_provider_record_isolation(tmp_path, monkey
     monkeypatch.setattr(
         CHECKER, "__file__", str(tmp_path / "vibe_scripts/codex/agent-check-edited.py")
     )
-    assert CHECKER.recorded_edited_files(tmp_path) == ["codex.py"]
-    git(tmp_path, "init", "-q")
-    (tmp_path / ".gitignore").write_text(".cache/\n.agents/\n")
-    (tmp_path / "new.py").write_text("print('new task edit')\n")
-    selected = CHECKER.recorded_edited_files(tmp_path)
-    assert {"codex.py", "new.py"} <= set(selected)
-    assert "claude.py" not in selected
+    monkeypatch.delenv("CODEX_THREAD_ID", raising=False)
+    monkeypatch.delenv("CODEX_SESSION_ID", raising=False)
+    with pytest.raises(ValueError, match="session ID"):
+        CHECKER.recorded_edited_files(tmp_path)
 
 
 def test_project_boundaries_cover_recorded_explicit_and_full_selection(
@@ -504,11 +598,10 @@ def test_project_boundaries_cover_recorded_explicit_and_full_selection(
     )
     (tmp_path / ".cache").mkdir()
     (tmp_path / ".cache/codex-edited-files.txt").write_text("\n".join(excluded))
-    assert not set(excluded) & set(
-        CHECKER.existing_project_files(
-            tmp_path, CHECKER.recorded_edited_files(tmp_path)
-        )
-    )
+    monkeypatch.delenv("CODEX_THREAD_ID", raising=False)
+    monkeypatch.delenv("CODEX_SESSION_ID", raising=False)
+    with pytest.raises(ValueError, match="session ID"):
+        CHECKER.recorded_edited_files(tmp_path)
     listed = subprocess.run(
         [
             sys.executable,
@@ -650,7 +743,7 @@ def test_restricted_child_discovery_reports_cleanup_limit(tmp_path, monkeypatch)
 
 @pytest.mark.parametrize("provider", ["codex", "claude"])
 @pytest.mark.parametrize("platform", ["MacOS", "WSL"])
-def test_fresh_hook_then_generated_edited_target_uses_git_fallback(
+def test_fresh_hook_then_generated_edited_target_uses_session_scope(
     tmp_path, provider, platform
 ):
     root = TEMPLATES.parents[1]
@@ -746,7 +839,7 @@ def test_fresh_hook_then_generated_edited_target_uses_git_fallback(
             "--extend-exclude" not in (repo / "vibe_scripts/codex/Makefile").read_text()
         )
     full_lint = subprocess.run(
-        ["make", "-f", f"vibe_scripts/{provider}/Makefile", "lint-ai"],
+        ["make", "-f", f"vibe_scripts/{provider}/Makefile", "lint-all-ai"],
         cwd=repo,
         env=env,
         capture_output=True,
@@ -792,10 +885,14 @@ def test_fresh_hook_then_generated_edited_target_uses_git_fallback(
             timeout=15,
         )
 
+    env["CODEX_THREAD_ID" if provider == "codex" else "CLAUDE_SESSION_ID"] = "fresh"
+    (repo / "source.sh").write_text("echo preexisting dirty work\n")
+    (repo / "unrelated.py").write_text("print('preexisting untracked work')\n")
     assert hook("SessionStart").returncode == 0
     (repo / "demo.py").write_text("print('task edit')\n")
     edit = hook("PostToolUse", {"tool_input": {"file_path": "demo.py"}})
-    assert "passed" in edit.stdout
+    assert json.loads(edit.stdout)["hookSpecificOutput"]["additionalContext"] == "PASS"
+    assert edit.stderr == ""
     assert not (repo / f".cache/{provider}-edited-files.txt").exists()
     checked = subprocess.run(
         ["make", "-f", str(scripts / "Makefile"), "edited-ai"],
@@ -808,6 +905,8 @@ def test_fresh_hook_then_generated_edited_target_uses_git_fallback(
     )
     assert checked.returncode == 0, checked.stdout + checked.stderr
     assert "lint-ruff-edited: passed" in checked.stdout
+    assert "lint-shellcheck-edited" not in checked.stdout
+    assert "summary log (read first):" in checked.stdout
 
 
 def test_infrastructure_stop_errors_end_repeated_continuation(tmp_path):

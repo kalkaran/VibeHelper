@@ -1169,11 +1169,12 @@ write_makefile() {
 			for cmd in "${LINT_CMDS[@]}"; do echo "	$cmd"; done
 			echo
 		fi
-		echo ".PHONY: lint-ai"
+		echo ".PHONY: lint-ai lint-all-ai"
 		echo "lint-ai:"
+		printf '\t@python3 vibe_scripts/codex/agent-check-edited.py --mode lint\n'
+		echo "lint-all-ai:"
+		printf '\t@python3 vibe_scripts/codex/agent-check-edited.py --mode lint --all\n'
 		local idx
-		for idx in "${!LINT_AI_CMDS[@]}"; do emit_ai_cmd "lint-${LINT_TARGETS[$idx]}" "${LINT_AI_CMDS[$idx]}" "${LINT_ADAPTERS[$idx]}"; done
-		printf '\t@python3 vibe_scripts/codex/fallow.py lint\n'
 		echo
 
 		if [[ ${#FORMAT_CMDS[@]} -gt 0 ]]; then
@@ -1252,7 +1253,7 @@ write_makefile() {
 		echo "verify-ai:"
 		local ai_deps=0
 		if [[ ${#LINT_CMDS[@]} -gt 0 ]]; then
-			echo "	@\$(MAKE) -f vibe_scripts/codex/Makefile lint-ai"
+			echo "	@\$(MAKE) -f vibe_scripts/codex/Makefile lint-all-ai"
 			ai_deps=1
 		fi
 		if [[ ${#TYPE_CMDS[@]} -gt 0 ]]; then

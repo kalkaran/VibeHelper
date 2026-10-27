@@ -239,7 +239,6 @@ helper_targets_expected() {
 	[[ "${CLAUDEHELPER_UNIFIED_INSTALL:-0}" == "1" ]]
 }
 
-wrapper='python3 vibe_scripts/claude/ai-quality-wrapper.py'
 targets=()
 verify_deps=()
 helper_expected=0
@@ -247,7 +246,6 @@ helper_targets_expected && helper_expected=1
 
 if [[ -f vibe_scripts/claude/agent-check-edited.py || "$helper_expected" -eq 1 ]]; then
 	targets+=("$(make_target edited-ai $'\t@python3 vibe_scripts/claude/agent-check-edited.py')")
-	verify_deps+=("edited-ai")
 fi
 
 if [[ -f vibe_scripts/claude/update-codebase-wiki.py || -d codebase-wiki || "$helper_expected" -eq 1 ]]; then
@@ -263,27 +261,9 @@ if [[ -f vibe_scripts/claude/agent-verify.sh || "$helper_expected" -eq 1 ]]; the
 	targets+=("$(make_target agent-verify $'\t@./vibe_scripts/claude/agent-verify.sh')")
 fi
 
-lint_commands=()
-if has_npm_script lint; then
-	lint_commands+=("$wrapper --label lint-npm --max-lines 30 -- npm run lint")
-fi
-if cmd_exists shellcheck; then
-	lint_commands+=("$wrapper --label lint-shell --max-lines 30 --shell -- $(printf %q "$(selected_files_command .sh shellcheck)")")
-fi
-if cmd_exists markdownlint-cli2 && has_markdown_files; then
-	lint_commands+=("$wrapper --label lint-markdown --max-lines 30 --shell -- $(printf %q "$(selected_files_command '.md .markdown' markdownlint-cli2)")")
-fi
-if [[ "${#lint_commands[@]}" -gt 0 ]]; then
-	verify_deps+=("lint-ai")
-fi
-lint_commands+=("python3 vibe_scripts/claude/fallow.py lint")
-if [[ "${#lint_commands[@]}" -gt 0 ]]; then
-	body=""
-	for command in "${lint_commands[@]}"; do
-		body+=$'\t@'"$command"$'\n'
-	done
-	targets+=("$(make_target lint-ai "$body")")
-fi
+targets+=("$(make_target lint-ai $'\t@python3 vibe_scripts/claude/agent-check-edited.py --mode lint')")
+targets+=("$(make_target lint-all-ai $'\t@python3 vibe_scripts/claude/agent-check-edited.py --mode lint --all')")
+verify_deps+=("lint-all-ai")
 
 if has_npm_script typecheck; then
 	targets+=("$(make_target typecheck-ai $'\t@python3 vibe_scripts/claude/ai-quality-wrapper.py --label typecheck-npm --max-lines 40 -- npm run typecheck')")

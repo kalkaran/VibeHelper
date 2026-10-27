@@ -14,6 +14,7 @@ import sys
 import tempfile
 import time
 import traceback
+from collections import Counter
 from pathlib import Path
 
 CODE = {
@@ -44,6 +45,9 @@ CODE = {
     ".scss",
     ".sql",
 }
+
+HOOK_ERROR_LOG_BYTES = 65536
+HOOK_ERROR_RECENT_RECORDS = 5
 CODE.update(
     {
         ".cc",
@@ -884,11 +888,104 @@ def usage_report(root):
     }
 
 
+def hook_errors_report(root):
+    """Summarize recent hook failures without exposing raw hook input."""
+    path = root / ".cache/hook-errors.log"
+    if not path.is_file():
+        return "No hook errors recorded."
+
+    try:
+        with path.open("rb") as stream:
+            size = stream.seek(0, os.SEEK_END)
+            start = max(0, size - HOOK_ERROR_LOG_BYTES)
+            stream.seek(start)
+            data = stream.read(min(size - start, HOOK_ERROR_LOG_BYTES))
+    except OSError as error:
+        return f"Hook error log unavailable: {type(error).__name__}."
+
+    if start:
+        _, separator, data = data.partition(b"\n")
+        if not separator:
+            data = b""
+
+    counts = Counter()
+    records = []
+    malformed = 0
+    for line in data.splitlines():
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            malformed += 1
+            continue
+        if not isinstance(record, dict):
+            malformed += 1
+            continue
+        hook = safe_label(record.get("hook"), 48)
+        reason = safe_label(record.get("reason"), 64)
+        if not hook or not reason:
+            malformed += 1
+            continue
+        counts[(hook, reason)] += 1
+        input_bytes = record.get("input_bytes")
+        records.append(
+            (
+                safe_label(record.get("ts"), 32) or "time unknown",
+                hook,
+                reason,
+                input_bytes if type(input_bytes) is int and input_bytes >= 0 else None,
+                "error_type" in record or "error" in record,
+            )
+        )
+
+    lines = [
+        f"Hook errors: {len(records)} record(s) in the latest {len(data):,} bytes; raw input omitted."
+    ]
+    if start:
+        lines[0] += " Earlier entries not included."
+    if malformed:
+        lines.append(f"Malformed records: {malformed}.")
+    if counts:
+        lines.append("Counts by hook and reason:")
+        for (hook, reason), count in counts.most_common(5):
+            lines.append(f"  {hook} / {reason}: {count}")
+        if len(counts) > 5:
+            lines.append(f"  ... {len(counts) - 5} other group(s)")
+        lines.append("Recent records:")
+        for timestamp, hook, reason, input_bytes, has_error in records[
+            -HOOK_ERROR_RECENT_RECORDS:
+        ]:
+            detail = f"; input {input_bytes:,} bytes" if input_bytes is not None else ""
+            if has_error:
+                detail += "; exception recorded"
+            lines.append(f"  {timestamp} {hook} / {reason}{detail}")
+    elif not malformed:
+        lines.append("No valid hook error records found.")
+    return "\n".join(lines)
+
+
+def safe_label(value, limit):
+    if not isinstance(value, str):
+        return ""
+    return "".join(char if char.isprintable() else " " for char in value)[
+        :limit
+    ].strip()
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "action",
-        choices=("hook", "status", "context", "refresh", "accept-semantic", "usage"),
+        choices=(
+            "hook",
+            "status",
+            "context",
+            "refresh",
+            "accept-semantic",
+            "usage",
+            "hook-errors",
+        ),
     )
     parser.add_argument(
         "--provider",
@@ -910,6 +1007,9 @@ def main():
             value = usage_report(root)
             print(json.dumps(value, indent=2))
             return 1 if value["errors"] else 0
+        if args.action == "hook-errors":
+            print(hook_errors_report(root))
+            return 0
         if args.action == "context" and not args.task.strip():
             raise ValueError("context requires --task describing the current request")
         if args.action == "accept-semantic" and not args.evidence.strip():

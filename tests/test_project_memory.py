@@ -199,6 +199,32 @@ def test_planning_scope_and_source_paths(repo, monkeypatch):
         MEMORY.handle(repo, request)
 
 
+def test_hook_error_report_preserves_log_but_omits_raw_input(repo):
+    log = repo / ".cache/hook-errors.log"
+    log.parent.mkdir()
+    log.write_text(
+        json.dumps(
+            {
+                "ts": "2026-10-22T10:00:00Z",
+                "hook": "policy",
+                "reason": "json-decode-failed",
+                "input_bytes": 1234,
+                "stdin_preview": "SENSITIVE_RAW_INPUT",
+                "error": "invalid JSON",
+            }
+        )
+        + "\n"
+    )
+
+    report = MEMORY.hook_errors_report(repo)
+
+    assert log.exists()
+    assert "policy / json-decode-failed: 1" in report
+    assert "input 1,234 bytes" in report
+    assert "SENSITIVE_RAW_INPUT" not in report
+    assert "raw input omitted" in report
+
+
 @pytest.mark.parametrize("provider", ["codex", "claude"])
 def test_hook_merge_preserves_custom_and_deduplicates(repo, provider):
     path = repo / (

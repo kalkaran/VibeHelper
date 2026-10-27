@@ -1,0 +1,18 @@
+RTK Token Savings (Project Scope)
+════════════════════════════════════════════════════════════
+Scope: /.../Code/VibeHelper
+
+Total commands:    4
+Input tokens:      933
+Output tokens:     524
+Tokens saved:      409 (43.8%)
+Total exec time:   21ms (avg 5ms)
+Efficiency meter: ███████████░░░░░░░░░░░░░ 43.8%
+
+By Command
+───────────────────────────────────────────────────────────────────────
+  #  Command                   Count  Saved  Total%    Time  Impact    
+───────────────────────────────────────────────────────────────────────
+ 1.  rtk grep                      4    409   43.8%     5ms  ██████████
+───────────────────────────────────────────────────────────────────────
+

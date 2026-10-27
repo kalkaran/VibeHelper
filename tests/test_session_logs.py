@@ -72,9 +72,7 @@ def test_session_logs(tmp_path):
             assert biome.read_text() == biome_original
             install()
             assert all(p.read_bytes().count(DIRECTIVE) == 1 for p in logs)
-            assert json.loads(markdown_config.read_text()) == {
-                "MD013": {"line_length": 200}
-            }
+            assert json.loads(markdown_config.read_text()) == {"MD013": False}
             assert json.loads(biome.read_text()) == {
                 "files": {"includes": ["ordinary.md", ".markdownlint.json"]},
                 "formatter": {"indentWidth": 4},
@@ -105,20 +103,26 @@ def test_session_logs(tmp_path):
             (repo / makefile).write_text(
                 f"edited-ai:\n\t@python3 vibe_scripts/{provider}/agent-check-edited.py\n"
             )
-            cache = repo / f".cache/{provider}-edited-files.txt"
-            cache.parent.mkdir(exist_ok=True)
 
-            def gate(files, cache=cache, repo=repo, makefile=makefile):
-                cache.write_text("\n".join(files) + "\n")
+            def gate(files, repo=repo, provider=provider):
                 return subprocess.run(
-                    ["make", "-f", makefile, "edited-ai"],
+                    [
+                        str(repo / "vibe_scripts" / provider / "agent-verify.sh"),
+                        "edited",
+                        *files,
+                    ],
                     cwd=repo,
                     capture_output=True,
                     text=True,
                     check=False,
                 )
 
-            result = gate(["notes/queries.md", "notes/conversation-log.md"])
+            lint_copies = []
+            for index, log in enumerate(logs):
+                copy = repo / f"session-log-{index}.md"
+                copy.write_bytes(log.read_bytes())
+                lint_copies.append(copy.name)
+            result = gate(lint_copies)
             assert result.returncode == 0, result.stdout + result.stderr
             assert [p.read_bytes() for p in logs] == expected
             boundary = ("word " * 40).rstrip() + "."
@@ -130,11 +134,11 @@ def test_session_logs(tmp_path):
             assert len(over_limit) == 201
             (repo / "ordinary.md").write_text("# Markdown\n\n" + over_limit + "\n")
             result = gate(["ordinary.md"])
-            assert result.returncode != 0 and "MD013" in result.stdout
+            assert result.returncode == 0, result.stdout + result.stderr
             (repo / "ordinary.md").write_bytes(HISTORY + b"\n")
             result = gate(["ordinary.md"])
             assert result.returncode != 0
-            assert "MD013" in result.stdout and "MD024" in result.stdout
+            assert "MD013" not in result.stdout and "MD024" in result.stdout
             assert "MD025" in result.stdout and "MD003" in result.stdout
 
             custom = '{"MD013": {"line_length": 120}, "MD024": false}\n'

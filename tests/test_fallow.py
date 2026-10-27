@@ -313,7 +313,7 @@ def test_part2_default_delivery_rerun_and_advisory_lint(
     assert (runtime / "fallow.py").exists()
     assert (
         f"python3 vibe_scripts/{name}/fallow.py lint"
-        in (runtime / "Makefile").read_text()
+        not in (runtime / "Makefile").read_text()
     )
     result = subprocess.run(
         [str(runtime / "agent-verify.sh"), "fallow", "--files", "src"],
@@ -348,7 +348,15 @@ def test_part2_default_delivery_rerun_and_advisory_lint(
             ],
         },
     )
-    lint_command = ["make", "-f", f"vibe_scripts/{name}/Makefile", "lint-ai"]
+    makefile = (project / f"vibe_scripts/{name}/Makefile").read_text()
+    assert "fallow.py lint" not in makefile
+    lint_command = [
+        sys.executable,
+        f"vibe_scripts/{name}/fallow.py",
+        "report",
+        "--files",
+        "src/tracking.ts",
+    ]
     result = subprocess.run(
         lint_command,
         cwd=project,
@@ -374,7 +382,7 @@ def test_part2_default_delivery_rerun_and_advisory_lint(
     assert result.returncode != 0
     assert "tool_failure" in result.stdout
 
-    # Existing lint failures must still stop the recipe before advisory analysis.
+    # Unrecognized project checks remain incomplete; ordinary lint cannot run Fallow.
     (project / "package.json").write_text(json.dumps({"scripts": {"lint": "exit 7"}}))
     result = subprocess.run(
         command + ["--refresh-managed"],
@@ -387,6 +395,7 @@ def test_part2_default_delivery_rerun_and_advisory_lint(
     )
     assert result.returncode == 0, result.stdout + result.stderr
     calls_before = (project / "calls.log").read_bytes()
+    lint_command = ["make", "-f", f"vibe_scripts/{name}/Makefile", "lint-all-ai"]
     result = subprocess.run(
         lint_command,
         cwd=project,
@@ -397,7 +406,7 @@ def test_part2_default_delivery_rerun_and_advisory_lint(
         check=False,
     )
     assert result.returncode != 0
-    assert ("lint-node" if name == "codex" else "lint-npm") in result.stdout
+    assert "cannot be safely scoped" in result.stdout
     assert (project / "calls.log").read_bytes() == calls_before
 
 

@@ -2157,6 +2157,30 @@ EOF_AGENTS
 	IFS= read -r -d '' procedures_md <<'EOF_QUALITY_PROCEDURES' || :
 # Quality and delivery procedures
 
+Read the linked `.summary.log` first. It contains bounded diagnostics, status,
+duration and the full-log path. Open only the relevant section of a full log
+when the summary is insufficient; never concatenate full logs into agent context.
+
+`edited-ai` selects current-session edits, including shell changes since
+SessionStart. It does not include unrelated dirty/untracked files or stale edit
+lists. When session evidence is unavailable, verification remains blocked; use
+`./vibe_scripts/codex/agent-verify.sh edited PATH ...` for explicit task files.
+`lint-ai` checks current-session changes without formatting; use
+`agent-verify.sh lint PATH ...` to preserve explicit task files.
+`lint-all-ai` (or `agent-verify.sh lint --all`) explicitly checks the full project.
+`verify-ai` retains broader verification and does not format files.
+Automatic checks lint/format only supported, existing session-edited files.
+Unsupported files, metadata, media and deletions are skipped. Config changes never
+expand file targets. Missing required tools and actual lint/format failures block.
+Tests, builds, type checks, design review and Fallow run separately on request.
+Preserve explicit paths when replacing a blocked tool command: use
+`agent-verify.sh lint PATH ...` for checks and `agent-verify.sh edited PATH ...`
+for formatting/autofixes. The replacement table does not override file scope.
+Automatic hooks emit only PASS on success and nothing when no files apply.
+Failures show concise diagnostics and an evidence path. Unchanged blocked Stops
+reuse their evidence without running tools again; explicit checks always run.
+Full logs stay on disk. Do not expand task scope to repair unrelated findings.
+
 Quality command recovery:
 Run approved commands from the repository root. If a hook blocks a quality command, immediately retry with the approved replacement below, inspect its output and exit status, and fix reported issues. A blocked attempt is not verification; do not silently skip the check or finish claiming it passed.
 
@@ -2168,7 +2192,7 @@ Run approved commands from the repository root. If a hook blocks a quality comma
 | `pytest`, `phpunit`; `go test`, `cargo test`, `dotnet test`; `make test` | `make -f vibe_scripts/codex/Makefile test-ai` |
 | `make verify` | `make -f vibe_scripts/codex/Makefile verify-ai` |
 
-Formatting or autofix flags on any tool (for example, `eslint --fix` or `markdownlint-cli2 --fix`) require `make -f vibe_scripts/codex/Makefile edited-ai`. Use `make -f vibe_scripts/codex/Makefile lint-ai` for whole-repository linting, including Ruff/Biome; an edited-file check does not replace requested full-repository coverage.
+Formatting or autofix flags on any tool (for example, `eslint --fix` or `markdownlint-cli2 --fix`) require `make -f vibe_scripts/codex/Makefile edited-ai`. Use `make -f vibe_scripts/codex/Makefile lint-all-ai` for explicit whole-repository linting, including Ruff/Biome; an edited-file check does not replace requested full-repository coverage.
 
 The same mapping applies to executable paths such as `vendor/bin/phpstan`, `python -m`/`python3 -m`/`py -m`, `npx`/`bunx`, `uv run`/`pipx run`, and package-manager exec/dlx/x commands. For `npm`, `pnpm`, `yarn`, `bun`, or `composer` quality scripts, map `format`, `fix`, and `lint:fix` to `make -f vibe_scripts/codex/Makefile edited-ai`; map `lint`, `typecheck`, `test`, `security`, and `verify` (including scoped variants such as `test:unit`) to the corresponding `*-ai` target. Read custom script definitions if their purpose is unclear.
 
@@ -2239,6 +2263,9 @@ EOF_AGENT_INDEX
 # Repository commands for agents
 
 Prefer existing project commands. These standard targets should exist after bootstrap:
+
+Codex token dashboard: `python3 vibe_scripts/codex/usage-tracker.py dashboard`.
+Setup and coverage: `vibe_scripts/codex/usage-tracker.md`. Collection is local and makes no model calls.
 
 Allowance measurements: `python3 vibe_scripts/codex/project-memory.py usage`. Read
 `/agent/codex/usage.md` for the fixed comparison pack and model/routing trials.
@@ -2882,6 +2909,7 @@ def makefile_targets() -> list[str]:
         "skills-update",
         "verify-ai",
         "lint-ai",
+    "lint-all-ai",
         "typecheck-ai",
         "security-ai",
         "verify",
@@ -3136,7 +3164,7 @@ create_verify_script() {
 
 create_project_memory() {
 	local name src content
-	for name in project-memory.py install-project-memory.py git-policy.py cleanup-cache.py; do
+	for name in project-memory.py install-project-memory.py git-policy.py cleanup-cache.py usage-tracker.py usage-tracker.patch usage-tracker.md; do
 		src="$INSTALLER_DIR/../../templates/vibe_scripts/$name"
 		[[ -f "$src" ]] || src="$INSTALLER_DIR/../templates/vibe_scripts/$name"
 		[[ -f "$src" ]] || {
@@ -3254,6 +3282,7 @@ CONTROLLED_MAKE_TARGETS = {
     "agent-verify",
     "edited-ai",
     "lint-ai",
+    "lint-all-ai",
     "security-ai",
     "skills-check",
     "skills-update",
@@ -3535,8 +3564,18 @@ def quality_violation_for_parts(parts: list[str]) -> str:
             for value in parts[1:]
         ):
             detail = " Configuration, level, and baseline overrides are forbidden."
-        replacement = "make -f vibe_scripts/codex/Makefile edited-ai" if head in {"biome", "black", "gofmt", "isort", "phpcbf", "prettier", "ruff", "shfmt"} else "the matching *-ai target"
-        return f"Direct {head} is blocked for agents; use {replacement}.{detail}"
+        writes = head in {"black", "isort", "phpcbf"} or any(flag in parts for flag in {"--fix", "--write", "-w"}) or (head == "ruff" and "format" in parts and "--check" not in parts)
+        if any(flag in parts for flag in {"--check", "--check-only", "--diff"}):
+            writes = False
+        mode = "edited" if writes else "lint"
+        if head in {"mypy", "pyright", "phpstan", "phpstan.phar"}:
+            mode = "typecheck"
+        elif head in {"pytest", "phpunit"}:
+            mode = "test"
+        if mode == "typecheck":
+            return f"Direct {head} type checks are blocked; use make -f vibe_scripts/codex/Makefile typecheck-ai for the required project analysis."
+        replacement = f"./vibe_scripts/codex/agent-verify.sh {mode}"
+        return f"Direct {head} is blocked for agents; use {replacement} with the same explicit file paths (omit tool flags). Without paths, lint/edited use session scope. Use lint --all only for an explicit full-project request.{detail}"
     if head == "php" and len(parts) > 1 and (
         "-l" in parts[1:]
         or any(
@@ -3645,9 +3684,9 @@ def log_hook_error(reason: str, *, raw: str = "", error: Exception | None = None
         "reason": reason,
     }
     if error is not None:
-        entry["error"] = str(error)
+        entry["error_type"] = type(error).__name__
     if raw:
-        entry["stdin_preview"] = raw[:8000]
+        entry["input_bytes"] = len(raw.encode("utf-8", errors="replace"))
     try:
         log_path = Path(__file__).resolve().parents[2] / ".cache" / "hook-errors.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -3857,9 +3896,9 @@ def log_hook_error(reason: str, *, raw: str = "", error: Exception | None = None
         "reason": reason,
     }
     if error is not None:
-        entry["error"] = str(error)
+        entry["error_type"] = type(error).__name__
     if raw:
-        entry["stdin_preview"] = raw[:8000]
+        entry["input_bytes"] = len(raw.encode("utf-8", errors="replace"))
     try:
         log_path = Path(__file__).resolve().parents[2] / ".cache" / "hook-errors.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)

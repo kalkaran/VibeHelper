@@ -122,7 +122,7 @@ def test_repeated_hook_checks_execute_and_keep_complete_result(
     assert len(json.dumps(second)) < len(json.dumps(first))
     assert "Rechecked; diagnostics unchanged" in text
     assert "demo.py:0 F821" in text
-    assert "Full result:" in text
+    assert "summary log (read first):" in text.lower()
     assert "explicit scope approval" in text
     stopped = HOOK.handle(tmp_path, provider, "Stop", payload)
     assert stopped["decision"] == "block"
@@ -174,7 +174,7 @@ def test_mixed_deletion_pass_keeps_explicit_test_warning(tmp_path, monkeypatch, 
     result = HOOK.handle(tmp_path, "codex", "PostToolUse", payload)
     text = result["hookSpecificOutput"]["additionalContext"]
     assert "Tests were not run" in text and "test-ai" in text
-    assert "Full result:" in text
+    assert "summary log (read first):" in text.lower()
     assert HOOK.handle(tmp_path, "codex", "Stop", payload) == {}
     assert "Tests were not run" in capsys.readouterr().err
 

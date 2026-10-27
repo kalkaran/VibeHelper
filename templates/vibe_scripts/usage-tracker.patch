@@ -1,0 +1,319 @@
+--- a/token_usage.py
++++ b/token_usage.py
+@@ -199,7 +199,7 @@
+ 
+ 
+ def empty_usage():
+-    return {"input": 0, "output": 0, "cache_read": 0, "cache_5m": 0, "cache_1h": 0, "requests": 0}
++    return {"input": 0, "output": 0, "cache_read": 0, "cache_5m": 0, "cache_1h": 0, "requests": 0, "input_total": 0, "reasoning": 0}
+ 
+ 
+ def normalize_usage(usage):
+@@ -222,14 +222,14 @@
+ 
+ def add_flat(bucket, flat):
+     for k, v in flat.items():
+-        bucket[k] += v
++        bucket[k] = None if bucket[k] is None or v is None else bucket[k] + v
+     bucket["requests"] += 1
+ 
+ 
+ def max_flat(dest, flat):
+     # Streamed duplicates of one request may carry partial snapshots; keep the maxima.
+     for k, v in flat.items():
+-        dest[k] = max(dest[k], v)
++        dest[k] = None if dest[k] is None or v is None else max(dest[k], v)
+ 
+ 
+ def cost_usd(by_model, pricing):
+@@ -381,14 +381,14 @@
+     for model, bucket in src.items():
+         d = dest.setdefault(model, empty_usage())
+         for k in d:
+-            d[k] += bucket[k]
++            d[k] = None if d[k] is None or bucket[k] is None else d[k] + bucket[k]
+ 
+ 
+ def sum_buckets(by_model):
+     total = empty_usage()
+     for bucket in by_model.values():
+         for k in total:
+-            total[k] += bucket[k]
++            total[k] = None if total[k] is None or bucket[k] is None else total[k] + bucket[k]
+     return total
+ 
+ 
+@@ -436,6 +436,7 @@
+     about once per file, because a silently vanished turn is a silently wrong
+     number."""
+     undecodable = 0
++    malformed = 0
+     with open(path, "rb") as fh:
+         for raw in fh:
+             try:
+@@ -446,9 +447,16 @@
+             if not line:
+                 continue
+             try:
+-                yield json.loads(line)
++                item = json.loads(line)
++                if isinstance(item, dict):
++                    yield item
++                else:
++                    malformed += 1
+             except json.JSONDecodeError:
++                malformed += 1
+                 continue
++    if malformed:
++        warn(f"{path}: incomplete input; {malformed} malformed JSON line(s) omitted")
+     # Once per file: summarize_transcript alone makes two passes, and a
+     # long-lived MCP server re-reads the same transcript on every query.
+     if undecodable and str(path) not in _UNDECODABLE_WARNED:
+@@ -742,6 +750,8 @@
+ 
+ 
+ def fmt_tokens(n):
++    if n is None:
++        return "unknown"
+     if n >= 1_000_000:
+         return f"{n / 1_000_000:.1f}M"
+     if n >= 1_000:
+@@ -1540,8 +1550,8 @@
+             f'<text x="{width // 2}" y="{height // 2}" text-anchor="middle" '
+             f'class="muted">No daily data in window</text>'
+         )
+-        return f'<svg viewBox="0 0 {width} {height}" role="img" aria-label="Daily cost">{inner}</svg>'
+-    costs = [r["cost_usd"] if r["cost_usd"] is not None else 0.0 for r in by_day]
++        return f'<svg viewBox="0 0 {width} {height}" role="img" aria-label="Daily tokens">{inner}</svg>'
++    costs = [(r["usage"]["input_total"] or 0) + (r["usage"]["output"] or 0) for r in by_day]
+     peak = max(costs) if costs else 0.0
+     max_cost = peak if peak > 0 else 1.0
+     plot_w = width - pad * 2
+@@ -1553,12 +1563,12 @@
+         f'<rect x="0" y="0" width="{width}" height="{height}" fill="none"/>',
+     ]
+     for i, row in enumerate(by_day):
+-        cost = row["cost_usd"] if row["cost_usd"] is not None else 0.0
++        cost = (row["usage"]["input_total"] or 0) + (row["usage"]["output"] or 0)
+         bar_h = (cost / max_cost) * plot_h if not activity_only else 0.0
+         x = pad + i * bar_w + bar_w * 0.1
+         w = bar_w * 0.8
+         y = pad + plot_h - bar_h
+-        title = html.escape(f"{row['key']}: {fmt_cost(row['cost_usd'])}")
++        title = html.escape(f"{row['key']}: {fmt_tokens(None if row['usage']['input_total'] is None else cost)}")
+         parts.append(
+             f'<rect x="{x:.1f}" y="{y:.1f}" width="{w:.1f}" height="{bar_h:.1f}" '
+             f'class="bar"><title>{title}</title></rect>'
+@@ -1574,16 +1584,16 @@
+     if peak > 0 and not activity_only:
+         parts.append(
+             f'<text x="{pad}" y="{pad - 8}" text-anchor="start" class="scale">'
+-            f'max {html.escape(fmt_cost(peak))}/day</text>'
++            f'max {html.escape(fmt_tokens(peak))}/day</text>'
+         )
+     note = ""
+     if activity_only:
+         note = (
+             f'<text x="{width // 2}" y="{pad - 8}" text-anchor="middle" class="muted">'
+-            "Costs unmeasured (activity-only)</text>"
++            "Tokens unknown (activity-only)</text>"
+         )
+     return (
+-        f'<svg viewBox="0 0 {width} {height}" role="img" aria-label="Daily estimated cost">'
++        f'<svg viewBox="0 0 {width} {height}" role="img" aria-label="Daily recorded tokens">'
+         f"{note}{''.join(parts)}</svg>"
+     )
+ 
+@@ -1599,9 +1609,9 @@
+             f"<td>{html.escape(str(r['key']))}</td>"
+             f"<td>{r[calls_col]}</td>"
+             f"<td>{fmt_tokens(u['output'])}</td>"
+-            f"<td>{fmt_tokens(u['input'])}</td>"
++            f"<td>{fmt_tokens(u['input_total'])}</td>"
+             f"<td>{fmt_tokens(u['cache_read'])}</td>"
+-            f"<td>{html.escape(_dashboard_fmt_cost(r['cost_usd'], r.get('partial')))}</td>"
++            f"<td>{fmt_tokens(u['reasoning'])}</td>"
+             "</tr>"
+         )
+     return "\n".join(lines)
+@@ -1640,8 +1650,7 @@
+         f"<p>Project filter: <strong>{html.escape(project)}</strong></p>"
+         if project else ""
+     )
+-    footnotes = scan_footnotes(_dashboard_footnote_source(data))
+-    footnotes.extend(_dashboard_partial_footnotes(data))
++    footnotes = data.get("warnings", [])
+     notes_html = "".join(
+         f"<p class=\"note\">{html.escape(note)}</p>" for note in footnotes
+     )
+@@ -1655,13 +1664,13 @@
+     elif empty:
+         empty_banner = '<p class="empty">No sessions matched this window.</p>'
+     unmeasured = (
+-        '<p class="note">Token and cost totals are unmeasured for activity-only '
+-        "sessions; zero means unknown, not free.</p>"
++        '<p class="note">Token totals are unknown for activity-only '
++        "sessions. Recorded subtotals exclude unknown usage.</p>"
+         if activity_only else ""
+     )
+-    cost_card = _dashboard_metric_display(summary["cost_usd"], activity_only, token=False)
++    cost_card = _dashboard_metric_display(None if u["input_total"] is None else u["input_total"] + u["output"], activity_only, token=True)
+     out_card = _dashboard_metric_display(u["output"], activity_only, token=True)
+-    in_card = _dashboard_metric_display(u["input"], activity_only, token=True)
++    in_card = _dashboard_metric_display(u["input_total"], activity_only, token=True)
+     cache_card = _dashboard_metric_display(u["cache_read"], activity_only, token=True)
+     svg = _dashboard_svg_chart(data.get("by_day") or [], activity_only)
+     measurement_card = _dashboard_measurement_label(
+@@ -1680,6 +1689,8 @@
+ .card {{ border: 1px solid #ccc; border-radius: 6px; padding: 0.75rem; }}
+ .card strong {{ display: block; font-size: 1.25rem; }}
+ .card span {{ color: #555; font-size: 0.85rem; }}
++section {{ overflow-x: auto; }}
++td {{ overflow-wrap: anywhere; }}
+ table {{ border-collapse: collapse; width: 100%; margin: 1rem 0; font-size: 0.9rem; }}
+ th, td {{ border: 1px solid #ddd; padding: 0.35rem 0.5rem; text-align: left; }}
+ th {{ background: #f4f4f4; }}
+@@ -1697,30 +1708,30 @@
+ {empty_banner}
+ {unmeasured}
+ <section class="cards" aria-label="Summary">
+-<div class="card"><span>Estimated cost</span><strong>{html.escape(cost_card)}</strong></div>
++<div class="card"><span>Recorded input + output</span><strong>{html.escape(cost_card)}</strong></div>
+ <div class="card"><span>Output tokens</span><strong>{html.escape(out_card)}</strong></div>
+-<div class="card"><span>Input tokens</span><strong>{html.escape(in_card)}</strong></div>
+-<div class="card"><span>Cache reads</span><strong>{html.escape(cache_card)}</strong></div>
++<div class="card"><span>Input including cache</span><strong>{html.escape(in_card)}</strong></div>
++<div class="card"><span>Cached input (subset)</span><strong>{html.escape(cache_card)}</strong></div>
+ <div class="card"><span>Sessions</span><strong>{summary['sessions']}</strong></div>
+ <div class="card"><span>Measurement</span><strong>{html.escape(measurement_card)}</strong></div>
+ </section>
+-<section aria-label="Daily cost chart">
+-<h2>Daily estimated cost</h2>
++<section aria-label="Daily tokens chart">
++<h2>Daily recorded tokens</h2>
+ {svg}
+ </section>
+ <section aria-label="Top projects">
+ <h2>Top projects</h2>
+ <table>
+-<thead><tr><th>Project</th><th>Sessions</th><th>Output</th><th>Input</th><th>Cache read</th><th>Est. cost</th></tr></thead>
++<thead><tr><th>Project</th><th>Sessions incl. children</th><th>Output</th><th>Input incl. cache</th><th>Cached subset</th><th>Reasoning subset</th></tr></thead>
+ <tbody>
+ {_dashboard_table_rows(data.get('top_projects') or [])}
+ </tbody>
+ </table>
+ </section>
+-<section aria-label="Top commands">
+-<h2>Top commands</h2>
++<section aria-label="Largest turns">
++<h2>Largest turns</h2>
+ <table>
+-<thead><tr><th>Command</th><th>Calls</th><th>Output</th><th>Input</th><th>Cache read</th><th>Est. cost</th></tr></thead>
++<thead><tr><th>Turn</th><th>Turns</th><th>Output</th><th>Input incl. cache</th><th>Cached subset</th><th>Reasoning subset</th></tr></thead>
+ <tbody>
+ {_dashboard_table_rows(data.get('top_commands') or [])}
+ </tbody>
+@@ -1729,7 +1740,7 @@
+ <section aria-label="Top models">
+ <h2>Top models</h2>
+ <table>
+-<thead><tr><th>Model</th><th>Requests</th><th>Output</th><th>Input</th><th>Cache read</th><th>Est. cost</th></tr></thead>
++<thead><tr><th>Model</th><th>Turns</th><th>Output</th><th>Input incl. cache</th><th>Cached subset</th><th>Reasoning subset</th></tr></thead>
+ <tbody>
+ {model_rows}
+ </tbody>
+@@ -3647,7 +3658,10 @@
+                     warn(f"skipping unreadable Codex rollout {path}: {exc}", warnings)
+                     continue
+                 sid = meta.get("id") or meta.get("session_id")
+-                if not sid or sid in seen:
++                if not isinstance(sid, str) or not sid:
++                    warn(f"skipping incomplete Codex rollout without session id: {path}", warnings)
++                    continue
++                if sid in seen:
+                     continue
+                 if target is not None and (
+                         not meta.get("cwd") or Path(meta["cwd"]).resolve() != target):
+@@ -3746,13 +3760,18 @@
+             raise ValueError(f"invalid Codex counter {key}")
+         return value
+ 
++    if count("reasoning_output_tokens") > count("output_tokens"):
++        raise ValueError("Codex reasoning counter exceeds total output")
+     cached = count("cached_input_tokens")
+     written = count("cache_write_input_tokens")
+     if cached + written > count("input_tokens"):
+         raise ValueError("Codex cache counters exceed total input")
+     return {"input": count("input_tokens") - cached - written,
+-            "output": count("output_tokens"), "cache_read": cached,
+-            "cache_5m": written, "cache_1h": 0}
++            "output": count("output_tokens"),
++            "cache_read": cached if "cached_input_tokens" in usage else None,
++            "cache_5m": written, "cache_1h": 0,
++            "input_total": count("input_tokens"),
++            "reasoning": count("reasoning_output_tokens") if "reasoning_output_tokens" in usage else None}
+ 
+ 
+ def parse_codex_session(source):
+@@ -3766,9 +3785,10 @@
+     turn_segments = {}
+     seen_usage = False
+     partial = False
++    quota_snapshot = None
+ 
+     def segment(ts, label=OTHER_LABEL, prompt=""):
+-        s = {"label": label, "start_ts": ts, "prompt": prompt[:120],
++        s = {"label": label, "start_ts": ts, "prompt": prompt[:120], "turn_id": current_turn,
+              "by_model": {}, "subagents": []}
+         segments.append(s)
+         return s
+@@ -3780,6 +3800,8 @@
+             continue
+         ts = e.get("timestamp")
+         kind = e.get("type")
++        if kind == "event_msg" and p.get("type") == "token_count" and isinstance(p.get("rate_limits"), dict):
++            quota_snapshot = {"timestamp": ts, "rate_limits": p["rate_limits"]}
+         if kind == "turn_context":
+             model = p.get("model") or model
+             current_turn = p.get("turn_id") or current_turn
+@@ -3801,7 +3823,7 @@
+                 active = segment(ts)
+             if match:
+                 active["label"] = match.group(1)
+-            if not active["prompt"]:
++            if prompt.strip():
+                 active["prompt"] = prompt.strip()[:120]
+         usage = None
+         req = None
+@@ -3831,16 +3853,17 @@
+             # Cumulative notifications are duplicated on idle/rate-limit events.
+             # A reset cannot be safely interpreted as fresh usage.
+             if previous is not None:
+-                if any(flat[k] < previous[k] for k in flat):
++                if any(flat[k] < previous[k] for k in ("input_total", "output")):
+                     partial = True
+                     warnings.append("Codex cumulative counters decreased; reset interval omitted")
+                     previous = flat
+                     continue
+-                delta = {k: flat[k] - previous[k] for k in flat}
++                delta = {k: (None if flat[k] is None or previous[k] is None or flat[k] < previous[k]
++                             else flat[k] - previous[k]) for k in flat}
+             else:
+                 delta = flat
+             previous = flat
+-            if not any(delta.values()):
++            if not any(delta[k] for k in ("input_total", "output")):
+                 continue
+             seen_usage = True
+             if active is None:
+@@ -3868,8 +3891,8 @@
+             add_flat(active["by_model"].setdefault(model, empty_usage()), flat)
+     for s, m, flat in pending.values():
+         add_flat(s["by_model"].setdefault(m, empty_usage()), flat)
+-    warnings.append("Codex attribution follows turns and explicit skill names. Costs are standard API-equivalent estimates, not subscription charges or tier-adjusted billing.")
+-    return {"segments": segments,
++    warnings.append("Codex attribution follows recorded turns. Tokens are not subscription allowance percentages. Missing subset counters remain unknown.")
++    return {"segments": segments, "quota_snapshot": quota_snapshot,
+             "measurement": ("partial" if partial else "exact") if seen_usage else "activity_only",
+             "warnings": list(dict.fromkeys(warnings))}
+ 

@@ -120,6 +120,37 @@ code-review-graph's own context estimate. Run
 report. The figures stay separate because they measure different baselines;
 VibeHelper does not claim a combined total for features that cannot be measured.
 
+## Local Codex usage dashboard
+
+The usage tracker reads recorded Codex usage across local projects. Its live
+dashboard lets you select a project, compare model totals, and open the largest
+sessions to inspect their turns. Each browser tab retains its own project
+selection. Refreshes reuse unchanged session data; switching projects filters
+the cached snapshot.
+
+From a project with CodexHelper installed, run:
+
+```sh
+python3 vibe_scripts/codex/usage-tracker.py setup
+~/.local/bin/vibe-usage
+```
+
+Setup requires Python 3.11 or later and Git. It saves the Codex log location and
+installs a shared launcher. On macOS, you can also open
+`~/Applications/VibeHelper Usage.command`. The dashboard starts when opened;
+keep its terminal open while using it. It does not start automatically at login.
+ClaudeHelper includes the same tracker under `vibe_scripts/claude/`; it currently
+tracks Codex usage only.
+
+Collection and rendering run locally without model calls or usage uploads.
+Setup downloads the pinned parser unless supplied with a local checkout.
+Recorded tokens, cached input and reasoning are shown separately; cached input
+and reasoning are subsets, not additional usage. These counts do not measure
+weekly subscription allowance or exact per-file waste.
+
+See the [usage tracker guide](templates/vibe_scripts/usage-tracker.md) for log
+locations, date filters, offline reports and installation details.
+
 ## Stage completed changes
 
 After code changes, agents write `git-add.txt` with the reviewed files for that
@@ -277,7 +308,10 @@ Add `--apply` to install the reviewed changes with backups. Omit `--include-glob
 to leave user configuration alone. The cleanup preserves custom hooks and refuses
 unrecognized quality helpers or Git blockers. Start a new agent session afterward.
 Graph refresh remains available through the project-memory commands below.
-Automatic hooks format and lint existing edited files. Moves are checked at the
+Automatic hooks format and lint supported, existing edited files. Unsupported
+files, such as swap files and media, are skipped. Detailed logs stay on disk;
+failure summaries show relevant diagnostics and an evidence path. Successful
+checks emit `PASS`. Moves are checked at the
 new path; removed paths remain recorded in session history. Deletion-only changes
 skip edited-file checks with an explicit reminder that tests have not run. Hooks
 do not launch test suites, require test receipts, or scan installed dependencies.
@@ -370,6 +404,127 @@ Defaults and opt-in tools differ between the two helpers. They can install:
 - ShellCheck and shfmt: check and format shell scripts.
 - PHP_CodeSniffer and PHPStan: check PHP style, syntax, and types.
 
+## How the tools help
+
+### 1. Give the agent a workflow
+
+| Tool | Problem it solves | How it helps and works |
+| --- | --- | --- |
+| **Codex project files** | New sessions lack project context. | `AGENTS.md`, repo notes and helper scripts give Codex a repeatable starting point. Hooks connect supported editing events to checks. |
+| **Claude Code project files** | Claude needs the same project conventions in its own format. | `CLAUDE.md`, hooks, slash commands and helper scripts expose the workflow through Claude's native integration. |
+| **Ponytail** | Small requests grow into unnecessary architecture. | Skill instructions favour existing code, standard tools and the smallest complete change. The agent still reviews risks and verifies the result. |
+| **Unlazy** | Long tasks stop at a plan or a partial implementation. | The agent defines acceptance checks, breaks work into bounded steps and tracks evidence before declaring completion. It does not replace tests. |
+| **[LLM Council](https://github.com/karpathy/llm-council)** | One model can miss an important assumption. | Models answer through OpenRouter, review each other's responses, then a chair model synthesizes the result. VibeHelper optionally clones the project; running it needs separate setup and adds provider usage. |
+
+Skills guide the model's behaviour; they are not automatic proof of correctness.
+
+### 2. Improve writing and design
+
+**Humanizer — clearer prose.** The agent applies editing rules to remove filler,
+inflated claims and repetitive phrasing while preserving meaning. It is an
+LLM-assisted rewrite, not a Python text compressor.
+
+Illustrative edit; word counts, not measured token savings:
+
+| Before: 27 words | After: 7 words |
+| --- | --- |
+| It is important to note that you will need to restart the application after making changes to the configuration in order for those changes to take effect. | Restart the application to apply configuration changes. |
+
+**Impeccable — usable interfaces.** Design guidance helps the agent choose a clear
+hierarchy, readable typography and consistent spacing. Browser inspection and
+design checks expose overflow, weak focus states and awkward layouts. Its
+deterministic detector supplements visual review; passing it does not prove the
+interface works well.
+
+### 3. Find the right context before changing code
+
+| Tool | Problem it solves | How it helps and works |
+| --- | --- | --- |
+| **Context7** | Remembered API details may be outdated. | The agent resolves the library, then requests documentation for a specific question. Relevant examples replace guessing or reading an entire manual. Documentation retrieval uses an external service. |
+| **Chrome DevTools MCP** | Source code alone cannot show browser behaviour. | Browser tools let the agent inspect the DOM, console and network, interact with controls and capture screenshots. This checks the rendered result against the intended behaviour. |
+| **Graphify** | Repeatedly reading a large repo wastes context. | It builds a persistent graph of entities and relationships. Focused queries retrieve connected context with source references. Building or enriching the graph can use models; the local benchmark below does not. |
+| **code-review-graph** | A small edit can break a distant caller. | A code graph identifies callers, dependents and affected flows so review can focus on the change's reach. Its context-size estimates are separate from Graphify's benchmark. Missing graph coverage still requires source inspection. |
+
+![Graphify benchmark excerpt: 926 nodes, 1,529 edges, about 2,093 tokens per sample query, and a 29.5× reduction against its estimated full-corpus baseline.](assets/readme/graphify-benchmark.png)
+
+*Actual local benchmark excerpt, not measured account savings.* This installed
+version estimates the baseline from node count; it did not count every source
+file. The ratio compares sample graph queries with reading the entire estimated
+corpus, excludes graph-building cost, and says nothing about answer quality.
+[Captured output and provenance](assets/readme/README.md).
+
+### 4. Reduce command output before the model reads it
+
+**RTK — smaller tool responses.** Eligible read-only commands pass through
+command-specific filters that remove repetition and routine noise. The agent
+receives the compact result. Filtering runs locally without a model call;
+unsupported commands pass through the existing routing rules.
+
+![RTK project savings table: four commands, 933 estimated input tokens, 524 estimated output tokens and 409 estimated tokens removed, or 43.8%.](assets/readme/rtk-gain.png)
+
+This capture covers **four recorded commands**, not every command in the project.
+RTK estimates tokens from output bytes divided by four. Its input/output labels
+refer to text before/after filtering, not model prompt/completion tokens. The
+percentage describes output reduction, not weekly allowance saved.
+[RTK's measurement explanation](https://github.com/rtk-ai/rtk/blob/develop/docs/guide/resources/savings-explained.md).
+
+### 5. Check code through the quality wrapper
+
+**Problem:** raw linter logs can flood context, while repo-wide scans pull
+unrelated work into the task. **Approach:** select supported session-edited files,
+run the applicable checks, and parse their output before returning it to the
+agent. Unsupported files, including swap files and media, are skipped.
+
+| Tool inside the wrapper | What it checks or fixes |
+| --- | --- |
+| **Ruff** | Formats Python and reports lint problems, including unused imports. |
+| **Biome** | Formats and checks supported JavaScript, TypeScript, CSS and JSON. |
+| **HTMLHint** | Reports HTML markup problems. |
+| **markdownlint-cli2** | Checks Markdown structure and style. VibeHelper disables its line-length rule. |
+| **ShellCheck + shfmt** | ShellCheck reports shell-script mistakes; shfmt normalizes formatting. |
+| **PHP_CodeSniffer + PHPStan** | PHPCS reports coding-standard violations; PHPStan checks PHP types and other static-analysis problems. PHP formatting uses PHP_CodeSniffer's companion fixer when configured. |
+
+```mermaid
+flowchart TD
+    A[Agent edits files] --> B[Select supported session-edited paths]
+    B --> C[Run applicable formatter and linter]
+    C --> D[Preserve detailed logs and exit status]
+    D --> E[Python parses diagnostics and bounds the summary]
+    E --> F{Result}
+    F -->|Pass| G[PASS]
+    F -->|Findings or tool failure| H[Relevant diagnostics and evidence path]
+    H --> I[Agent checks relevance to the original task]
+    I -->|In scope| J[Review fix and recheck]
+    I -->|Outside scope| K[Report blocker and ask before expanding work]
+    J --> B
+```
+
+The parser is **Python, not an LLM**. PHPCS, PHPStan, Pyright and ShellCheck have
+structured JSON adapters; other outputs use text extraction. The wrapper retains
+locations, rule IDs, relevant warnings and tool failures, not just lines
+containing “error”. A parse failure is reported rather than treated as a pass.
+Full evidence stays on disk; the hook's failure excerpt is capped at **12 lines
+and 2 KiB**.
+
+Illustrative agent-facing result:
+
+```text
+lint-shellcheck: findings
+scripts/build.sh:8:6: warning [SC2086] Double quote to prevent globbing and word splitting.
+Full log: .cache/ai-quality/<run>.log
+```
+
+Formatting and configured automatic fixes handle mechanical changes. The agent
+reviews that diff and repairs remaining in-scope findings manually, then rechecks.
+Tests, broader analysis and whole-project lint are separate explicit checks.
+An unresolved finding stays blocked; an unchanged blocked Stop reuses its evidence
+instead of rerunning the same checks.
+
+The wrapper limits what it checks and returns. The agent's scope instructions
+require approval for unrelated work; a linter finding does not authorize it.
+This reduces scope drift without claiming the parser can enforce every agent
+decision.
+
 ## After install
 
 Restart Codex or Claude Code in the configured repo so it reloads the new files.
@@ -388,7 +543,8 @@ Run one check after setup:
 ```
 
 Trusted hooks handle normal edited-file checks after that. Pass `lint` to the
-provider verifier for broader linting, or `verify` for large, risky,
+provider verifier to check edits without formatting, or `lint --all` to explicitly
+lint the whole project. Use `verify` for large, risky,
 security-sensitive or cross-project changes. Each verifier selects its own
 Makefile. The project root Makefile is preserved.
 

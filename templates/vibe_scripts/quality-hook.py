@@ -492,64 +492,28 @@ def merge_review(value: dict, review: dict | None) -> dict:
     return value
 
 
-SCOPE_GUIDANCE = (
-    "Task scope: keep the user's original goal and agreed scope as the target. "
-    "Before each repair, explain how the finding prevents that goal or was caused by the task's changes. "
-    "A hook finding does not authorize unrelated cleanup, refactoring, tool installation, or environment changes. "
-    "For findings outside that scope, including unrelated pre-existing issues, or uncertain relevance, "
-    "report the location, cause, and smallest proposed next step; "
-    "ask for explicit scope approval and wait before doing that work. Continue independent work within the agreed scope. "
-    "Review automatic fixes for unintended changes. Keep unresolved verification blocked; "
-    "do not suppress findings, weaken checks, or claim completion."
-)
-
-
 def response(
     provider: str, event: str, value: dict, attempts: int = 0, *, repeated=False
 ) -> dict:
     ensure_helpers()
+    if value.get("explicitly_skipped"):
+        return {}
     if value["status"] == "passed":
-        message = f"[ai-quality] {value['label']}: passed ({value['command_count']} commands, {value['duration_seconds']}s)"
-        notices = [line for line in value["summary"] if not line.endswith(": passed")]
-        if notices:
-            message += "\n" + "\n".join(notices)
-    else:
-        message = QUALITY.render_result(value, 8 if repeated else 22)
-    if value.get("evidence"):
-        message += f"\nFull result: {value['evidence']}"
-    if repeated and value["status"] != "passed":
-        message = "Rechecked; diagnostics unchanged.\n" + message
-    if value["status"] != "passed" and not value.get("explicitly_skipped"):
-        message = SCOPE_GUIDANCE + "\n" + message
-    if event == "PostToolUse":
-        return {
-            "hookSpecificOutput": {
-                "hookEventName": "PostToolUse",
-                "additionalContext": message,
-            }
-        }
-    if event == "Stop" and value["status"] != "passed":
-        if value.get("explicitly_skipped"):
+        if event == "Stop":
             return {}
-        if attempts >= 3:
-            message += (
-                f"\nReassessment after {attempts} unsuccessful final rechecks: the diagnostic signature is unchanged. "
-                f"Likely category: {value['status']}. Inspect the first failing command's full log and its tool prerequisites before another edit. "
-                "Stop repeating the same repair. Reassess the cause against the original task; "
-                "report any environment blocker and ask before work outside the agreed scope."
-            )
-        if attempts >= 4:
-            # End the automatic loop explicitly without turning unresolved work into success.
-            return {
-                "continue": False,
-                "stopReason": "Verification remains blocked/unverified.\n" + message,
-            }
-        return {
-            "decision": "block",
-            "reason": "Verification remains blocked; resolve findings within the agreed scope and recheck.\n"
-            + message,
+        message = "PASS"
+    elif repeated and event == "Stop":
+        return {"continue": False, "stopReason": "BLOCKED — unchanged lint findings."}
+    else:
+        message = QUALITY.bound_output(QUALITY.render_result(value, 12), 12, 2048)
+    if event == "Stop":
+        return {"decision": "block", "reason": message}
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": event,
+            "additionalContext": message,
         }
-    return {}
+    }
 
 
 def acquire_lock(stream, timeout: float = 2) -> None:
@@ -567,7 +531,10 @@ def acquire_lock(stream, timeout: float = 2) -> None:
 
 
 def unavailable_response(event: str, message: str, repeated: bool = False) -> dict:
-    message = SCOPE_GUIDANCE + "\n" + message
+    # This path must work even when the helper modules cannot be imported.
+    message = (
+        "\n".join(message.splitlines()[:12]).encode()[:2048].decode(errors="ignore")
+    )
     if event == "Stop":
         if repeated:
             return {
@@ -739,7 +706,6 @@ def handle(root: Path, provider: str, event: str, payload: dict) -> dict:
                 state.update(
                     baseline=baseline,
                     baseline_format="stat-v1",
-                    design_baseline=design_snapshot(root, list(baseline)),
                 )
                 state.setdefault("paths", [])
                 state.setdefault("attempts", 0)
@@ -753,17 +719,50 @@ def handle(root: Path, provider: str, event: str, payload: dict) -> dict:
         baseline_missing = (
             "baseline" not in state or state.get("baseline_format") != "stat-v1"
         )
+        current_snapshot = snapshot(root) if event == "Stop" else None
         if event == "Stop" and not baseline_missing:
             paths = sorted(
-                set(paths) | set(changed_since(state["baseline"], snapshot(root)))
+                set(paths) | set(changed_since(state["baseline"], current_snapshot))
             )
         paths = CHECKER.project_paths(root, paths)
-        # Old test receipts must not gate automatic edited-file checks.
-        state.pop("verified_inputs", None)
-        state.pop("deletion_tests", None)
         selected = explicit if event == "PostToolUse" else paths
-        existing = CHECKER.existing_project_files(root, selected)
-        deleted = [name for name in selected if not (root / name).exists()]
+        inputs = None
+        if event == "Stop" and not baseline_missing:
+            helpers = [Path(__file__), Path(CHECKER.__file__), Path(QUALITY.__file__)]
+            marker = cache / "explicit-check"
+            # Reuse only failures; global tool changes require an explicit recheck.
+            inputs = hashlib.sha256(
+                json.dumps(
+                    {
+                        "files": current_snapshot,
+                        "selected": selected,
+                        "helpers": {str(p): file_stamp(p) for p in helpers},
+                        "explicit_check": file_stamp(marker)
+                        if marker.exists()
+                        else None,
+                        "path": os.environ.get("PATH", ""),
+                    },
+                    sort_keys=True,
+                ).encode()
+            ).hexdigest()
+            previous_evidence = state.get("blocked_evidence")
+            if inputs == state.get("blocked_inputs") and isinstance(
+                previous_evidence, str
+            ):
+                evidence = root / previous_evidence
+                try:
+                    if evidence.resolve().is_relative_to((cache / "results").resolve()):
+                        previous_value = json.loads(evidence.read_text())
+                        if previous_value.get("status") in {
+                            "findings",
+                            "tool_failure",
+                            "not_checked",
+                        } and not previous_value.get("explicitly_skipped"):
+                            return response(
+                                provider, event, previous_value, repeated=True
+                            )
+                except (OSError, ValueError, AttributeError):
+                    pass
         if not paths:
             value = QUALITY.result(
                 "not_checked",
@@ -775,33 +774,11 @@ def handle(root: Path, provider: str, event: str, payload: dict) -> dict:
                 ],
                 explicitly_skipped=not baseline_missing,
             )
-        elif deleted and len(deleted) == len(selected):
-            value = QUALITY.result(
-                "not_checked",
-                "session quality",
-                [
-                    "Explicitly skipped edited-file checks: selected files were removed or moved."
-                ],
-                explicitly_skipped=not baseline_missing,
-            )
         else:
             value = CHECKER.check_files(
                 root,
-                existing,
+                selected,
                 timeout=max(1, min(45, 55 - (time.monotonic() - started))),
-            )
-            if event == "Stop":
-                value = merge_review(
-                    value,
-                    review_design(
-                        root, paths, state, 55 - (time.monotonic() - started)
-                    ),
-                )
-        if deleted:
-            value["summary"].append(
-                f"{len(deleted)} removed/moved path(s) recorded. Tests were not run by this hook. "
-                f"Verify the refactor explicitly with make -f vibe_scripts/{provider}/Makefile test-ai "
-                "or the project's test command; test failures are reported there."
             )
         if baseline_missing and event == "Stop":
             if value["status"] == "passed":
@@ -810,6 +787,11 @@ def handle(root: Path, provider: str, event: str, payload: dict) -> dict:
                 0,
                 "SessionStart baseline is missing; shell changes remain unverified. Start a new session and verify explicitly.",
             )
+        evidence_dir = cache / "results"
+        evidence_dir.mkdir(exist_ok=True)
+        evidence = evidence_dir / (key + f"-{time.time_ns()}.json")
+        value["evidence"] = str(evidence.relative_to(root))
+        QUALITY.save_summary(value, root=root, max_lines=22)
         signature = (
             value.get("diagnostic_signature")
             or hashlib.sha256(json.dumps(value["summary"]).encode()).hexdigest()
@@ -844,52 +826,31 @@ def handle(root: Path, provider: str, event: str, payload: dict) -> dict:
                 "delegation_overhead": "not measured by quality hooks",
             }
         )
-        if attempts >= 3:
-            edits = [
-                path
-                for record in history
-                if isinstance(record, dict)
-                for path in record.get("edited_paths", [])
-            ]
-            value["summary"].insert(
-                0,
-                "Attempted repair paths: "
-                + (
-                    ", ".join(sorted(set(edits))[:10])
-                    or "none recorded; repeated checks alone are not repair attempts"
-                ),
-            )
         # Keep full findings available even when repeated messages are compact.
-        evidence_dir = cache / "results"
-        evidence_dir.mkdir(exist_ok=True)
-        evidence = evidence_dir / (key + f"-{time.time_ns()}.json")
         evidence.write_text(json.dumps(value), encoding="utf-8")
-        value["evidence"] = str(evidence.relative_to(root))
-        repeated = (
-            state.get("reported_signature") == signature
-            and state.get("reported_status") == value["status"]
+        result = response(provider, event, value, attempts)
+        if event == "Stop":
+            if value["status"] != "passed" and not value.get("explicitly_skipped"):
+                state["blocked_inputs"] = inputs
+                state["blocked_evidence"] = value["evidence"]
+            else:
+                state.pop("blocked_inputs", None)
+                state.pop("blocked_evidence", None)
+        # Stop has no success context field; emit its single status on stderr.
+        user_summary = (
+            "PASS"
+            if event == "Stop"
+            and value["status"] == "passed"
+            and not value.get("explicitly_skipped")
+            else ""
         )
-        result = response(provider, event, value, attempts, repeated=repeated)
-        state["reported_signature"] = signature
-        state["reported_status"] = value["status"]
-        # Failure details already travel in the structured response.
-        user_summary = f"[ai-quality] {value['label']}: {value['status']}"
-        if value["status"] == "passed":
-            notices = [
-                line for line in value["summary"] if not line.endswith(": passed")
-            ]
-            if notices:
-                user_summary += "\n" + "\n".join(notices)
-        if value.get("explicitly_skipped"):
-            user_summary = QUALITY.render_result(value, 8)
-        history[-1]["emitted_bytes"] = len(
-            (json.dumps(result) + "\n" + user_summary + "\n").encode()
-        )
+        history[-1]["emitted_bytes"] = len((json.dumps(result) + user_summary).encode())
         # The lock serializes reads/writes; replacement protects interrupted writes.
         temporary = state_path.with_suffix(f".{os.getpid()}.tmp")
         temporary.write_text(json.dumps(state), encoding="utf-8")
         temporary.replace(state_path)
-        print(user_summary, file=sys.stderr)
+        if user_summary:
+            print(user_summary, file=sys.stderr)
         return result
 
 
@@ -1131,7 +1092,6 @@ def main() -> int:
         subprocess.SubprocessError,
     ) as error:
         message = f"Quality hook tool failure: {type(error).__name__}: {error}. Check required helper files, session state and cache permissions; verification remains incomplete."
-        print(message, file=sys.stderr)
         result = unavailable_response(
             args.event,
             message,

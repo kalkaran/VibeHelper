@@ -10,8 +10,8 @@ if [[ "$(basename -- "$SCRIPT_DIR")" == "codex" || "$(basename -- "$SCRIPT_DIR")
 	ROOT="$(cd -- "$SCRIPT_DIR/../.." && pwd)"
 fi
 shift "$(($# > 0 ? 1 : 0))"
-if [[ "$MODE" != "test" && "$MODE" != "fallow" && "$#" -gt 0 ]]; then
-	echo "Only test and fallow accept additional scope arguments" >&2
+if [[ "$MODE" != "test" && "$MODE" != "fallow" && "$MODE" != "edited" && "$MODE" != "lint" && "$#" -gt 0 ]]; then
+	echo "Only edited, lint, test and fallow accept additional scope arguments" >&2
 	exit 2
 fi
 MAKE_ARGS=()
@@ -20,28 +20,6 @@ if [[ -f "$SCRIPT_DIR/Makefile" ]]; then
 fi
 cd "$ROOT"
 export PATH="$HOME/.local/bin:$PATH"
-
-changed_files() {
-	if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-		git diff --name-only --diff-filter=ACMRTUXB HEAD 2>/dev/null || git diff --name-only --diff-filter=ACMRTUXB
-	fi
-}
-
-print_changed_files_summary() {
-	local tmp count limit=30
-	tmp="$(mktemp)"
-	changed_files >"$tmp" || true
-	count="$(wc -l <"$tmp" | tr -d ' ')"
-	if [[ "$count" -eq 0 ]]; then
-		echo "  none"
-	elif [[ "$count" -le "$limit" ]]; then
-		sed 's/^/  - /' "$tmp"
-	else
-		head -n "$limit" "$tmp" | sed 's/^/  - /'
-		echo "  ... $((count - limit)) more changed files hidden from AI output"
-	fi
-	rm -f "$tmp"
-}
 
 run_if_available() {
 	local name="$1"
@@ -54,20 +32,24 @@ run_if_available() {
 	fi
 }
 
-echo "Agent verification from: $ROOT"
-echo "Mode: $MODE"
-echo
-
-echo "Changed files:"
-print_changed_files_summary
-echo
-
 if [[ "$MODE" == "fallow" ]]; then
 	python3 "$SCRIPT_DIR/fallow.py" report "$@"
 elif [[ "$MODE" == "edited" ]]; then
+	if [[ "$#" -gt 0 ]]; then
+		export VIBEHELPER_EDITED_FILES_JSON
+		VIBEHELPER_EDITED_FILES_JSON="$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1:]))' "$@")"
+	fi
 	make "${MAKE_ARGS[@]}" edited-ai
 elif [[ "$MODE" == "lint" ]]; then
-	make "${MAKE_ARGS[@]}" lint-ai
+	if [[ "${1:-}" == "--all" ]]; then
+		[[ "$#" -eq 1 ]] || {
+			echo "--all cannot be combined with paths" >&2
+			exit 2
+		}
+		make "${MAKE_ARGS[@]}" lint-all-ai
+	else
+		python3 "$SCRIPT_DIR/agent-check-edited.py" --mode lint -- "$@"
+	fi
 elif [[ "$MODE" == "typecheck" ]]; then
 	make "${MAKE_ARGS[@]}" typecheck-ai
 elif [[ "$MODE" == "test" ]]; then
