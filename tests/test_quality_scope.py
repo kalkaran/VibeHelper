@@ -277,7 +277,7 @@ def test_unchanged_stops_reuse_failure_without_commands_or_logs(
         result = HOOK.handle(project, provider, "Stop", payload)
         assert result == {
             "continue": False,
-            "stopReason": "BLOCKED — unchanged lint findings.",
+            "stopReason": "BLOCKED — unchanged quality findings.",
         }
     assert calls(project) == before_calls
     assert set((project / ".cache").rglob("*")) == before_logs

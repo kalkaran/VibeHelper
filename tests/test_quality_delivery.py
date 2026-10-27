@@ -296,7 +296,7 @@ def test_provider_delivery_preserves_edit_and_requests_stop_repair(provider):
     exhausted = HOOK.response(provider, "Stop", value, repeated=True)
     assert exhausted == {
         "continue": False,
-        "stopReason": "BLOCKED — unchanged lint findings.",
+        "stopReason": "BLOCKED — unchanged quality findings.",
     }
 
 

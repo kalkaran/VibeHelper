@@ -119,14 +119,15 @@ def test_repeated_hook_checks_execute_and_keep_complete_result(
     first = HOOK.handle(tmp_path, provider, "PostToolUse", payload)
     second = HOOK.handle(tmp_path, provider, "PostToolUse", payload)
     text = second["hookSpecificOutput"]["additionalContext"]
-    assert len(json.dumps(second)) < len(json.dumps(first))
-    assert "Rechecked; diagnostics unchanged" in text
+    assert len(text.encode()) <= 2048 and len(text.splitlines()) <= 12
+    assert len(first["hookSpecificOutput"]["additionalContext"].encode()) <= 2048
     assert "demo.py:0 F821" in text
     assert "summary log (read first):" in text.lower()
-    assert "explicit scope approval" in text
     stopped = HOOK.handle(tmp_path, provider, "Stop", payload)
     assert stopped["decision"] == "block"
     assert len(calls) == 3, "Reporting deduplication must not skip checks"
+    assert HOOK.handle(tmp_path, provider, "Stop", payload)["continue"] is False
+    assert len(calls) == 3, "Unchanged blocked Stops must reuse their evidence"
     records = list((tmp_path / ".cache/quality-sessions/results").glob("*.json"))
     assert len(records) == 3
     assert all(len(json.loads(path.read_text())["summary"]) == 25 for path in records)
@@ -137,6 +138,7 @@ def test_repeated_hook_checks_execute_and_keep_complete_result(
             "passed", "fixture", ["passed"], command_count=1
         ),
     )
+    (tmp_path / "demo.py").write_text("repaired")
     assert HOOK.handle(tmp_path, provider, "Stop", payload) == {}
 
 
@@ -150,11 +152,11 @@ def test_passed_hook_presentation_is_short_and_honest():
     )
     response = HOOK.response("codex", "PostToolUse", value)
     message = response["hookSpecificOutput"]["additionalContext"]
-    assert message == "[ai-quality] edited files: passed (2 commands, 0.5s)"
+    assert message == "PASS"
     assert value["summary"] == ["format: passed", "lint: passed"]
 
 
-def test_mixed_deletion_pass_keeps_explicit_test_warning(tmp_path, monkeypatch, capsys):
+def test_mixed_deletion_pass_does_not_add_success_noise(tmp_path, monkeypatch, capsys):
     git(tmp_path, "init", "-q")
     (tmp_path / "old.py").write_text("old")
     HOOK.handle(tmp_path, "codex", "SessionStart", {"session_id": "mixed"})
@@ -173,10 +175,9 @@ def test_mixed_deletion_pass_keeps_explicit_test_warning(tmp_path, monkeypatch, 
     }
     result = HOOK.handle(tmp_path, "codex", "PostToolUse", payload)
     text = result["hookSpecificOutput"]["additionalContext"]
-    assert "Tests were not run" in text and "test-ai" in text
-    assert "summary log (read first):" in text.lower()
+    assert text == "PASS"
     assert HOOK.handle(tmp_path, "codex", "Stop", payload) == {}
-    assert "Tests were not run" in capsys.readouterr().err
+    assert capsys.readouterr().err == "PASS\n"
 
 
 def test_evaluation_pack_covers_twelve_independent_outcomes():

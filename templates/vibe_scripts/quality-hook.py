@@ -387,11 +387,6 @@ def review_design(root: Path, paths: list[str], state: dict, remaining: float):
             if launcher.is_file() and os.access(launcher, os.X_OK):
                 executable = [str(launcher)]
                 break
-    if not executable and not any(
-        (root / scope / "skills/impeccable").exists()
-        for scope in (".agents", ".claude", ".codex")
-    ):
-        return None
     try:
         if not design_enabled(root):
             return None
@@ -472,11 +467,16 @@ def merge_review(value: dict, review: dict | None) -> dict:
     if review is None:
         return value
     priority = {"passed": 0, "findings": 1, "not_checked": 2, "tool_failure": 3}
-    value["status"] = max((value["status"], review["status"]), key=priority.get)
+    if value.pop("explicitly_skipped", False):
+        value["status"] = review["status"]
+    else:
+        value["status"] = max((value["status"], review["status"]), key=priority.get)
     value["summary"].extend(
         [f"UI design review: {review['status']}", *review["summary"]]
     )
-    if review.get("log"):
+    if review.get("summary_log"):
+        value["summary"].append(f"Summary log: {review['summary_log']}")
+    elif review.get("log"):
         value["summary"].append(f"Full log: {review['log']}")
     for metric in ("command_count", "duration_seconds", "output_bytes"):
         value[metric] += review[metric]
@@ -503,7 +503,10 @@ def response(
             return {}
         message = "PASS"
     elif repeated and event == "Stop":
-        return {"continue": False, "stopReason": "BLOCKED — unchanged lint findings."}
+        return {
+            "continue": False,
+            "stopReason": "BLOCKED — unchanged quality findings.",
+        }
     else:
         message = QUALITY.bound_output(QUALITY.render_result(value, 12), 12, 2048)
     if event == "Stop":
@@ -706,6 +709,7 @@ def handle(root: Path, provider: str, event: str, payload: dict) -> dict:
                 state.update(
                     baseline=baseline,
                     baseline_format="stat-v1",
+                    design_baseline=design_snapshot(root, list(baseline)),
                 )
                 state.setdefault("paths", [])
                 state.setdefault("attempts", 0)
@@ -726,6 +730,28 @@ def handle(root: Path, provider: str, event: str, payload: dict) -> dict:
             )
         paths = CHECKER.project_paths(root, paths)
         selected = explicit if event == "PostToolUse" else paths
+        design_paths = (
+            [
+                name
+                for name in selected
+                if Path(name).suffix.lower() in CHECKER.FRONTEND_DESIGN_EXTS
+                and (root / name).is_file()
+            ]
+            if event == "Stop"
+            else []
+        )
+        design_settings = None
+        if design_paths:
+            design_settings = {
+                name: file_stamp(root / ".impeccable" / name)
+                if (root / ".impeccable" / name).is_file()
+                else None
+                for name in ("config.json", "config.local.json")
+            }
+            design_settings["disabled"] = os.environ.get("IMPECCABLE_HOOK_DISABLED", "")
+            if state.get("design_settings") != design_settings:
+                state["design_reviewed"] = {}
+                state["design_settings"] = design_settings
         inputs = None
         if event == "Stop" and not baseline_missing:
             helpers = [Path(__file__), Path(CHECKER.__file__), Path(QUALITY.__file__)]
@@ -741,6 +767,7 @@ def handle(root: Path, provider: str, event: str, payload: dict) -> dict:
                         if marker.exists()
                         else None,
                         "path": os.environ.get("PATH", ""),
+                        "design_settings": design_settings,
                     },
                     sort_keys=True,
                 ).encode()
@@ -779,6 +806,13 @@ def handle(root: Path, provider: str, event: str, payload: dict) -> dict:
                 root,
                 selected,
                 timeout=max(1, min(45, 55 - (time.monotonic() - started))),
+            )
+        if design_paths:
+            value = merge_review(
+                value,
+                review_design(
+                    root, design_paths, state, 55 - (time.monotonic() - started)
+                ),
             )
         if baseline_missing and event == "Stop":
             if value["status"] == "passed":

@@ -1329,7 +1329,20 @@ def log_hook_error(reason: str, *, raw: str = "", error: Exception | None = None
         "reason": reason,
     }
     if error is not None:
+        import re
+
         entry["error_type"] = type(error).__name__
+        detail = str(error).replace(raw, "[hook input omitted]") if raw else str(error)
+        detail = re.sub(r"(?i)\bBearer\s+[^\s,;]+", "Bearer [REDACTED]", detail)
+        entry["error"] = re.sub(
+            r"(?i)\b(api[_-]?key|access[_-]?token|password|secret)(\s*[:=]\s*)[^\s,;]+",
+            r"\1\2[REDACTED]",
+            detail,
+        )
+        for field in ("errno", "filename", "lineno", "colno", "pos"):
+            value = getattr(error, field, None)
+            if value is not None:
+                entry[field] = value
     if raw:
         entry["input_bytes"] = len(raw.encode("utf-8", errors="replace"))
     try:
@@ -1616,7 +1629,20 @@ def log_hook_error(reason: str, *, raw: str = "", error: Exception | None = None
         "reason": reason,
     }
     if error is not None:
+        import re
+
         entry["error_type"] = type(error).__name__
+        detail = str(error).replace(raw, "[hook input omitted]") if raw else str(error)
+        detail = re.sub(r"(?i)\bBearer\s+[^\s,;]+", "Bearer [REDACTED]", detail)
+        entry["error"] = re.sub(
+            r"(?i)\b(api[_-]?key|access[_-]?token|password|secret)(\s*[:=]\s*)[^\s,;]+",
+            r"\1\2[REDACTED]",
+            detail,
+        )
+        for field in ("errno", "filename", "lineno", "colno", "pos"):
+            value = getattr(error, field, None)
+            if value is not None:
+                entry[field] = value
     if raw:
         entry["input_bytes"] = len(raw.encode("utf-8", errors="replace"))
     try:
@@ -1761,7 +1787,20 @@ def log_hook_error(reason: str, *, raw: str = "", error: Exception | None = None
         "reason": reason,
     }
     if error is not None:
+        import re
+
         entry["error_type"] = type(error).__name__
+        detail = str(error).replace(raw, "[hook input omitted]") if raw else str(error)
+        detail = re.sub(r"(?i)\bBearer\s+[^\s,;]+", "Bearer [REDACTED]", detail)
+        entry["error"] = re.sub(
+            r"(?i)\b(api[_-]?key|access[_-]?token|password|secret)(\s*[:=]\s*)[^\s,;]+",
+            r"\1\2[REDACTED]",
+            detail,
+        )
+        for field in ("errno", "filename", "lineno", "colno", "pos"):
+            value = getattr(error, field, None)
+            if value is not None:
+                entry[field] = value
     if raw:
         entry["input_bytes"] = len(raw.encode("utf-8", errors="replace"))
     try:
@@ -2052,7 +2091,9 @@ lists. When session evidence is unavailable, verification remains blocked; use
 Automatic checks lint/format only supported, existing session-edited files.
 Unsupported files, metadata, media and deletions are skipped. Config changes never
 expand file targets. Missing required tools and actual lint/format failures block.
-Tests, builds, type checks, design review and Fallow run separately on request.
+Tests, builds, type checks and Fallow run separately on request. At Stop,
+changed UI markup or styles require a scoped Impeccable review; logic-only edits
+do not. A design result never authorizes unrelated redesign work.
 Preserve explicit paths when replacing a blocked tool command: use
 `agent-verify.sh lint PATH ...` for checks and `agent-verify.sh edited PATH ...`
 for formatting/autofixes. The replacement table does not override file scope.

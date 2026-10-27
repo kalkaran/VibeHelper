@@ -325,8 +325,8 @@ run_hook_error_logging_test() {
 		cat "$tmp/.cache/hook-errors.log" >&2
 		return 1
 	fi
-	if ! grep -Fq '"stdin_preview": "{bad json"' "$tmp/.cache/hook-errors.log"; then
-		echo "Claude hook log did not include stdin preview" >&2
+	if ! grep -Fq '"colno": 2' "$tmp/.cache/hook-errors.log" || ! grep -Fq '"error":' "$tmp/.cache/hook-errors.log"; then
+		echo "Claude hook log did not include error details and location" >&2
 		cat "$tmp/.cache/hook-errors.log" >&2
 		return 1
 	fi

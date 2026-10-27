@@ -96,7 +96,7 @@ def test_design_projection(project, name, before, after, design):
 
 
 @pytest.mark.parametrize("provider", ["codex", "claude"])
-def test_lint_completion_does_not_run_design_detection(project, monkeypatch, provider):
+def test_completion_reviews_only_changed_design_once(project, monkeypatch, provider):
     (project / "theme.css").write_text("body {color:black}")
     (project / "untouched.html").write_text('<h1 class="old">Existing dirty UI</h1>')
     (project / "tracking.ts").write_text("export const track = 1;")
@@ -127,12 +127,12 @@ def test_lint_completion_does_not_run_design_detection(project, monkeypatch, pro
     )
     assert not calls
     assert HOOK.handle(project, provider, "Stop", payload) == {}
-    assert calls == []
+    assert calls == [["impeccable", "detect", "theme.css"]]
     assert HOOK.handle(project, provider, "Stop", payload) == {}
-    assert calls == []
+    assert len(calls) == 1
     (project / "theme.css").write_text("body {color:blue}")
     HOOK.handle(project, provider, "Stop", payload)
-    assert calls == []
+    assert len(calls) == 2
 
 
 def test_new_logic_file_does_not_become_design_work(project, monkeypatch):
@@ -146,7 +146,9 @@ def test_new_logic_file_does_not_become_design_work(project, monkeypatch):
 
 
 @pytest.mark.parametrize("status", ["findings", "tool_failure"])
-def test_design_failure_does_not_enter_lint_completion(project, monkeypatch, status):
+def test_design_failure_blocks_without_repeated_detector_runs(
+    project, monkeypatch, status
+):
     path = project / "page.html"
     path.write_text("<h1>Before</h1>")
     payload = {"session_id": "pending"}
@@ -159,10 +161,94 @@ def test_design_failure_does_not_enter_lint_completion(project, monkeypatch, sta
         return HOOK.QUALITY.result(status, "UI design review", ["review failed"])
 
     monkeypatch.setattr(HOOK.QUALITY, "run_quality", run)
-    for _ in range(2):
-        result = HOOK.handle(project, "codex", "Stop", payload)
+    result = HOOK.handle(project, "codex", "Stop", payload)
+    assert result["decision"] == "block" and "UI design review" in result["reason"]
+    result = HOOK.handle(project, "codex", "Stop", payload)
+    assert result == {
+        "continue": False,
+        "stopReason": "BLOCKED — unchanged quality findings.",
+    }
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize(
+    "status", ["passed", "findings", "not_checked", "tool_failure"]
+)
+def test_design_only_file_cannot_hide_behind_lint_skip(project, monkeypatch, status):
+    monkeypatch.setattr(
+        HOOK.CHECKER,
+        "check_files",
+        lambda *a, **kw: HOOK.QUALITY.result(
+            "not_checked", "assets", [], explicitly_skipped=True
+        ),
+    )
+    payload = {"session_id": "design-only"}
+    HOOK.handle(project, "claude", "SessionStart", payload)
+    (project / "Widget.vue").write_text("<template><h1>New</h1></template>")
+    monkeypatch.setattr(
+        HOOK.QUALITY,
+        "run_quality",
+        lambda *a, **kw: HOOK.QUALITY.result(
+            status, "UI design review", ["detector result"], command_count=1
+        ),
+    )
+    result = HOOK.handle(project, "claude", "Stop", payload)
+    if status == "passed":
         assert result == {}
-    assert calls == []
+    else:
+        assert result["decision"] == "block"
+    evidence = next((project / ".cache/quality-sessions/results").glob("*.json"))
+    assert json.loads(evidence.read_text())["status"] == status
+
+
+def test_design_settings_invalidate_pass_and_block_cache(project, monkeypatch):
+    path = project / "page.html"
+    path.write_text("<h1>Before</h1>")
+    payload = {"session_id": "settings"}
+    HOOK.handle(project, "codex", "SessionStart", payload)
+    path.write_text("<h1>After</h1>")
+    calls = []
+    status = ["passed"]
+
+    def run(*args, **kwargs):
+        calls.append(args)
+        return HOOK.QUALITY.result(status[0], "UI design review", ["review result"])
+
+    monkeypatch.setattr(HOOK.QUALITY, "run_quality", run)
+    assert HOOK.handle(project, "codex", "Stop", payload) == {}
+    assert HOOK.handle(project, "codex", "Stop", payload) == {}
+    assert len(calls) == 1
+    config = project / ".impeccable/config.local.json"
+    config.parent.mkdir()
+    config.write_text(json.dumps({"hook": {"enabled": True}}))
+    status[0] = "findings"
+    assert HOOK.handle(project, "codex", "Stop", payload)["decision"] == "block"
+    assert len(calls) == 2
+    assert HOOK.handle(project, "codex", "Stop", payload)["continue"] is False
+    monkeypatch.setenv("IMPECCABLE_HOOK_DISABLED", "1")
+    assert HOOK.handle(project, "codex", "Stop", payload) == {}
+    assert len(calls) == 2
+    monkeypatch.delenv("IMPECCABLE_HOOK_DISABLED")
+    assert HOOK.handle(project, "codex", "Stop", payload)["decision"] == "block"
+    assert len(calls) == 3
+
+
+def test_missing_detector_only_blocks_real_design_changes(project, monkeypatch):
+    monkeypatch.setattr(HOOK.CHECKER, "local_impeccable_command", lambda root: None)
+    path = project / "Widget.tsx"
+    path.write_text("const id=1; export const UI=()=> <h1>Hello</h1>")
+    payload = {"session_id": "missing-detector"}
+    HOOK.handle(project, "codex", "SessionStart", payload)
+    path.write_text("const id=2; export const UI=()=> <h1>Hello</h1>")
+    assert HOOK.handle(project, "codex", "Stop", payload) == {}
+    path.write_text("const id=2; export const UI=()=> <h1>Welcome</h1>")
+    # Resuming the same session must not reset the design baseline.
+    HOOK.handle(project, "codex", "SessionStart", payload)
+    result = HOOK.handle(project, "codex", "Stop", payload)
+    assert (
+        result["decision"] == "block"
+        and "Impeccable is unavailable" in result["reason"]
+    )
 
 
 @pytest.mark.parametrize("options", [{"enabled": False}, {"consent": "declined"}])
@@ -386,12 +472,12 @@ def test_jsx_fragment_copy_changes_are_design_work(project):
     assert HOOK.design_fingerprint(path) != original
 
 
-def test_unconfigured_design_hook_does_not_require_baseline_or_large_file_review(
-    project, monkeypatch
-):
+def test_unavailable_design_baseline_does_not_claim_a_review_pass(project, monkeypatch):
     monkeypatch.setattr(HOOK.CHECKER, "local_impeccable_command", lambda root: None)
     (project / "large.ts").write_text("x" * 131073)
-    assert HOOK.review_design(project, ["large.ts"], {}, 30) is None
+    result = HOOK.review_design(project, ["large.ts"], {}, 30)
+    assert result["status"] == "not_checked"
+    assert "baseline unavailable" in result["summary"][0]
 
 
 def test_fingerprinting_time_is_deducted_from_detector_budget(project, monkeypatch):

@@ -391,14 +391,13 @@ def test_standalone_quality_phase_installs_runtime(tmp_path, provider, platform)
         outcome = json.loads(checked.stdout)
         if event == "SessionStart":
             assert outcome == {}, checked.stderr
-        elif outcome:
-            assert outcome.get("decision") == "block", outcome
         else:
-            # A deletion may pass only after real package checks, never an empty skip.
+            assert outcome == {}, outcome
             evidence = sorted((repo / ".cache/quality-sessions/results").glob("*.json"))
             final = json.loads(evidence[-1].read_text())
-            assert final["status"] == "passed" and final["command_count"] > 0, final
-    assert "Tests were not run by this hook" in checked.stderr + checked.stdout
+            assert final["status"] == "not_checked", final
+            assert final["explicitly_skipped"] is True and final["command_count"] == 0
+            assert checked.stderr == ""
 
 
 def test_cleanup_rejects_outside_scope_and_symlink_parent(tmp_path):

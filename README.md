@@ -313,9 +313,11 @@ files, such as swap files and media, are skipped. Detailed logs stay on disk;
 failure summaries show relevant diagnostics and an evidence path. Successful
 checks emit `PASS`. Moves are checked at the
 new path; removed paths remain recorded in session history. Deletion-only changes
-skip edited-file checks with an explicit reminder that tests have not run. Hooks
+skip edited-file checks silently and record that no checks ran. Hooks
 do not launch test suites, require test receipts, or scan installed dependencies.
 Real edited-file findings and missing session baselines still block completion.
+At Stop, changed UI markup or styles also require scoped design review. Logic-only
+changes do not trigger it; see [design review](DESIGN-REVIEW.md).
 
 After deleting, moving or refactoring files, run the project's tests explicitly:
 
@@ -396,6 +398,10 @@ Defaults and opt-in tools differ between the two helpers. They can install:
 - Impeccable: helps with frontend design, layout, polish, and UI checks when
   enabled.
 - LLM Council: provides optional multi-model review for high-value decisions.
+- OmniRoute: routes approved small tasks to eligible free models through a local
+  gateway, with the main agent reviewing the result.
+- Codex usage tracker: shows recorded usage by project, model, session and turn
+  in a live local dashboard.
 - RTK: trims noisy read-only command output before it reaches the agent.
 - Ruff: formats and lints Python.
 - Biome: formats and checks JavaScript, TypeScript, CSS, and JSON.
@@ -406,83 +412,217 @@ Defaults and opt-in tools differ between the two helpers. They can install:
 
 ## How the tools help
 
-### 1. Give the agent a workflow
+### Codex project files
 
-| Tool | Problem it solves | How it helps and works |
-| --- | --- | --- |
-| **Codex project files** | New sessions lack project context. | `AGENTS.md`, repo notes and helper scripts give Codex a repeatable starting point. Hooks connect supported editing events to checks. |
-| **Claude Code project files** | Claude needs the same project conventions in its own format. | `CLAUDE.md`, hooks, slash commands and helper scripts expose the workflow through Claude's native integration. |
-| **Ponytail** | Small requests grow into unnecessary architecture. | Skill instructions favour existing code, standard tools and the smallest complete change. The agent still reviews risks and verifies the result. |
-| **Unlazy** | Long tasks stop at a plan or a partial implementation. | The agent defines acceptance checks, breaks work into bounded steps and tracks evidence before declaring completion. It does not replace tests. |
-| **[LLM Council](https://github.com/karpathy/llm-council)** | One model can miss an important assumption. | Models answer through OpenRouter, review each other's responses, then a chair model synthesizes the result. VibeHelper optionally clones the project; running it needs separate setup and adds provider usage. |
+New sessions need the project's conventions and commands. `AGENTS.md`, repo
+notes, hooks and helper scripts give Codex that starting point and connect edits
+to scoped quality checks.
 
-Skills guide the model's behaviour; they are not automatic proof of correctness.
+**Example:** after editing a Python file, the hook formats and lints that file
+and returns a short result.
 
-### 2. Improve writing and design
+### Claude Code project files
 
-**Humanizer — clearer prose.** The agent applies editing rules to remove filler,
-inflated claims and repetitive phrasing while preserving meaning. It is an
-LLM-assisted rewrite, not a Python text compressor.
+`CLAUDE.md`, hooks, slash commands and helper scripts bring the same workflow
+into Claude Code's native configuration.
 
-Illustrative edit; word counts, not measured token savings:
+**Example:** a new Claude session reads the repo instructions and uses its
+installed verification script to check edited files.
+
+### Humanizer
+
+The agent uses editing rules to remove filler, inflated claims and repetitive
+phrasing while preserving meaning. This is an LLM-assisted rewrite.
+
+Example edit:
 
 | Before: 27 words | After: 7 words |
 | --- | --- |
 | It is important to note that you will need to restart the application after making changes to the configuration in order for those changes to take effect. | Restart the application to apply configuration changes. |
 
-**Impeccable — usable interfaces.** Design guidance helps the agent choose a clear
-hierarchy, readable typography and consistent spacing. Browser inspection and
-design checks expose overflow, weak focus states and awkward layouts. Its
-deterministic detector supplements visual review; passing it does not prove the
-interface works well.
+### Context7
 
-### 3. Find the right context before changing code
+Remembered API details can be outdated. The agent identifies the library and
+fetches documentation for the specific question through Context7's service.
 
-| Tool | Problem it solves | How it helps and works |
-| --- | --- | --- |
-| **Context7** | Remembered API details may be outdated. | The agent resolves the library, then requests documentation for a specific question. Relevant examples replace guessing or reading an entire manual. Documentation retrieval uses an external service. |
-| **Chrome DevTools MCP** | Source code alone cannot show browser behaviour. | Browser tools let the agent inspect the DOM, console and network, interact with controls and capture screenshots. This checks the rendered result against the intended behaviour. |
-| **Graphify** | Repeatedly reading a large repo wastes context. | It builds a persistent graph of entities and relationships. Focused queries retrieve connected context with source references. Building or enriching the graph can use models; the local benchmark below does not. |
-| **code-review-graph** | A small edit can break a distant caller. | A code graph identifies callers, dependents and affected flows so review can focus on the change's reach. Its context-size estimates are separate from Graphify's benchmark. Missing graph coverage still requires source inspection. |
+**Example:** before changing authentication middleware, retrieve the relevant
+framework's current middleware API and example.
+
+### Chrome DevTools MCP
+
+Browser tools let the agent inspect the DOM, console and network, operate
+controls and capture screenshots. This exposes problems visible only when the
+application runs.
+
+**Example:** reproduce a failed form submission, inspect its network response
+and confirm the repaired form works in the browser.
+
+### Ponytail
+
+Skill instructions keep small requests from growing into unnecessary
+architecture. The agent favours existing code and the smallest complete change,
+then checks its risks and verifies the result.
+
+**Example:** reuse the project's date formatter for a new column instead of
+adding another dependency and formatting layer.
+
+### Unlazy
+
+Long tasks can end with a convincing summary and unfinished work. Unlazy records
+the required outcomes before implementation and checks the evidence before the
+agent reports completion.
+
+#### Acceptance gates
+
+A gate is an observable condition that must hold for the task to be complete.
+For example, a project-selector task might use these gates:
+
+| Gate | Required evidence |
+| --- | --- |
+| Selecting a project shows only that project's usage. | A test with two projects passes. |
+| Refresh preserves the selected project. | A refresh test passes. |
+| The selector remains usable on a narrow screen. | A browser review records the viewport and result. |
+
+Runnable gates store `CHECK` (the command), `EXPECT` (the success marker) and
+`EVIDENCE` in `GATES.md`. Passing requires a zero exit status, the expected output
+and evidence tied to the current check definition. Manual gates record review
+evidence where a command cannot decide the outcome.
+
+#### Other parts of the workflow
+
+- **Task tree:** split larger work into bounded deliverables with dependencies,
+  file ownership and their own gates. Small tasks use one ledger.
+- **Review passes:** implement, review the approach, find defects and polish;
+  repeat until the review is clean.
+- **Independent verification:** in delegated work, the parent reruns checks and
+  verifies that the pieces work together.
+- **Honest handoff:** unmet or abandoned gates remain visible. The final report
+  reconciles the original request with the evidence instead of declaring them done.
+- **Optional stop check:** a separately enabled Claude Code hook checks gate and
+  dispatch status. It does not execute tests; a progress guard releases repeated
+  no-progress blocks after six attempts.
+
+Gate commands require explicit approval before execution. Planning and review
+use the agent; the gate checker itself runs locally without model calls.
+
+### Graphify
+
+Repeatedly reading a large repo uses context quickly. Graphify builds a
+persistent graph of entities and relationships so focused queries can return
+connected context with source references. Graph building or enrichment can use
+models; its local benchmark does not.
+
+**Example:** ask which modules handle authentication, then inspect those modules
+and their connections. Graphify's context benchmark displays the comparison:
 
 ![Graphify benchmark excerpt: 926 nodes, 1,529 edges, about 2,093 tokens per sample query, and a 29.5× reduction against its estimated full-corpus baseline.](assets/readme/graphify-benchmark.png)
 
-*Actual local benchmark excerpt, not measured account savings.* This installed
-version estimates the baseline from node count; it did not count every source
-file. The ratio compares sample graph queries with reading the entire estimated
-corpus, excludes graph-building cost, and says nothing about answer quality.
-[Captured output and provenance](assets/readme/README.md).
+### code-review-graph
 
-### 4. Reduce command output before the model reads it
+A small edit can break a distant caller. This code graph identifies callers,
+dependents and affected flows so the agent can focus its source review and tests.
 
-**RTK — smaller tool responses.** Eligible read-only commands pass through
-command-specific filters that remove repetition and routine noise. The agent
-receives the compact result. Filtering runs locally without a model call;
-unsupported commands pass through the existing routing rules.
+**Example:** before changing a shared validation function, find its callers and
+check the affected API routes and tests.
+
+### Impeccable
+
+Design guidance helps the agent choose a clear hierarchy, readable typography
+and consistent spacing. Browser inspection and design checks expose overflow,
+weak focus states and awkward layouts. A deterministic detector supplements
+the visual review.
+
+**Example:** improve a dashboard's project selector, then inspect its keyboard
+focus, spacing and narrow-screen layout. The Stop hook requires the detector
+after design-related source changes, with existing enable/consent settings
+preserved; logic-only edits do not trigger it.
+
+### LLM Council
+
+For decisions worth several model calls, [LLM Council](https://github.com/karpathy/llm-council)
+collects answers through OpenRouter, has models review them and uses a chair
+model to synthesize the result. VibeHelper can clone it; running it needs
+separate setup and uses provider tokens.
+
+**Example:** compare two migration strategies and review their tradeoffs before
+committing to either implementation.
+
+### OmniRoute
+
+OmniRoute gives approved small tasks a route to eligible free models through a
+local gateway. The helper checks account/model eligibility, makes one bounded
+attempt and returns a proposal for the main agent to review. Attempt history
+records outcomes and reported usage.
+
+**Example:** delegate a small text extraction after approval, then have the main
+agent check the returned fields. Tasks sent through the gateway reach the chosen
+provider. See [OmniRoute setup](#free-model-delegation-with-omniroute).
+
+### Codex usage tracker
+
+The live local dashboard makes expensive sessions easier to find. It reads
+recorded Codex logs and groups usage by project, model, session and turn.
+Collection and rendering use local code, with no LLM calls or usage uploads.
+
+**Example:** select a project, open its largest session and inspect the turns
+with the highest recorded input. The counts show recorded tokens, not the
+remaining weekly allowance. See [dashboard setup](#local-codex-usage-dashboard).
+
+### RTK
+
+Eligible read-only commands pass through filters that remove repetition and
+routine noise before the agent reads the result. Filtering runs locally without
+a model call.
+
+Example `git status` output, shortened from **14 lines to 4**:
+
+Before:
+
+```text
+On branch main
+Your branch is up to date with 'origin/main'.
+
+Changes not staged for commit:
+  (use "git add <file>..." to update what will be committed)
+  (use "git restore <file>..." to discard changes in working directory)
+        modified:   src/app.py
+        modified:   tests/test_app.py
+
+Untracked files:
+  (use "git add <file>..." to include in what will be committed)
+        notes.txt
+
+no changes added to commit (use "git add" and/or "git commit -a")
+```
+
+After, using `rtk git status`:
+
+```text
+main | 2M 1?
+M src/app.py
+M tests/test_app.py
+? notes.txt
+```
+
+RTK also records a savings table:
 
 ![RTK project savings table: four commands, 933 estimated input tokens, 524 estimated output tokens and 409 estimated tokens removed, or 43.8%.](assets/readme/rtk-gain.png)
 
-This capture covers **four recorded commands**, not every command in the project.
-RTK estimates tokens from output bytes divided by four. Its input/output labels
-refer to text before/after filtering, not model prompt/completion tokens. The
-percentage describes output reduction, not weekly allowance saved.
-[RTK's measurement explanation](https://github.com/rtk-ai/rtk/blob/develop/docs/guide/resources/savings-explained.md).
-
-### 5. Check code through the quality wrapper
+### Linters and formatters: the quality wrapper
 
 **Problem:** raw linter logs can flood context, while repo-wide scans pull
 unrelated work into the task. **Approach:** select supported session-edited files,
 run the applicable checks, and parse their output before returning it to the
 agent. Unsupported files, including swap files and media, are skipped.
 
-| Tool inside the wrapper | What it checks or fixes |
-| --- | --- |
-| **Ruff** | Formats Python and reports lint problems, including unused imports. |
-| **Biome** | Formats and checks supported JavaScript, TypeScript, CSS and JSON. |
-| **HTMLHint** | Reports HTML markup problems. |
-| **markdownlint-cli2** | Checks Markdown structure and style. VibeHelper disables its line-length rule. |
-| **ShellCheck + shfmt** | ShellCheck reports shell-script mistakes; shfmt normalizes formatting. |
-| **PHP_CodeSniffer + PHPStan** | PHPCS reports coding-standard violations; PHPStan checks PHP types and other static-analysis problems. PHP formatting uses PHP_CodeSniffer's companion fixer when configured. |
+| Tool inside the wrapper | What it checks or fixes | Example |
+| --- | --- | --- |
+| **Ruff** | Formats and lints Python. | Normalize spacing; flag an unused import. |
+| **Biome** | Formats and checks supported JavaScript, TypeScript, CSS and JSON. | Format a component; flag an unused variable. |
+| **HTMLHint** | Reports HTML markup problems. | Flag duplicate element IDs. |
+| **markdownlint-cli2** | Checks Markdown structure and style, with line-length checks disabled. | Flag a skipped heading level. |
+| **ShellCheck + shfmt** | Check shell scripts and normalize formatting. | Flag an unquoted variable; fix indentation. |
+| **PHP_CodeSniffer + PHPStan** | Check PHP style and static types; the companion fixer formats when configured. | Fix spacing; flag an incompatible argument type. |
 
 ```mermaid
 flowchart TD
@@ -519,6 +659,8 @@ reviews that diff and repairs remaining in-scope findings manually, then recheck
 Tests, broader analysis and whole-project lint are separate explicit checks.
 An unresolved finding stays blocked; an unchanged blocked Stop reuses its evidence
 instead of rerunning the same checks.
+Hook-input errors retain their exception details and locations in
+`.cache/hook-errors.log`; the separate summary omits raw input and error text.
 
 The wrapper limits what it checks and returns. The agent's scope instructions
 require approval for unrelated work; a linter finding does not authorize it.
