@@ -190,6 +190,8 @@ staged changes are reported separately; this list does not remove them.
 Staging still includes every edit in each listed file. Running
 `git add git-add.txt` only stages the manifest.
 Agents leave staging and committing to you.
+See the [staging handoff example](#reviewed-staging-handoff) for the manifest,
+preview output and per-file explanation.
 
 ## Free model delegation with OmniRoute
 
@@ -382,6 +384,10 @@ Defaults and opt-in tools differ between the two helpers. They can install:
   for Codex.
 - Claude Code project files: instructions, hooks, slash commands, repo notes,
   and local helper scripts for Claude.
+- Git command guards: block selected Git mutations in agent shell calls while
+  leaving status and diff inspection available.
+- Reviewed staging handoff: prepares `git-add.txt`, a dry-run preview and a
+  per-file explanation for you to stage.
 - Humanizer: rewrites generated prose so docs, READMEs, and release notes sound
   less stiff.
 - Context7: gives agents current library and framework docs when they need API
@@ -428,6 +434,67 @@ into Claude Code's native configuration.
 
 **Example:** a new Claude session reads the repo instructions and uses its
 installed verification script to check edited files.
+
+### Git command guards
+
+An agent can accidentally stage unrelated edits, rewrite history or publish
+unfinished work. Once activated, `PreToolUse` hooks inspect supported agent
+shell calls and block selected Git commands before execution. Local Python
+parses the command; this check makes no LLM call.
+
+| Command | Hook behaviour |
+| --- | --- |
+| `git status`, `git diff`, `git log`, `git show` | Available for inspection. |
+| Plain `git add --dry-run ...` | Allows a staging preview without staging. |
+| `git add`, `git commit`, `git push` | Blocks agent staging, committing and publishing. |
+| `git pull`, `git checkout`, `git switch`, `git reset`, `git clean`, `git merge`, `git rebase` | Blocks these working-tree, branch and history operations. |
+
+Example reason returned by the Codex hook for `git add src/app.py`:
+
+```text
+git add is blocked for AI tools; stage files manually.
+```
+
+These are agent hooks; your own terminal commands remain available. Provider
+blocklists differ, and hook activation is required. They also reject selected
+destructive shell commands, such as `sudo rm` in Codex and recursive `rm` in
+Claude. See [activation steps](#after-install).
+
+### Reviewed staging handoff
+
+The agent reviews the task's complete diffs and writes explicit paths to
+`git-add.txt`. This avoids handing you a blanket `git add .` that could include
+unrelated work. It previews the selection and explains each file; you run the
+actual staging command.
+
+Example `git-add.txt`:
+
+```text
+:(top,literal)src/app.py
+:(top,literal)tests/test_app.py
+```
+
+Preview command and example output:
+
+```console
+$ git add --dry-run --pathspec-from-file=git-add.txt
+add 'src/app.py'
+add 'tests/test_app.py'
+```
+
+The handoff includes the command for you to run, followed by the file review:
+
+```sh
+git add --pathspec-from-file=git-add.txt
+```
+
+| Selected file | What changed and why |
+| --- | --- |
+| `src/app.py` | Fix the empty-input case requested in the task. |
+| `tests/test_app.py` | Cover that case so it cannot silently regress. |
+
+Excluded files are reported separately. Existing staged changes remain staged;
+the manifest does not remove them. See the [full staging workflow](#stage-completed-changes).
 
 ### Humanizer
 
@@ -614,6 +681,10 @@ RTK also records a savings table:
 unrelated work into the task. **Approach:** select supported session-edited files,
 run the applicable checks, and parse their output before returning it to the
 agent. Unsupported files, including swap files and media, are skipped.
+
+Codex's command-policy hook also blocks direct linter and formatter commands
+and points the agent to controlled verification routes. The agent must preserve
+the selected file scope when retrying.
 
 | Tool inside the wrapper | What it checks or fixes | Example |
 | --- | --- | --- |
