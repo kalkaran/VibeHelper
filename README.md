@@ -671,10 +671,6 @@ M tests/test_app.py
 ? notes.txt
 ```
 
-RTK also records a savings table:
-
-![RTK project savings table: four commands, 933 estimated input tokens, 524 estimated output tokens and 409 estimated tokens removed, or 43.8%.](assets/readme/rtk-gain.png)
-
 ### Linters and formatters: the quality wrapper
 
 **Problem:** raw linter logs can flood context, while repo-wide scans pull
