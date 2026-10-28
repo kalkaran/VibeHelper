@@ -48,7 +48,7 @@ def test_process_timeout_keeps_output_and_redacts_secrets(tmp_path, monkeypatch)
     assert saved[0].name in message and len(logs(tmp_path)) == 1
 
 
-def test_hash_timeout_hook_reports_path_and_preserves_state(
+def test_scan_timeout_refresh_reports_path_and_preserves_state(
     tmp_path, monkeypatch, capsys
 ):
     cache = tmp_path / ".cache/project-memory"
@@ -59,23 +59,27 @@ def test_hash_timeout_hook_reports_path_and_preserves_state(
     source.write_bytes(b"x" * 131072)
 
     def scan(*_args):
-        MEMORY.digest(source, deadline=time.monotonic() - 1)
+        raise MEMORY.MemoryTimeout(
+            "scan deadline exceeded",
+            path=str(source),
+            operation="source scan",
+            budget_seconds=8,
+        )
 
     monkeypatch.setattr(MEMORY, "handle_locked", scan)
     monkeypatch.setattr(MEMORY, "run", lambda *_args: str(tmp_path))
     monkeypatch.setattr(
-        sys, "argv", ["project-memory.py", "hook", "--root", str(tmp_path)]
+        sys, "argv", ["project-memory.py", "refresh", "--root", str(tmp_path)]
     )
     monkeypatch.setattr(sys, "stdin", io.StringIO('{"hook_event_name": "Stop"}'))
-    assert MEMORY.main() == 0
-    output = json.loads(capsys.readouterr().out)
+    assert MEMORY.main() == 1
+    output = capsys.readouterr().err
     saved = logs(tmp_path)
-    assert len(saved) == 1 and saved[0].name in output["systemMessage"]
-    assert "decision" not in output and "continue" not in output
+    assert len(saved) == 1 and saved[0].name in output
     record = json.loads(saved[0].read_text())
     assert record["details"]["path"] == str(source)
-    assert record["details"]["bytes_read"] == 65536
-    assert record["details"]["size_bytes"] == 131072
+    assert record["details"]["operation"] == "source scan"
+    assert record["details"]["budget_seconds"] == 8
     assert state.read_text() == '{"previous": "untouched"}'
 
 
@@ -172,7 +176,11 @@ def test_backend_and_context_errors_keep_log_reference(tmp_path, monkeypatch):
         raise subprocess.TimeoutExpired(["backend", "x" * 600], 5)
 
     monkeypatch.setattr(MEMORY, "run", timeout)
-    monkeypatch.setattr(MEMORY.shutil, "which", lambda name: name)
+    monkeypatch.setattr(
+        MEMORY,
+        "index_backend",
+        lambda *_args: timeout(tmp_path, ["backend", "x" * 600]),
+    )
     value = MEMORY.handle(tmp_path, args("refresh"))
     status = value["freshness"]
     assert status["crg"]["status"] == "pending"

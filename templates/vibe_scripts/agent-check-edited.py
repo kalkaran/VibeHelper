@@ -1206,13 +1206,33 @@ def check_files(
     ]
     for value in sorted(results, key=lambda item: -priority[item["status"]]):
         if value["status"] == "passed":
-            summary.append(f"{value['label']}: passed")
+            notices = [
+                line
+                for line in value["summary"]
+                if re.search(
+                    r"UNPARSED|REVIEW NEEDED|\bwarnings?\b|\bskipped\b",
+                    line,
+                    re.IGNORECASE,
+                )
+            ]
+            if notices:
+                summary.extend([f"{value['label']}: passed with notices", *notices])
+                if value.get("summary_log"):
+                    summary.append(f"Summary log: {value['summary_log']}")
+            continue
         else:
             summary.extend([f"{value['label']}: {value['status']}", *value["summary"]])
             if value.get("summary_log"):
                 summary.append(f"Summary log: {value['summary_log']}")
             elif value.get("log"):
                 summary.append(f"Full log: {value['log']}")
+    passed = sum(value["status"] == "passed" for value in results)
+    summary.insert(
+        1,
+        f"PASS: {passed} of {len(results)} checks; remaining checks listed below."
+        if passed != len(results)
+        else f"PASS: all {passed} checks.",
+    )
     signatures = [
         item.get("diagnostic_signature", "")
         for item in results

@@ -3,6 +3,10 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." >/dev/null 2>&1 && pwd)"
+
+report_failure() {
+	python3 "$ROOT/templates/vibe_scripts/ai-quality-wrapper.py" --label test-script --report-log "$1" --log-dir "$ROOT/.cache/ai-quality"
+}
 TEST_BIN="$(mktemp -d)"
 trap 'rm -rf "$TEST_BIN"' EXIT
 SYSTEM_NODE="$(command -v node)"
@@ -48,7 +52,7 @@ assert_gitignore_entries() {
 	for entry in "# VibeHelper local AI/dev tooling" "*.bak" "*.bak.*" ".cache/" ".agents/" ".claude/" ".codex/" ".mcp.json" "AGENTS.md" "CLAUDE.md" "agent/" "codebase-wiki/" "graphify-out/" "node_modules/" "notes/" "obsidian/" "vendor/" "/vibe_scripts/" "/skills-lock.json" "biome.json"; do
 		if ! grep -Fxq "$entry" "$gitignore"; then
 			echo "missing .gitignore entry: $entry" >&2
-			cat "$gitignore" >&2
+			report_failure "$gitignore" >&2
 			return 1
 		fi
 	done
@@ -76,7 +80,7 @@ run_default_wiring_test() {
 		--no-rtk-hook \
 		--no-crg-build \
 		--no-apply-codex-config >"$tmp/install.log" 2>&1; then
-		cat "$tmp/install.log" >&2
+		report_failure "$tmp/install.log" >&2
 		return 1
 	fi
 
@@ -92,7 +96,7 @@ run_default_wiring_test() {
 	assert_no_target "$tmp/vibe_scripts/codex/Makefile" format-ai
 	if [[ "$(grep -Fc 'Checking local prerequisites' "$tmp/install.log")" -ne 1 ]]; then
 		echo "default Codex install did not report prerequisites exactly once" >&2
-		cat "$tmp/install.log" >&2
+		report_failure "$tmp/install.log" >&2
 		return 1
 	fi
 	assert_gitignore_entries "$tmp/.gitignore"
@@ -122,17 +126,17 @@ run_context7_oauth_planning_test() {
 				--no-crg-build \
 				--no-apply-codex-config
 		) >"$tmp/install.log" 2>&1; then
-			cat "$tmp/install.log" >&2
+			report_failure "$tmp/install.log" >&2
 			return 1
 		fi
 		if ! grep -Eq '\$ codex mcp login context7' "$tmp/install.log"; then
 			echo "Codex $platform Context7 setup did not start OAuth login" >&2
-			cat "$tmp/install.log" >&2
+			report_failure "$tmp/install.log" >&2
 			return 1
 		fi
 		if ! grep -Eq '\$ npx ctx7 setup --codex --mcp --oauth -y' "$tmp/install.log"; then
 			echo "Codex $platform Context7 setup did not select hosted OAuth" >&2
-			cat "$tmp/install.log" >&2
+			report_failure "$tmp/install.log" >&2
 			return 1
 		fi
 		rm -rf "$tmp"
@@ -200,13 +204,13 @@ EOF_CRG
 			cd "$tmp/repo"
 			CODEX_CALLS="$tmp/calls" CHROME_STATE=current HOME="$tmp/home" PATH="$tmp/bin:$PATH" bash "$ROOT/CodexHelper/$platform/part1.sh" --dry-run --force --yes --no-humanizer --no-omniroute --no-codex-hooks --no-rtk-hook --no-crg-build --no-apply-codex-config
 		) >"$tmp/current.log" 2>&1; then
-			cat "$tmp/current.log" >&2
+			report_failure "$tmp/current.log" >&2
 			return 1
 		fi
 		if ! grep -Fq "Chrome DevTools MCP is already registered with @latest" "$tmp/current.log" ||
 			grep -Fq "mcp add chrome-devtools" "$tmp/calls"; then
 			echo "Codex $platform reconfigured a current Chrome DevTools MCP registration" >&2
-			cat "$tmp/current.log" >&2
+			report_failure "$tmp/current.log" >&2
 			return 1
 		fi
 
@@ -215,12 +219,12 @@ EOF_CRG
 			cd "$tmp/repo"
 			CODEX_CALLS="$tmp/calls" CHROME_STATE=custom HOME="$tmp/home" PATH="$tmp/bin:$PATH" bash "$ROOT/CodexHelper/$platform/part1.sh" --dry-run --force --yes --no-humanizer --no-omniroute --no-codex-hooks --no-rtk-hook --no-crg-build --no-apply-codex-config
 		) >"$tmp/custom.log" 2>&1; then
-			cat "$tmp/custom.log" >&2
+			report_failure "$tmp/custom.log" >&2
 			return 1
 		fi
 		if grep -Fq "mcp add chrome-devtools" "$tmp/calls"; then
 			echo "Codex $platform erased current custom Chrome DevTools MCP launch arguments" >&2
-			cat "$tmp/custom.log" >&2
+			report_failure "$tmp/custom.log" >&2
 			return 1
 		fi
 
@@ -229,12 +233,12 @@ EOF_CRG
 			cd "$tmp/repo"
 			CODEX_CALLS="$tmp/calls" CHROME_STATE=missing HOME="$tmp/home" PATH="$tmp/bin:$PATH" bash "$ROOT/CodexHelper/$platform/part1.sh" --dry-run --yes --no-humanizer --no-omniroute --no-codex-hooks --no-rtk-hook --no-crg-build --no-apply-codex-config
 		) >"$tmp/missing.log" 2>&1; then
-			cat "$tmp/missing.log" >&2
+			report_failure "$tmp/missing.log" >&2
 			return 1
 		fi
 		if ! grep -Fq '$ codex mcp add chrome-devtools -- npx chrome-devtools-mcp@latest' "$tmp/missing.log"; then
 			echo "Codex $platform did not register a missing Chrome DevTools MCP" >&2
-			cat "$tmp/missing.log" >&2
+			report_failure "$tmp/missing.log" >&2
 			return 1
 		fi
 
@@ -243,12 +247,12 @@ EOF_CRG
 			cd "$tmp/repo"
 			CODEX_CALLS="$tmp/calls" CHROME_STATE=stale HOME="$tmp/home" PATH="$tmp/bin:$PATH" bash "$ROOT/CodexHelper/$platform/part1.sh" --dry-run --force --yes --no-humanizer --no-omniroute --no-codex-hooks --no-rtk-hook --no-crg-build --no-apply-codex-config
 		) >"$tmp/stale.log" 2>&1; then
-			cat "$tmp/stale.log" >&2
+			report_failure "$tmp/stale.log" >&2
 			return 1
 		fi
 		if ! grep -Fq '$ codex mcp add chrome-devtools -- npx chrome-devtools-mcp@latest' "$tmp/stale.log"; then
 			echo "Codex $platform did not update a stale Chrome DevTools MCP registration" >&2
-			cat "$tmp/stale.log" >&2
+			report_failure "$tmp/stale.log" >&2
 			return 1
 		fi
 
@@ -257,12 +261,12 @@ EOF_CRG
 			cd "$tmp/repo"
 			CODEX_CALLS="$tmp/calls" CHROME_STATE=stale HOME="$tmp/home" PATH="$tmp/bin:$PATH" bash "$ROOT/CodexHelper/$platform/part1.sh" --dry-run --force --yes --no-chrome-mcp --no-humanizer --no-omniroute --no-codex-hooks --no-rtk-hook --no-crg-build --no-apply-codex-config
 		) >"$tmp/disabled.log" 2>&1; then
-			cat "$tmp/disabled.log" >&2
+			report_failure "$tmp/disabled.log" >&2
 			return 1
 		fi
 		if grep -Fq "mcp add chrome-devtools" "$tmp/disabled.log"; then
 			echo "Codex $platform ignored --no-chrome-mcp" >&2
-			cat "$tmp/disabled.log" >&2
+			report_failure "$tmp/disabled.log" >&2
 			return 1
 		fi
 
@@ -271,13 +275,13 @@ EOF_CRG
 			cd "$tmp/repo"
 			CODEX_CALLS="$tmp/calls" CHROME_STATE=missing NODE_VERSION=18.20.0 HOME="$tmp/home" PATH="$tmp/bin:$PATH" bash "$ROOT/CodexHelper/$platform/part1.sh" --dry-run --force --yes --no-humanizer --no-omniroute --no-codex-hooks --no-rtk-hook --no-crg-build --no-apply-codex-config
 		) >"$tmp/old-node.log" 2>&1; then
-			cat "$tmp/old-node.log" >&2
+			report_failure "$tmp/old-node.log" >&2
 			return 1
 		fi
 		if ! grep -Fq "requires a package-supported Node.js version" "$tmp/old-node.log" ||
 			grep -Fq "mcp add chrome-devtools" "$tmp/old-node.log"; then
 			echo "Codex $platform registered Chrome DevTools MCP with unsupported Node.js" >&2
-			cat "$tmp/old-node.log" >&2
+			report_failure "$tmp/old-node.log" >&2
 			return 1
 		fi
 		rm -rf "$tmp"
@@ -311,7 +315,7 @@ EOF_MAKEFILE
 			--no-install \
 			--wire \
 			--no-fix >"$tmp/install.log" 2>&1; then
-			cat "$tmp/install.log" >&2
+			report_failure "$tmp/install.log" >&2
 			return 1
 		fi
 		assert_target "$tmp/vibe_scripts/codex/Makefile" edited-ai
@@ -354,7 +358,7 @@ run_no_wire_test() {
 		--no-crg-build \
 		--no-apply-codex-config \
 		--no-wire >"$tmp/install.log" 2>&1; then
-		cat "$tmp/install.log" >&2
+		report_failure "$tmp/install.log" >&2
 		return 1
 	fi
 
@@ -386,12 +390,12 @@ run_cleanup_test() {
 		--no-rtk-hook \
 		--no-crg-build \
 		--no-apply-codex-config >"$tmp/install.log" 2>&1; then
-		cat "$tmp/install.log" >&2
+		report_failure "$tmp/install.log" >&2
 		return 1
 	fi
 
 	if ! bash "$ROOT/CodexHelper/install.sh" --repo "$tmp" --cleanup --yes >"$tmp/cleanup.log" 2>&1; then
-		cat "$tmp/cleanup.log" >&2
+		report_failure "$tmp/cleanup.log" >&2
 		return 1
 	fi
 
@@ -433,7 +437,7 @@ run_hook_error_logging_test() {
 		--no-crg-build \
 		--no-apply-codex-config \
 		--no-wire >"$tmp/install.log" 2>&1; then
-		cat "$tmp/install.log" >&2
+		report_failure "$tmp/install.log" >&2
 		return 1
 	fi
 
@@ -444,12 +448,12 @@ run_hook_error_logging_test() {
 
 	if ! grep -Fq '"reason": "json-decode-failed"' "$tmp/.cache/hook-errors.log"; then
 		echo "Codex hook did not log malformed JSON failure" >&2
-		cat "$tmp/.cache/hook-errors.log" >&2
+		report_failure "$tmp/.cache/hook-errors.log" >&2
 		return 1
 	fi
 	if ! grep -Fq '"colno": 2' "$tmp/.cache/hook-errors.log" || ! grep -Fq '"error":' "$tmp/.cache/hook-errors.log"; then
 		echo "Codex hook log did not include error details and location" >&2
-		cat "$tmp/.cache/hook-errors.log" >&2
+		report_failure "$tmp/.cache/hook-errors.log" >&2
 		return 1
 	fi
 }
@@ -486,7 +490,7 @@ EOF_SHELLCHECK
 		--no-rtk-hook \
 		--no-crg-build \
 		--no-apply-codex-config >"$tmp/install.log" 2>&1; then
-		cat "$tmp/install.log" >&2
+		report_failure "$tmp/install.log" >&2
 		return 1
 	fi
 
@@ -556,19 +560,19 @@ EOF_MARKDOWNLINT
 		--no-rtk-hook \
 		--no-crg-build \
 		--no-apply-codex-config >"$tmp/install.log" 2>&1; then
-		cat "$tmp/install.log" >&2
+		report_failure "$tmp/install.log" >&2
 		return 1
 	fi
 
 	if ! grep -Fq "markdownlint-cli2" "$tmp/vibe_scripts/codex/Makefile"; then
 		echo "generated Codex Makefile did not wire markdownlint-cli2" >&2
-		cat "$tmp/vibe_scripts/codex/Makefile" >&2
+		report_failure "$tmp/vibe_scripts/codex/Makefile" >&2
 		return 1
 	fi
 	python3 "$ROOT/tests/assert_quality_selection.py" "$tmp" codex markdown
 	if ! grep -Fq "MARKDOWN_EXTS" "$tmp/vibe_scripts/codex/agent-check-edited.py"; then
 		echo "generated Codex edited-file checker does not include Markdown files" >&2
-		cat "$tmp/vibe_scripts/codex/agent-check-edited.py" >&2
+		report_failure "$tmp/vibe_scripts/codex/agent-check-edited.py" >&2
 		return 1
 	fi
 }
@@ -609,28 +613,28 @@ EOF_NPX
 		--no-rtk-hook \
 		--no-crg-build \
 		--no-apply-codex-config >"$tmp/install.log" 2>&1; then
-		cat "$tmp/install.log" >&2
+		report_failure "$tmp/install.log" >&2
 		return 1
 	fi
 
 	if [[ ! -f "$tmp/.agents/skills/impeccable/SKILL.md" ]]; then
 		echo "Codex Impeccable install was skipped because Claude Impeccable existed" >&2
-		cat "$tmp/install.log" >&2
+		report_failure "$tmp/install.log" >&2
 		return 1
 	fi
 	if ! grep -q -- '--providers=codex' "$tmp/npx.log"; then
 		echo "Impeccable install did not target Codex" >&2
-		cat "$tmp/npx.log" >&2
+		report_failure "$tmp/npx.log" >&2
 		return 1
 	fi
 	if grep -Fq "JSON.stringify({ decision: 'block', reason: text })" "$tmp/.agents/skills/impeccable/scripts/hook-lib.mjs"; then
 		echo "Codex Impeccable Stop hook kept Claude-style block JSON" >&2
-		cat "$tmp/.agents/skills/impeccable/scripts/hook-lib.mjs" >&2
+		report_failure "$tmp/.agents/skills/impeccable/scripts/hook-lib.mjs" >&2
 		return 1
 	fi
 	if ! grep -Fq "JSON.stringify({ continue: false, stopReason: text })" "$tmp/.agents/skills/impeccable/scripts/hook-lib.mjs"; then
 		echo "Codex Impeccable Stop hook was not patched to Codex JSON" >&2
-		cat "$tmp/.agents/skills/impeccable/scripts/hook-lib.mjs" >&2
+		report_failure "$tmp/.agents/skills/impeccable/scripts/hook-lib.mjs" >&2
 		return 1
 	fi
 }
@@ -674,7 +678,7 @@ EOF_HOOKS
 				--no-crg-build \
 				--no-apply-codex-config
 		) >"$tmp/install.log" 2>&1; then
-			cat "$tmp/install.log" >&2
+			report_failure "$tmp/install.log" >&2
 			return 1
 		fi
 
@@ -690,7 +694,7 @@ const commands = Object.values(data.hooks).flatMap(groups => groups.flatMap(grou
 process.exit(commands.length === 2 && commands.every(command => command.includes("git rev-parse --show-toplevel") && command.includes("exec node \"$hook\"")) ? 0 : 1);
 ' "$tmp/repo/.codex/hooks.json"; then
 			echo "Codex $platform Impeccable hooks were not made repository-root relative" >&2
-			cat "$tmp/repo/.codex/hooks.json" >&2
+			report_failure "$tmp/repo/.codex/hooks.json" >&2
 			return 1
 		fi
 
@@ -699,12 +703,12 @@ process.exit(commands.length === 2 && commands.every(command => command.includes
 			cd "$tmp/repo/nested/deeper"
 			printf '%s\n' '{"hook_event_name":"Stop"}' | /bin/sh -c "$command"
 		) >"$tmp/hook.stdout" 2>"$tmp/hook.stderr"; then
-			cat "$tmp/hook.stderr" >&2
+			report_failure "$tmp/hook.stderr" >&2
 			return 1
 		fi
 		if ! grep -Fq '[fake-impeccable] ran' "$tmp/hook.stderr"; then
 			echo "Codex $platform Impeccable hook did not run from the nested directory" >&2
-			cat "$tmp/hook.stderr" >&2
+			report_failure "$tmp/hook.stderr" >&2
 			return 1
 		fi
 		rm -rf "$tmp"
@@ -790,24 +794,24 @@ EOF_CRG
 		--no-crg-build \
 		--no-apply-codex-config \
 		--no-wire >"$tmp/install.log" 2>&1; then
-		cat "$tmp/install.log" >&2
+		report_failure "$tmp/install.log" >&2
 		return 1
 	fi
 
 	# shellcheck disable=SC2016
 	if ! node -e 'const fs=require("fs"); const p=process.argv[1]; const data=JSON.parse(fs.readFileSync(p,"utf8")); const cmd=data.hooks.UserPromptSubmit[0].hooks[0].command; process.exit(cmd.includes("root=\"${CLAUDE_PLUGIN_ROOT:-}\"") && cmd.includes("for candidate in \"$HOME\"/.codex/plugins/cache/ponytail/ponytail/*") ? 0 : 1)' "$manifest"; then
 		echo "Ponytail hook manifest did not get a Codex-safe root fallback" >&2
-		cat "$manifest" >&2
+		report_failure "$manifest" >&2
 		return 1
 	fi
 	if ! grep -Fq '[ponytail] UserPromptSubmit hook failed:' "$manifest"; then
 		echo "Ponytail hook manifest did not get diagnostic hook failure output" >&2
-		cat "$manifest" >&2
+		report_failure "$manifest" >&2
 		return 1
 	fi
 	if ! grep -Fq "code-review-graph install --platform codex --no-hooks --no-instructions" "$tmp/install.log"; then
 		echo "new Codex install did not configure code-review-graph without replacing AGENTS.md" >&2
-		cat "$tmp/install.log" >&2
+		report_failure "$tmp/install.log" >&2
 		return 1
 	fi
 
@@ -820,7 +824,7 @@ EOF_CRG
 	fi
 	if ! grep -Fq "[ponytail] UserPromptSubmit hook failed:" "$tmp/hook.err"; then
 		echo "Patched Ponytail hook command did not print the hook event diagnostic" >&2
-		cat "$tmp/hook.err" >&2
+		report_failure "$tmp/hook.err" >&2
 		return 1
 	fi
 }
@@ -887,65 +891,65 @@ EOF_SUDO
 	chmod +x "$tmp/bin"/*
 
 	if ! (cd "$tmp/repo" && HOME="$tmp/home" PATH="$tmp/bin:$PATH" bash "$ROOT/CodexHelper/MacOS/part1.sh" --dry-run --force --yes --no-humanizer --no-omniroute --no-crg-build --no-apply-codex-config >"$tmp/mac.log" 2>&1); then
-		cat "$tmp/mac.log" >&2
+		report_failure "$tmp/mac.log" >&2
 		return 1
 	fi
 	for expected in "brew upgrade rtk" "brew upgrade uv" "brew upgrade pipx" "uv tool upgrade code-review-graph" "uv tool upgrade graphifyy" "graphify install --platform codex" "codex plugin marketplace upgrade ponytail" "skills add Leonxlnx/unlazy --agent codex"; do
 		if ! grep -Fq "$expected" "$tmp/mac.log"; then
 			echo "Codex macOS --force did not plan: $expected" >&2
-			cat "$tmp/mac.log" >&2
+			report_failure "$tmp/mac.log" >&2
 			return 1
 		fi
 	done
 	if grep -Fq "code-review-graph install --platform codex" "$tmp/mac.log"; then
 		echo "Codex --force reconfigured unchanged code-review-graph" >&2
-		cat "$tmp/mac.log" >&2
+		report_failure "$tmp/mac.log" >&2
 		return 1
 	fi
 	if ! grep -Fq "only if its version changes" "$tmp/mac.log"; then
 		echo "Codex --force did not make code-review-graph setup conditional" >&2
-		cat "$tmp/mac.log" >&2
+		report_failure "$tmp/mac.log" >&2
 		return 1
 	fi
 	if ! grep -Fq "Context7 setup not run in --yes mode" "$tmp/mac.log"; then
 		echo "Codex --force did not report missing Context7 setup" >&2
-		cat "$tmp/mac.log" >&2
+		report_failure "$tmp/mac.log" >&2
 		return 1
 	fi
 
 	if ! (cd "$tmp/repo" && HOME="$tmp/home" PATH="$tmp/bin:$PATH" bash "$ROOT/CodexHelper/MacOS/part1.sh" --dry-run --fresh-install --yes --no-crg-build --no-apply-codex-config >"$tmp/mac-fresh.log" 2>&1); then
-		cat "$tmp/mac-fresh.log" >&2
+		report_failure "$tmp/mac-fresh.log" >&2
 		return 1
 	fi
 	for expected in "skills add blader/humanizer --agent codex" "skills add Leonxlnx/unlazy --agent codex" "graphify install --platform codex" "code-review-graph install --platform codex --no-hooks --no-instructions" "ctx7 setup --codex --mcp --oauth -y" "codex mcp login context7" "impeccable skills install -y --providers=codex --scope=project --force"; do
 		if ! grep -Fq -- "$expected" "$tmp/mac-fresh.log"; then
 			echo "Codex macOS --fresh-install did not plan: $expected" >&2
-			cat "$tmp/mac-fresh.log" >&2
+			report_failure "$tmp/mac-fresh.log" >&2
 			return 1
 		fi
 	done
 	for forbidden in "--agent claude" "--providers=claude" "--platform claude" "ctx7 setup --claude"; do
 		if grep -Fq -- "$forbidden" "$tmp/mac-fresh.log"; then
 			echo "Codex macOS --fresh-install incorrectly targeted Claude: $forbidden" >&2
-			cat "$tmp/mac-fresh.log" >&2
+			report_failure "$tmp/mac-fresh.log" >&2
 			return 1
 		fi
 	done
 	if ! HOME="$tmp/home" PATH="$tmp/bin:$PATH" bash "$ROOT/CodexHelper/install.sh" --repo "$tmp/repo" --dry-run --fresh-install --yes --no-install --no-fix --no-crg-build --no-apply-codex-config >"$tmp/unified-fresh.log" 2>&1; then
-		cat "$tmp/unified-fresh.log" >&2
+		report_failure "$tmp/unified-fresh.log" >&2
 		return 1
 	fi
 	for expected in "ctx7 setup --codex --mcp --oauth -y" "codex mcp login context7" "impeccable skills install -y --providers=codex --scope=project --force"; do
 		if ! grep -Fq -- "$expected" "$tmp/unified-fresh.log"; then
 			echo "Codex unified --fresh-install did not plan: $expected" >&2
-			cat "$tmp/unified-fresh.log" >&2
+			report_failure "$tmp/unified-fresh.log" >&2
 			return 1
 		fi
 	done
 	for forbidden in "--agent claude" "--providers=claude" "--platform claude" "ctx7 setup --claude"; do
 		if grep -Fq -- "$forbidden" "$tmp/unified-fresh.log"; then
 			echo "Codex unified --fresh-install incorrectly targeted Claude: $forbidden" >&2
-			cat "$tmp/unified-fresh.log" >&2
+			report_failure "$tmp/unified-fresh.log" >&2
 			return 1
 		fi
 	done
@@ -958,7 +962,7 @@ EOF_WRONG_RTK
 	(cd "$tmp/repo" && HOME="$tmp/home" PATH="$tmp/bin:$PATH" bash "$ROOT/CodexHelper/MacOS/part1.sh" --dry-run --force --yes --no-humanizer --no-omniroute --no-crg-build --no-apply-codex-config >"$tmp/wrong-rtk.log" 2>&1) || true
 	if ! grep -Fq "RTK name collision" "$tmp/wrong-rtk.log" || grep -Fq "brew upgrade rtk" "$tmp/wrong-rtk.log"; then
 		echo "Codex --force did not reject an unrelated rtk executable" >&2
-		cat "$tmp/wrong-rtk.log" >&2
+		report_failure "$tmp/wrong-rtk.log" >&2
 		return 1
 	fi
 	cat >"$tmp/bin/rtk" <<'EOF_RTK'
@@ -968,37 +972,37 @@ EOF_RTK
 	chmod +x "$tmp/bin/rtk"
 
 	if ! (cd "$tmp/repo" && HOME="$tmp/home" PATH="$tmp/bin:$PATH" bash "$ROOT/CodexHelper/WSL/part1.sh" --dry-run --force --yes --no-humanizer --no-omniroute --no-crg-build --no-apply-codex-config >"$tmp/wsl.log" 2>&1); then
-		cat "$tmp/wsl.log" >&2
+		report_failure "$tmp/wsl.log" >&2
 		return 1
 	fi
 	for expected in "raw.githubusercontent.com/rtk-ai/rtk/master/install.sh" "pipx upgrade uv" "uv tool upgrade code-review-graph" "uv tool upgrade graphifyy" "graphify install --platform codex" "codex plugin marketplace upgrade ponytail" "skills add Leonxlnx/unlazy --agent codex"; do
 		if ! grep -Fq "$expected" "$tmp/wsl.log"; then
 			echo "Codex WSL --force did not plan: $expected" >&2
-			cat "$tmp/wsl.log" >&2
+			report_failure "$tmp/wsl.log" >&2
 			return 1
 		fi
 	done
 	if grep -Fq "code-review-graph install --platform codex" "$tmp/wsl.log" || ! grep -Fq "only if its version changes" "$tmp/wsl.log"; then
 		echo "Codex WSL --force did not keep code-review-graph setup conditional" >&2
-		cat "$tmp/wsl.log" >&2
+		report_failure "$tmp/wsl.log" >&2
 		return 1
 	fi
 
 	if ! (cd "$tmp/repo" && HOME="$tmp/home" PATH="$tmp/bin:$PATH" bash "$ROOT/CodexHelper/WSL/part1.sh" --dry-run --fresh-install --yes --no-crg-build --no-apply-codex-config >"$tmp/wsl-fresh.log" 2>&1); then
-		cat "$tmp/wsl-fresh.log" >&2
+		report_failure "$tmp/wsl-fresh.log" >&2
 		return 1
 	fi
 	for expected in "skills add blader/humanizer --agent codex" "skills add Leonxlnx/unlazy --agent codex" "graphify install --platform codex" "ctx7 setup --codex --mcp --oauth -y" "codex mcp login context7" "impeccable skills install -y --providers=codex --scope=project --force"; do
 		if ! grep -Fq -- "$expected" "$tmp/wsl-fresh.log"; then
 			echo "Codex WSL --fresh-install did not plan: $expected" >&2
-			cat "$tmp/wsl-fresh.log" >&2
+			report_failure "$tmp/wsl-fresh.log" >&2
 			return 1
 		fi
 	done
 	for forbidden in "--agent claude" "--providers=claude" "--platform claude" "ctx7 setup --claude"; do
 		if grep -Fq -- "$forbidden" "$tmp/wsl-fresh.log"; then
 			echo "Codex WSL --fresh-install incorrectly targeted Claude: $forbidden" >&2
-			cat "$tmp/wsl-fresh.log" >&2
+			report_failure "$tmp/wsl-fresh.log" >&2
 			return 1
 		fi
 	done
@@ -1056,14 +1060,14 @@ EOF_CRG
 				cd "$tmp/repo"
 				HOME="$tmp/home" CONTEXT7_STATE=exact PATH="$tmp/bin:$PATH" bash "$ROOT/CodexHelper/$platform/part1.sh" --dry-run --no-humanizer --no-omniroute --no-codex-hooks --no-rtk-hook --no-crg-build --no-apply-codex-config "${mode_args[@]}"
 			) >"$log" 2>&1; then
-				cat "$log" >&2
+				report_failure "$log" >&2
 				return 1
 			fi
 			if ! grep -Fq "Context7 MCP is already registered" "$log" ||
 				grep -Eq '\$ npx ctx7 setup --codex' "$log" ||
 				grep -Fq "Configure Context7 MCP" "$log"; then
 				echo "Codex $platform $mode rerun did not skip exact Context7 state" >&2
-				cat "$log" >&2
+				report_failure "$log" >&2
 				return 1
 			fi
 		done
@@ -1076,7 +1080,7 @@ EOF_CRG
 			grep -Eq '\$ npx ctx7 setup --codex' "$log" ||
 			! grep -Eq '\$ codex mcp login context7' "$log"; then
 			echo "Codex $platform fresh install did not preserve registration and rerun OAuth login" >&2
-			cat "$log" >&2
+			report_failure "$log" >&2
 			return 1
 		fi
 
@@ -1088,7 +1092,7 @@ EOF_CRG
 			grep -Eq '\$ npx ctx7 setup --codex' "$log" ||
 			! grep -Eq '\$ codex mcp login context7' "$log"; then
 			echo "Codex $platform explicit Context7 request did not rerun OAuth login" >&2
-			cat "$log" >&2
+			report_failure "$log" >&2
 			return 1
 		fi
 
@@ -1098,13 +1102,13 @@ EOF_CRG
 				cd "$tmp/repo"
 				HOME="$tmp/home" CONTEXT7_STATE="$state" PATH="$tmp/bin:$PATH" bash "$ROOT/CodexHelper/$platform/part1.sh" --dry-run --yes --no-humanizer --no-omniroute --no-codex-hooks --no-rtk-hook --no-crg-build --no-apply-codex-config
 			) >"$log" 2>&1; then
-				cat "$log" >&2
+				report_failure "$log" >&2
 				return 1
 			fi
 			if ! grep -Fq "Context7 setup not run in --yes mode" "$log" ||
 				grep -Eq '\$ npx ctx7 setup --codex' "$log"; then
 				echo "Codex $platform $state Context7 state was not handled safely in --yes mode" >&2
-				cat "$log" >&2
+				report_failure "$log" >&2
 				return 1
 			fi
 
@@ -1114,14 +1118,14 @@ EOF_CRG
 				cd "$tmp/repo"
 				HOME="$tmp/home" CONTEXT7_STATE="$state" PATH="$tmp/bin:$PATH" bash "$ROOT/CodexHelper/$platform/part1.sh" --dry-run --no-humanizer --no-omniroute --no-codex-hooks --no-rtk-hook --no-crg-build --no-apply-codex-config
 			) >"$log" 2>&1; then
-				cat "$log" >&2
+				report_failure "$log" >&2
 				return 1
 			fi
 			if ! grep -Eq '\$ codex plugin add i-have-adhd@i-have-adhd' "$log" ||
 				! grep -Eq '\$ npx ctx7 setup --codex --mcp --oauth -y' "$log" ||
 				! grep -Eq '\$ codex mcp login context7' "$log"; then
 				echo "Codex $platform $state Context7 state did not accept interactive setup" >&2
-				cat "$log" >&2
+				report_failure "$log" >&2
 				return 1
 			fi
 		done
@@ -1134,13 +1138,13 @@ EOF_CRG
 				cd "$tmp/repo"
 				HOME="$tmp/home" CONTEXT7_STATE=exact PATH="$tmp/bin:$PATH" bash "$ROOT/CodexHelper/$platform/part1.sh" --dry-run --no-humanizer --no-omniroute --no-codex-hooks --no-rtk-hook --no-apply-codex-config "${mode_args[@]}"
 			) >"$log" 2>&1; then
-				cat "$log" >&2
+				report_failure "$log" >&2
 				return 1
 			fi
 			if ! grep -Fq "repo index already exists; skipping rebuild" "$log" ||
 				grep -Eq '\$ .*code-review-graph build' "$log"; then
 				echo "Codex $platform $mode rerun rebuilt an existing graph index" >&2
-				cat "$log" >&2
+				report_failure "$log" >&2
 				return 1
 			fi
 		done
@@ -1151,7 +1155,7 @@ EOF_CRG
 			HOME="$tmp/home" CONTEXT7_STATE=exact PATH="$tmp/bin:$PATH" bash "$ROOT/CodexHelper/$platform/part1.sh" --dry-run --fresh-install --yes --no-humanizer --no-omniroute --no-codex-hooks --no-rtk-hook --no-apply-codex-config
 		) >"$log" 2>&1 || ! grep -Eq '\$ .*code-review-graph build' "$log"; then
 			echo "Codex $platform fresh install did not allow a graph rebuild" >&2
-			cat "$log" >&2
+			report_failure "$log" >&2
 			return 1
 		fi
 
@@ -1162,13 +1166,13 @@ EOF_CRG
 			cd "$tmp/repo"
 			HOME="$tmp/home" CONTEXT7_STATE=exact PATH="$tmp/bin:$PATH" bash "$ROOT/CodexHelper/$platform/part1.sh" --dry-run --no-humanizer --no-omniroute --no-codex-hooks --no-rtk-hook --no-apply-codex-config
 		) >"$log" 2>&1; then
-			cat "$log" >&2
+			report_failure "$log" >&2
 			return 1
 		fi
 		if ! grep -Eq '\$ codex plugin add i-have-adhd@i-have-adhd' "$log" ||
 			! grep -Eq '\$ .*code-review-graph build' "$log"; then
 			echo "Codex $platform missing graph index did not accept an interactive build" >&2
-			cat "$log" >&2
+			report_failure "$log" >&2
 			return 1
 		fi
 
@@ -1177,13 +1181,13 @@ EOF_CRG
 			cd "$tmp/repo"
 			HOME="$tmp/home" CONTEXT7_STATE=exact PATH="$tmp/bin:$PATH" bash "$ROOT/CodexHelper/$platform/part1.sh" --dry-run --fresh-install --yes --no-humanizer --no-omniroute --no-codex-hooks --no-rtk-hook --no-crg-build --no-apply-codex-config
 		) >"$log" 2>&1; then
-			cat "$log" >&2
+			report_failure "$log" >&2
 			return 1
 		fi
 		if grep -Fq "Build code-review-graph index for this repo now?" "$log" ||
 			grep -Eq '\$ .*code-review-graph build' "$log"; then
 			echo "Codex $platform --no-crg-build did not suppress graph building" >&2
-			cat "$log" >&2
+			report_failure "$log" >&2
 			return 1
 		fi
 		rm -rf "$tmp"
@@ -1275,25 +1279,25 @@ EOF_TOOL
 	chmod +x "$tmp/bin"/* "$tmp/repo/node_modules/.bin"/* "$tmp/repo/app.sh"
 
 	if ! PATH="$tmp/bin:$PATH" bash "$ROOT/CodexHelper/MacOS/part2.sh" --repo "$tmp/repo" --dry-run --force --yes --no-wire --no-fix >"$tmp/mac-quality.log" 2>&1; then
-		cat "$tmp/mac-quality.log" >&2
+		report_failure "$tmp/mac-quality.log" >&2
 		return 1
 	fi
 	for expected in "uv tool upgrade ruff" "@biomejs/biome@latest" "composer update squizlabs/php_codesniffer phpstan/phpstan --with-dependencies" "brew upgrade shellcheck shfmt"; do
 		if ! grep -Fq "$expected" "$tmp/mac-quality.log"; then
 			echo "Codex macOS quality --force did not plan: $expected" >&2
-			cat "$tmp/mac-quality.log" >&2
+			report_failure "$tmp/mac-quality.log" >&2
 			return 1
 		fi
 	done
 
 	if ! PATH="$tmp/bin:$PATH" bash "$ROOT/CodexHelper/WSL/part2.sh" --repo "$tmp/repo" --dry-run --force --yes --no-wire --no-fix >"$tmp/wsl-quality.log" 2>&1; then
-		cat "$tmp/wsl-quality.log" >&2
+		report_failure "$tmp/wsl-quality.log" >&2
 		return 1
 	fi
 	for expected in "uv tool upgrade ruff" "apt-get install -y shellcheck shfmt composer"; do
 		if ! grep -Fq "$expected" "$tmp/wsl-quality.log"; then
 			echo "Codex WSL quality --force did not plan: $expected" >&2
-			cat "$tmp/wsl-quality.log" >&2
+			report_failure "$tmp/wsl-quality.log" >&2
 			return 1
 		fi
 	done

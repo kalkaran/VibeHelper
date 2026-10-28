@@ -36,7 +36,7 @@ def test_memory_settings_ownership_preserves_custom_hooks(repo):
     document = {"hooks": INSTALL.desired("claude")}
     settings.write_text(json.dumps(document))
     assert MANAGED.recognizable(settings, "claude")
-    document["hooks"]["Stop"][0]["hooks"].append(
+    document["hooks"]["SessionEnd"][0]["hooks"].append(
         {"command": "echo custom", "type": "command"}
     )
     settings.write_text(json.dumps(document))
@@ -69,26 +69,38 @@ def state(repo):
 
 def backend(monkeypatch, repo, fail=False):
     calls = []
-    real_run = MEMORY.run
 
-    def run(root, command, timeout=30):
-        if command[0] == "git":
-            return real_run(root, command, timeout)
-        calls.append(command)
+    def index(root, key, current):
+        calls.append([key, "explicit", sorted(MEMORY.code_files(current))])
         if fail:
-            raise subprocess.CalledProcessError(1, command)
-        key = "crg" if "code-review-graph" in command[0] else "graphify"
-        path = root / MEMORY.BACKENDS[key]
+            raise RuntimeError("parser failed")
+        path = MEMORY.backend_path(root, key)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
             json.dumps({"nodes": [], "links": [], "revision": time.time_ns()})
             if key == "graphify"
             else str(time.time_ns())
         )
-        return "updated"
+        return {
+            "indexed": sorted(MEMORY.code_files(current)),
+            "unsupported": [],
+            "excluded": [],
+            "failed": {},
+            "missing": [],
+            "complete": True,
+            "log": "fixture.log",
+        }
+
+    real_run = MEMORY.run
+
+    def run(root, command, timeout=30):
+        if command[0] == "code-review-graph":
+            calls.append(command)
+            return '{"results": []}'
+        return real_run(root, command, timeout)
 
     monkeypatch.setattr(MEMORY, "run", run)
-    monkeypatch.setattr(MEMORY.shutil, "which", lambda name: name)
+    monkeypatch.setattr(MEMORY, "index_backend", index)
     return calls
 
 
@@ -122,12 +134,12 @@ def test_record_only_then_batch_once_and_deletion_rebuild(repo, monkeypatch):
     assert not calls
     value = MEMORY.handle(repo, args("refresh"))
     assert value["freshness"]["crg"]["status"] == "current"
-    assert calls[0][1] == "build"
+    assert calls[0][1] == "explicit"
     MEMORY.handle(repo, args("hook"), {"hook_event_name": "Stop"})
     assert len(calls) == 1
     (repo / "tracking.py").unlink()
     MEMORY.handle(repo, args("refresh"))
-    assert len(calls) == 2 and calls[-1][1] == "build"
+    assert len(calls) == 2 and calls[-1][1] == "explicit"
 
 
 def test_failure_and_noop_remain_pending(repo, monkeypatch):
@@ -174,7 +186,7 @@ def test_branch_identity_invalidates_and_concurrent_lock_is_advisory(repo, monke
         lambda root: {"root": str(root), "head": "another", "branch": "feature"},
     )
     MEMORY.handle(repo, args("refresh"))
-    assert len(calls) == 2 and calls[-1][1] == "build"
+    assert len(calls) == 2 and calls[-1][1] == "explicit"
     with (repo / ".cache/project-memory/lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         assert MEMORY.handle(repo, args("refresh"))["status"] == "busy"
@@ -323,6 +335,33 @@ def test_installer_delivery_and_rerun(tmp_path, provider, folder, platform):
             timeout=45,
         )
         assert result.returncode == 0, result.stdout[-4000:] + result.stderr[-2000:]
+        helper = repo / f"vibe_scripts/{provider}/project-memory.py"
+        delivered = helper.read_text().splitlines(keepends=True)
+        assert delivered[1].startswith(f"# {folder}-Version: ")
+        assert (
+            "".join(delivered[:1] + delivered[2:])
+            == (ROOT / "templates/vibe_scripts/project-memory.py").read_text()
+        )
+        startup = subprocess.run(
+            [
+                sys.executable,
+                str(helper),
+                "hook",
+                "--provider",
+                provider,
+                "--root",
+                str(repo),
+            ],
+            input=json.dumps({"hook_event_name": "SessionStart"}),
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        assert startup.returncode == 0 and not startup.stderr
+        output = json.loads(startup.stdout)
+        assert set(output) == {"systemMessage"}
+        assert "Session event has no session ID" in output["systemMessage"]
     assert (repo / f"vibe_scripts/{provider}/project-memory.py").exists()
     assert (repo / f"vibe_scripts/{provider}/cleanup-cache.py").exists()
     config = repo / (
@@ -355,8 +394,9 @@ def test_installer_delivery_and_rerun(tmp_path, provider, folder, platform):
     )
     if provider == "claude":
         assert policy == {
-            "_managed": "ClaudeHelper-Version: project-memory-v1",
-            "hooks": False,
+            "_managed": "ClaudeHelper-Version: project-memory-v2",
+            "hooks": True,
+            "watch": True,
             "crg": False,
             "graphify": False,
         }
@@ -401,6 +441,29 @@ def test_installer_delivery_and_rerun(tmp_path, provider, folder, platform):
     )
     assert (docs / "usage.md").read_text() == custom
     assert global_config.read_text() == model_config
+    disabled = subprocess.run(
+        command + ["--refresh-managed", "--no-memory-watch"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=45,
+    )
+    assert disabled.returncode == 0, disabled.stderr
+    assert (
+        json.loads((repo / f"vibe_scripts/{provider}/memory-policy.json").read_text())[
+            "watch"
+        ]
+        is False
+    )
+    INSTALL.install(repo, provider)
+    assert (
+        json.loads((repo / f"vibe_scripts/{provider}/memory-policy.json").read_text())[
+            "watch"
+        ]
+        is False
+    )
 
 
 @pytest.mark.parametrize("custom", [False, True])
@@ -565,28 +628,30 @@ def test_failed_backend_exit_zero_and_mid_update_edits_remain_pending(
 ):
     calls = backend(monkeypatch, repo)
     MEMORY.handle(repo, args("refresh"))
-    original = MEMORY.run
+    original = MEMORY.index_backend
     (repo / "tracking.py").write_text("def changed(): pass\n")
 
-    def run(root, command, timeout=30):
-        return (
-            original(root, command, timeout)
-            if command[0] == "git"
-            else "nothing updated"
-        )
+    def no_coverage(root, key, current):
+        return {
+            "indexed": [],
+            "unsupported": [],
+            "excluded": [],
+            "failed": {},
+            "missing": ["tracking.py"],
+            "log": "fixture.log",
+        }
 
-    monkeypatch.setattr(MEMORY, "run", run)
+    monkeypatch.setattr(MEMORY, "index_backend", no_coverage)
     value = MEMORY.handle(repo, args("refresh"))
     assert value["freshness"]["crg"]["status"] == "pending"
     assert len(calls) == 1
 
-    def racing(root, command, timeout=30):
-        result = original(root, command, timeout)
-        if command[0] != "git":
-            (repo / "tracking.py").write_text("def raced(): pass\n")
+    def racing(root, key, current):
+        result = original(root, key, current)
+        (repo / "tracking.py").write_text("def raced(): pass\n")
         return result
 
-    monkeypatch.setattr(MEMORY, "run", racing)
+    monkeypatch.setattr(MEMORY, "index_backend", racing)
     value = MEMORY.handle(repo, args("refresh"))
     assert "files changed during refresh" in value["freshness"]["crg"]["error"]
 
@@ -619,20 +684,16 @@ def test_live_crg_updates_reverts_and_deletions(repo):
 
 
 def test_graph_refresh_timeouts(repo, monkeypatch):
-    backend(monkeypatch, repo)
-    refresh = MEMORY.run
-    timeouts = []
+    def timeout(*_args):
+        raise subprocess.TimeoutExpired("index worker", 600)
 
-    def run(root, command, timeout=30):
-        if command[0] != "git":
-            timeouts.append(timeout)
-        return refresh(root, command, timeout)
-
-    monkeypatch.setattr(MEMORY, "run", run)
+    monkeypatch.setattr(MEMORY, "index_backend", timeout)
     request = args("refresh")
     request.architecture = True
-    MEMORY.handle(repo, request)
-    assert timeouts == [80, 80]
+    value = MEMORY.handle(repo, request)
+    for key in ("crg", "graphify"):
+        assert value["freshness"][key]["status"] == "pending"
+        assert "timed out" in value["freshness"][key]["error"]
 
 
 def test_hook_budget_and_deadline_restoration(repo, monkeypatch):
@@ -688,5 +749,171 @@ def test_hook_malformed_state_and_missing_tool_never_block(repo):
     )
     assert result.returncode == 0
     value = json.loads(result.stdout)
-    assert "unavailable" in value["systemMessage"]
+    assert value == {}  # Stop neither scans nor tears down the session watcher.
     assert "decision" not in value and "continue" not in value
+
+
+def test_nested_untracked_inventory_ignore_and_failed_scan(repo, monkeypatch):
+    nested = repo / "backend"
+    nested.mkdir()
+    subprocess.run(["git", "init", "-q", str(nested)], check=True)
+    (nested / "mvp.py").write_text("def backend(): pass\n")
+    (nested / ".gitignore").write_text("ignored.py\n")
+    (nested / "ignored.py").write_text("secret = 1\n")
+    (repo / "README.md").write_text("```python\ndef example(): pass\n```\n")
+    (repo / "photo.png").write_bytes(b"\x89PNG\0image")
+    (repo / "paper.pdf").write_bytes(b"%PDF-1.7\0")
+    (repo / "binary.bin").write_bytes(b"\0\x01")
+    (repo / "module.mjs").write_text("export function work() {}\n")
+    inventory = MEMORY.snapshot(repo)
+    assert "backend/mvp.py" in inventory
+    assert "backend/ignored.py" not in inventory
+    categories = MEMORY.classification(repo, inventory)
+    assert "module.mjs" in categories["code"]
+    assert {"README.md", "paper.pdf"} <= set(categories["knowledge"])
+    assert categories["media"] == ["photo.png"]
+    assert categories["unsupported"] == ["binary.bin"]
+    calls = backend(monkeypatch, repo)
+    MEMORY.handle(repo, args("refresh"))
+    old = state(repo)
+    original = MEMORY.run
+
+    def failed(root, command, timeout=30):
+        if root == nested:
+            raise subprocess.CalledProcessError(1, command)
+        return original(root, command, timeout)
+
+    monkeypatch.setattr(MEMORY, "run", failed)
+    with pytest.raises(subprocess.CalledProcessError):
+        MEMORY.handle(repo, args("refresh"))
+    assert state(repo) == old
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("layout", [".graphify", "graphify-out"])
+def test_live_nested_coverage_repeated_refresh_and_zero_symbols(repo, layout):
+    nested = repo / "backend"
+    nested.mkdir()
+    subprocess.run(["git", "init", "-q", str(nested)], check=True)
+    (nested / "mvp.py").write_text("def backend(): return 1\n")
+    (repo / "empty.py").write_text("# no definitions\n")
+    (repo / layout).mkdir()
+    request = args("refresh")
+    request.architecture = True
+    for version in (1, 2):
+        (repo / "tracking.py").write_text(f"def track(): return {version}\n")
+        value = MEMORY.handle(repo, request)
+        for key in ("crg", "graphify"):
+            assert value["freshness"][key]["status"] == "current", value
+            assert {"tracking.py", "backend/mvp.py", "empty.py"} <= set(
+                value["freshness"][key]["coverage"]["indexed"]
+            )
+        graph = json.loads(MEMORY.backend_path(repo, "graphify").read_text())
+        assert any(
+            node.get("source_file") == "backend/mvp.py" for node in graph["nodes"]
+        )
+    (repo / ".graphifyignore").write_text("backend/\n")
+    (repo / "tracking.py").write_text("def trigger(): pass\n")
+    value = MEMORY.handle(repo, request)
+    assert "backend/mvp.py" in value["freshness"]["graphify"]["coverage"]["excluded"]
+    graph = json.loads(MEMORY.backend_path(repo, "graphify").read_text())
+    assert not any(
+        node.get("source_file") == "backend/mvp.py" for node in graph["nodes"]
+    )
+
+
+def test_rules_changed_during_refresh_stay_pending(repo, monkeypatch):
+    backend(monkeypatch, repo)
+    original = MEMORY.index_backend
+
+    def racing(root, key, current):
+        result = original(root, key, current)
+        (root / ".graphifyignore").write_text("tracking.py\n")
+        return result
+
+    monkeypatch.setattr(MEMORY, "index_backend", racing)
+    value = MEMORY.handle(repo, args("refresh"))
+    assert value["freshness"]["crg"]["status"] == "pending"
+    assert "files changed during refresh" in value["freshness"]["crg"]["error"]
+
+
+def test_partial_coverage_never_stamps_failed_sources(repo, monkeypatch):
+    (repo / "failed.py").write_text("def failed(): pass\n")
+    backend(monkeypatch, repo)
+    original = MEMORY.index_backend
+
+    def partial(root, key, current):
+        result = original(root, key, current)
+        result["indexed"].remove("failed.py")
+        result["failed"] = {"failed.py": "parser unavailable"}
+        result["complete"] = False
+        return result
+
+    monkeypatch.setattr(MEMORY, "index_backend", partial)
+    value = MEMORY.handle(repo, args("refresh"))
+    assert value["freshness"]["crg"]["status"] == "pending"
+    assert value["freshness"]["crg"]["paths"] == ["failed.py"]
+    assert set(state(repo)["crg"]["files"]) == {"tracking.py"}
+
+
+def test_graphify_partial_extraction_retains_prior_nodes(repo, monkeypatch):
+    extract_module = pytest.importorskip("graphify.extract")
+    index = load("project-memory-index")
+    (repo / "failed.py").write_text("def failed(): pass\n")
+    graph = repo / "graphify-out/graph.json"
+    MEMORY.write_json(
+        graph,
+        {
+            "nodes": [
+                {
+                    "id": "prior",
+                    "label": "prior",
+                    "source_file": "failed.py",
+                    "file_type": "code",
+                }
+            ],
+            "links": [],
+        },
+    )
+    original = extract_module._get_extractor
+    monkeypatch.setattr(
+        extract_module,
+        "_get_extractor",
+        lambda path: (
+            (lambda _path: {"error": "parser unavailable"})
+            if path.name == "failed.py"
+            else original(path)
+        ),
+    )
+    result = index.graphify(
+        repo, ["tracking.py", "failed.py"], ["tracking.py", "failed.py"], graph
+    )
+    assert result["indexed"] == ["tracking.py"]
+    assert "failed.py" in result["failed"]
+    assert any(node["id"] == "prior" for node in json.loads(graph.read_text())["nodes"])
+
+
+def test_graphify_exclusion_removes_previously_reviewed_document(repo):
+    pytest.importorskip("graphify.extract")
+    index = load("project-memory-index")
+    (repo / "README.md").write_text("Reviewed knowledge\n")
+    (repo / ".graphifyignore").write_text("README.md\n")
+    graph = repo / "graphify-out/graph.json"
+    MEMORY.write_json(
+        graph,
+        {
+            "nodes": [
+                {
+                    "id": "document",
+                    "label": "Document",
+                    "source_file": "README.md",
+                    "file_type": "document",
+                    "tier": "semantic",
+                }
+            ],
+            "links": [],
+        },
+    )
+    result = index.graphify(repo, [], ["README.md", ".graphifyignore"], graph)
+    assert "README.md" in result["excluded"]
+    assert json.loads(graph.read_text())["nodes"] == []

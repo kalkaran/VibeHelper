@@ -6,15 +6,300 @@ import ast
 import contextlib
 import fcntl
 import hashlib
+import importlib.util
 import json
 import os
 import re
 import shlex
 import shutil
+import sqlite3
 import subprocess
 import sys
 import time
 from pathlib import Path
+
+MEMORY_ASSETS = (
+    "project-memory.py",
+    "project-memory-index.py",
+    "project-memory-watch.py",
+    "install-project-memory.py",
+)
+
+
+def memory_projects(search_roots=None):
+    """Discover live installations, including configured roots outside ~/Code."""
+    import tomllib
+
+    roots = set(search_roots or [Path.home() / "Code"])
+    if search_roots is None:
+        for config in (
+            Path.home() / ".codex/config.toml",
+            Path.home() / ".claude.json",
+        ):
+            if config.is_file():
+                data = (
+                    tomllib.loads(config.read_text())
+                    if config.suffix == ".toml"
+                    else json.loads(config.read_text())
+                )
+                roots.update(
+                    Path(name).expanduser() for name in data.get("projects", {})
+                )
+    found = {}
+    excluded = {
+        ".git",
+        ".cache",
+        ".venv",
+        "venv",
+        "node_modules",
+        "vendor",
+        "dist",
+        "build",
+        "notes",
+        ".graphify",
+        "graphify-out",
+        ".agents",
+        "backups",
+    }
+    for root in sorted(roots):
+        for directory, directories, _files in os.walk(root):
+            directories[:] = [
+                name
+                for name in directories
+                if name not in excluded and not (Path(directory) / name).is_symlink()
+            ]
+            project = Path(directory).resolve()
+            providers = [
+                provider
+                for provider in ("codex", "claude")
+                if (project / f"vibe_scripts/{provider}/project-memory.py").is_file()
+            ]
+            if providers:
+                found[str(project)] = providers
+    return dict(
+        sorted(
+            found.items(), key=lambda item: (Path(item[0]).name != "react_app", item[0])
+        )
+    )
+
+
+def memory_refresh(root, provider, dry_run=False, previous_source=None):
+    guard = safe(root, f".cache/vibehelper-install/{provider}.guard")
+    if guard is None:
+        raise ValueError("Unsafe installation guard")
+    if dry_run:
+        return _memory_refresh(root, provider, True, previous_source)
+    guard.parent.mkdir(parents=True, exist_ok=True)
+    with guard.open("a") as stream:
+        fcntl.flock(stream, fcntl.LOCK_EX)
+        if (guard.parent / f"{provider}.lock").exists():
+            raise ValueError("An installation is already active")
+        return _memory_refresh(root, provider, False, previous_source)
+
+
+@contextlib.contextmanager
+def memory_transaction(root, backup, manifest):
+    try:
+        yield
+    except BaseException:
+        manifest["status"] = "failed; restoring backup"
+        (backup / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+        for name in manifest["modified"]:
+            previous = manifest["before"][name]
+            path = root / name
+            if previous is None:
+                path.unlink(missing_ok=True)
+            else:
+                shutil.copy2(backup / "files" / name, path)
+        manifest["status"] = "rolled-back"
+        (backup / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+        raise
+
+
+def _memory_refresh(root, provider, dry_run=False, previous_source=None):
+    """Migrate only memory assets; retain durable backups and custom settings."""
+    receipt = safe(root, f".cache/vibehelper-install/{provider}.json")
+    if receipt is None:
+        raise ValueError("Unsafe installation receipt")
+    owned = json.loads(receipt.read_text()) if receipt.exists() else {}
+    assets = {}
+    for name in MEMORY_ASSETS:
+        relative = f"vibe_scripts/{provider}/{name}"
+        target = safe(root, relative)
+        source = Path(__file__).with_name(name)
+        previous = previous_source / name if previous_source else None
+        if target is None:
+            raise ValueError(f"Preserving symlinked memory helper: {relative}")
+        if target.exists() and not (
+            owned.get(relative) == digest(target)
+            or target.read_bytes() == source.read_bytes()
+            or (
+                previous
+                and previous.is_file()
+                and target.read_bytes() == previous.read_bytes()
+            )
+        ):
+            raise ValueError(f"Preserving customized memory helper: {relative}")
+        assets[relative] = source
+    policy_name = f"vibe_scripts/{provider}/memory-policy.json"
+    policy_path = safe(root, policy_name)
+    if policy_path is None:
+        raise ValueError("Unsafe memory policy")
+    policy = json.loads(policy_path.read_text()) if policy_path.exists() else {}
+    # v1 hooks=false was the shipped default, before session watching existed.
+    enabled = policy.get("watch", True)
+    if not isinstance(enabled, bool):
+        raise TypeError("Custom watch policy needs review")
+    config_names = (
+        [
+            f".{provider}/config.toml",
+            f".{provider}/config-snippet.toml",
+            f".{provider}/hooks.json",
+        ]
+        if provider == "codex"
+        else [".claude/settings.local.json", ".claude/settings.json"]
+    )
+    names = [
+        *assets,
+        policy_name,
+        *config_names,
+        ".graphifyignore",
+        ".cache/project-memory/state.json",
+        f".cache/vibehelper-install/{provider}.json",
+    ]
+    guidance_name = f"agent/{provider}/context-strategy.md"
+    guidance = safe(root, guidance_name)
+    old_guidance = "Automatic memory hooks are disabled. Use the context or refresh command explicitly;\nordinary edits, reads and completion do not trigger graph maintenance."
+    new_guidance = "Agent sessions share a filesystem watcher that refreshes code after three seconds\nwithout saves. SessionEnd releases it; Stop between replies leaves it running.\nKnowledge and media changes await explicit semantic review. Use memory-policy.json\nwatch=false or --no-memory-watch to opt out. Status reports coverage and logs."
+    update_guidance = (
+        guidance is not None
+        and guidance.is_file()
+        and old_guidance in guidance.read_text()
+    )
+    if update_guidance:
+        names.append(guidance_name)
+    for directory in (
+        ".graphify",
+        "graphify-out",
+        ".code-review-graph",
+        ".cache/project-memory",
+    ):
+        base = safe(root, directory)
+        if base is None:
+            raise ValueError(f"Unsafe graph directory: {directory}")
+        if base.exists():
+            names.extend(
+                str(path.relative_to(root))
+                for path in base.rglob("*")
+                if path.is_file()
+            )
+    for name in names:
+        if safe(root, name) is None:
+            raise ValueError(f"Unsafe memory artifact: {name}")
+    if dry_run:
+        return {
+            "root": str(root),
+            "provider": provider,
+            "status": "ready",
+            "assets": list(assets),
+            "watch": enabled,
+        }
+    cache = root / ".cache/project-memory"
+    cache.mkdir(parents=True, exist_ok=True)
+    with (cache / "lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        backup = receipt.parent / f"memory-backup-{provider}-{time.time_ns()}"
+        backup.mkdir(parents=True)
+        before = {}
+        for name in sorted(set(names)):
+            path = root / name
+            before[name] = digest(path) if path.is_file() else None
+            if path.is_file():
+                destination = backup / "files" / name
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                if name == ".code-review-graph/graph.db":
+                    with (
+                        sqlite3.connect(path) as source_db,
+                        sqlite3.connect(destination) as backup_db,
+                    ):
+                        source_db.backup(backup_db)
+                else:
+                    shutil.copy2(path, destination)
+        manifest = {
+            "root": str(root),
+            "provider": provider,
+            "before": before,
+            "modified": [
+                *assets,
+                policy_name,
+                *config_names,
+                ".graphifyignore",
+                ".cache/project-memory/state.json",
+                f".cache/vibehelper-install/{provider}.json",
+                *([guidance_name] if update_guidance else []),
+            ],
+            "status": "backed-up",
+        }
+        (backup / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+        (backup / "RESTORE.txt").write_text(
+            "Stop agent sessions before restoring. Copy each file under files/ back to the same relative path in "
+            + str(root)
+            + ". Paths with null in manifest.before did not exist; remove only the migration-created versions after checking for later edits. Preserve the backup until coverage is verified.\n"
+        )
+        with memory_transaction(root, backup, manifest):
+            for name, source in assets.items():
+                (root / name).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, root / name)
+                owned[name] = digest(root / name)
+            policy["watch"] = enabled
+            policy_path.write_text(json.dumps(policy, indent=2) + "\n")
+            spec = importlib.util.spec_from_file_location(
+                "memory_installer",
+                Path(__file__).with_name("install-project-memory.py"),
+            )
+            installer = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(installer)
+            installer.install(
+                root,
+                provider,
+                hooks=enabled,
+                crg=policy.get("crg", True),
+                graphify=policy.get("graphify", True),
+            )
+            if update_guidance:
+                guidance.write_text(
+                    guidance.read_text().replace(old_guidance, new_guidance)
+                )
+                if guidance_name in owned:
+                    owned[guidance_name] = digest(guidance)
+            for name in (policy_name, *config_names, ".graphifyignore"):
+                path = root / name
+                if path.is_file() and (name in owned or name == policy_name):
+                    owned[name] = digest(path)
+            receipt.write_text(json.dumps(owned, indent=2) + "\n")
+            state_path = cache / "state.json"
+            if state_path.is_file():
+                state = json.loads(state_path.read_text())
+                for backend in ("crg", "graphify"):
+                    state.pop(backend, None)
+                state_path.write_text(json.dumps(state, indent=2) + "\n")
+            manifest.update(
+                status="migrated",
+                after={
+                    name: digest(root / name)
+                    for name in names
+                    if (root / name).is_file()
+                },
+            )
+            (backup / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+    return {
+        "root": str(root),
+        "provider": provider,
+        "status": "migrated",
+        "watch": enabled,
+        "backup": str(backup),
+        "restore": str(backup / "RESTORE.txt"),
+    }
 
 
 def digest(path):
@@ -521,11 +806,21 @@ def install_usage_tracker(
     dry_run=False,
     *,
     quality=False,
+    memory_hook=False,
+    reporting=False,
     previous_source=None,
     reviewed_makefile_sha256=None,
 ):
     """Refresh authorized assets in an existing installation, retaining ownership."""
-    label = "Quality" if quality else "Usage tracker"
+    label = (
+        "Reporting"
+        if reporting
+        else "Memory hook"
+        if memory_hook
+        else "Quality"
+        if quality
+        else "Usage tracker"
+    )
     receipt = safe(root, f".cache/vibehelper-install/{provider}.json")
     if receipt is None or not receipt.is_file():
         raise ValueError(f"{label} refresh requires an existing managed installation")
@@ -542,7 +837,27 @@ def install_usage_tracker(
             raise TypeError("Invalid installation receipt")
         assets = {}
         content_by_name = (
-            quality_assets(root, provider)
+            {
+                f"vibe_scripts/{provider}/{name}": Path(__file__)
+                .with_name(name)
+                .read_bytes()
+                for name in (
+                    "ai-quality-wrapper.py",
+                    "agent-check-edited.py",
+                    "agent-verify.sh",
+                    "test-verification.py",
+                    "project-memory.py",
+                    "write-git-add.py",
+                )
+            }
+            if reporting
+            else {
+                f"vibe_scripts/{provider}/project-memory.py": Path(__file__)
+                .with_name("project-memory.py")
+                .read_bytes()
+            }
+            if memory_hook
+            else quality_assets(root, provider)
             if quality
             else {
                 f"vibe_scripts/{provider}/usage-tracker.{suffix}": (
@@ -551,6 +866,14 @@ def install_usage_tracker(
                 for suffix in ("py", "patch", "md")
             }
         )
+        if reporting:
+            guidance_name = f"agent/{provider}/procedures.md"
+            guidance = safe(root, guidance_name)
+            if guidance is not None and guidance.is_file():
+                content = guidance.read_text()
+                if "write-git-add.py" not in content:
+                    content += f"\nAfter reviewing manifest paths, run `python3 vibe_scripts/{provider}/write-git-add.py < /path/to/reviewed-manifest.txt`. This writes git-add.txt and a timestamped copy under notes/git-add-history/, preserving the previous recommendation. Exclude history from staging.\n"
+                content_by_name[guidance_name] = content.encode()
         for name, content in content_by_name.items():
             destination = safe(root, name)
             previous = (
@@ -564,12 +887,14 @@ def install_usage_tracker(
                         "agent-verify.sh",
                         "ai-quality-wrapper.py",
                         "quality-hook.py",
+                        "test-verification.py",
+                        "project-memory.py",
                     )
                 }
                 else None
             )
             matches_previous = bool(
-                quality
+                (quality or reporting)
                 and destination
                 and destination.is_file()
                 and previous
@@ -626,12 +951,32 @@ def install_usage_tracker(
             for path, _ in assets.values()
         }
         old_receipt = receipt.read_bytes()
+        if reporting:
+            backup = receipt.parent / f"reporting-backup-{provider}-{time.time_ns()}"
+            backup.mkdir()
+            for path, content in previous.items():
+                if content is not None:
+                    target = backup / "files" / path.relative_to(root)
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(content)
+                    target.chmod(path.stat().st_mode & 0o777)
+            (backup / "receipt.json").write_bytes(old_receipt)
+            created = [
+                str(path.relative_to(root))
+                for path, content in previous.items()
+                if content is None
+            ]
+            (backup / "created.json").write_text(json.dumps(created, indent=2) + "\n")
+            (backup / "RESTORE.txt").write_text(
+                f"Copy files/ back into {root}, preserving relative paths and permissions, then restore receipt.json to {receipt}. Remove only unchanged migration-created files listed in created.json. Stop agent sessions first.\n"
+            )
+            print(f"Reporting backup: {backup}")
         try:
             for name, (path, content) in assets.items():
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes(content)
                 if (
-                    quality
+                    (quality or reporting)
                     and path.name == "agent-verify.sh"
                     and previous[path] is None
                 ):
@@ -663,6 +1008,10 @@ def main():
             "resource-writable",
             "usage-tracker",
             "quality-refresh",
+            "reporting-refresh",
+            "memory-hook-refresh",
+            "memory-refresh",
+            "memory-discover",
         ],
     )
     parser.add_argument("--provider", choices=["codex", "claude"], required=True)
@@ -685,12 +1034,61 @@ def main():
     )
     args = parser.parse_args()
     root = args.root.resolve()
-    if args.operation in {"usage-tracker", "quality-refresh"}:
+    if args.operation == "memory-discover":
+        print(json.dumps(memory_projects(), indent=2))
+        return
+    if args.operation == "memory-refresh":
+        started = time.monotonic()
+        result = memory_refresh(root, args.provider, args.dry_run, args.previous_source)
+        if not args.dry_run:
+            log = Path(result["backup"]) / "refresh.log"
+            command = [
+                sys.executable,
+                str(root / f"vibe_scripts/{args.provider}/project-memory.py"),
+                "refresh",
+                "--root",
+                str(root),
+                "--architecture",
+            ]
+            with log.open("w") as stream:
+                completed = subprocess.run(
+                    command, stdout=stream, stderr=subprocess.STDOUT, check=False
+                )
+            state_path = root / ".cache/project-memory/state.json"
+            state = json.loads(state_path.read_text()) if state_path.exists() else {}
+            result.update(
+                refresh_exit_code=completed.returncode,
+                log=str(log),
+                duration_seconds=round(time.monotonic() - started, 3),
+                coverage={
+                    key: {
+                        name: len(value) if isinstance(value, (list, dict)) else value
+                        for name, value in coverage.items()
+                    }
+                    for key, coverage in state.get("coverage", {}).items()
+                },
+                errors=state.get("errors", {}),
+            )
+            (Path(result["backup"]) / "result.json").write_text(
+                json.dumps(result, indent=2) + "\n"
+            )
+        print(json.dumps(result, indent=2))
+        if result.get("refresh_exit_code"):
+            raise SystemExit(result["refresh_exit_code"])
+        return
+    if args.operation in {
+        "usage-tracker",
+        "quality-refresh",
+        "memory-hook-refresh",
+        "reporting-refresh",
+    }:
         install_usage_tracker(
             root,
             args.provider,
             args.dry_run,
             quality=args.operation == "quality-refresh",
+            memory_hook=args.operation == "memory-hook-refresh",
+            reporting=args.operation == "reporting-refresh",
             previous_source=args.previous_source,
             reviewed_makefile_sha256=args.reviewed_makefile_sha256,
         )

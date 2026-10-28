@@ -28,10 +28,6 @@ RTK_FILTERS = {
     "rtk:ruff-format": "ruff-format",
 }
 
-FAILURE_PATTERN = re.compile(
-    r"\b(?:error|fatal|fail(?:ed|ure)?|exception|panic)\b", re.IGNORECASE
-)
-
 
 def slugify(value: str) -> str:
     value = value.strip().lower()
@@ -39,46 +35,73 @@ def slugify(value: str) -> str:
     return value.strip("-") or "quality-command"
 
 
-def clip_line(line: str, max_chars: int = 500) -> str:
-    line = line.rstrip()
-    if len(line) <= max_chars or (
-        len(line) <= max_chars + 40 and re.search(r"\.\.\. \d+ chars omitted$", line)
-    ):
-        return line
-    return f"{line[:max_chars]}... {len(line) - max_chars} chars omitted"
-
-
-def trim_lines(
-    text: str, max_lines: int, *, preserve_failures: bool = False
-) -> tuple[list[str], int]:
-    lines = [clip_line(line) for line in text.splitlines() if line.strip()]
-    if len(lines) <= max_lines:
-        return lines, 0
-    shown = max_lines - 1
-    baseline_head = shown // 2
-    baseline_tail = shown - baseline_head
-    anchor_indexes: list[int] = []
-    if preserve_failures:
-        anchor_limit = min(2, max(0, shown - 2))
-        omitted_end = len(lines) - baseline_tail
-        for index in range(baseline_head, omitted_end):
-            line = lines[index]
-            if FAILURE_PATTERN.search(line):
-                anchor_indexes.append(index)
-                if len(anchor_indexes) == anchor_limit:
-                    break
-
-    remaining = shown - len(anchor_indexes)
-    head_count = remaining // 2
-    tail_count = remaining - head_count
-    omitted = len(lines) - shown
-    return (
-        lines[:head_count]
-        + [f"... {omitted} output lines omitted ..."]
-        + [lines[index] for index in anchor_indexes]
-        + lines[-tail_count:],
-        omitted,
-    )
+def parse_text_diagnostics(
+    output: str, returncode: int, first_line: int = 2
+) -> list[str]:
+    """Select diagnostic records, never console headers or arbitrary log tails."""
+    records = []
+    seen = set()
+    unknown = []
+    source = ""
+    for number, raw in enumerate(output.splitlines(), first_line):
+        line = re.sub(r"\x1b\[[0-9;]*m", "", raw).strip()
+        if not line:
+            continue
+        if re.fullmatch(
+            r"(?:Ruff(?: check)?:\s*)?All checks passed[.!]?", line, re.IGNORECASE
+        ):
+            records.append("PASS")
+            continue
+        if re.match(r"^[=_─━]{3}", line):
+            if re.search(r"\d+ (?:passed|failed|skipped|errors?)", line):
+                records.append(f"log:{number}: {line.strip('= ')}")
+            continue
+        if line.startswith("PHP_CodeSniffer version "):
+            records.append(line)
+            continue
+        if re.fullmatch(r"\S+\.(?:js|jsx|ts|tsx|vue|svelte|py|go|rs|php|sh|md)", line):
+            source = line
+            continue
+        if source and re.match(r"\d+:\d+\s", line):
+            line = source + ":" + line
+        counts = re.search(
+            r"\b\d+ (?:passed|failed|skipped|errors?|warnings?|files? (?:left unchanged|reformatted))\b",
+            line,
+        )
+        diagnostic = (
+            re.match(
+                r"(?:FAILED |ERROR |E\s+|error(?:\[|:)|warning(?:\[|:)|panic:)", line
+            )
+            or re.search(r"(?:^|\s)[\w./-]+:\d+(?::\d+)?:?\s+\S", line)
+            or re.match(r"(?:[A-Z][A-Za-z]*)?(?:Error|Exception):", line)
+            or re.match(r"[A-Z]+\d{2,}\s", line)
+            or re.fullmatch(r"(?:-->\s+)?\S+:\d+(?::\d+)?", line)
+            or re.match(r"(?:Expected|Received|Actual|Caused by):", line, re.IGNORECASE)
+            or re.match(r"(?:FAIL|FAILURES|error|UNPARSED|REVIEW)\s*[: ]\s*\S", line)
+        )
+        if (diagnostic or counts) and line not in seen:
+            seen.add(line)
+            records.append(f"log:{number}: {line}")
+        elif not (diagnostic or counts) and not (
+            raw.startswith(">")
+            or re.match(
+                r"[.FsEx%\d \[\]]+$|(?:platform |rootdir:|plugins:|collected |tests/|tmp_path =|source =|exit_code=)",
+                line,
+            )
+        ):
+            unknown.append(number)
+    if unknown:
+        kind = "FAILURE" if returncode else "OUTPUT"
+        records.append(
+            f"UNPARSED {kind}: {len(unknown)} lines; first at log:{unknown[0]}. Discuss the format or request targeted context."
+        )
+    if records:
+        return records
+    return [
+        "PASS"
+        if returncode == 0
+        else "UNPARSED FAILURE: discuss the output format before reading a targeted log section."
+    ]
 
 
 def summarize_known_success(output: str, returncode: int) -> list[str] | None:
@@ -124,10 +147,7 @@ def json_documents(output: str) -> tuple[list[object], list[str]]:
         previous = end
     residue_parts.append(output[previous:])
     residue = [
-        clip_line(line)
-        for part in residue_parts
-        for line in part.splitlines()
-        if line.strip()
+        line for part in residue_parts for line in part.splitlines() if line.strip()
     ]
     return documents, residue
 
@@ -172,7 +192,7 @@ def diagnostic(
         )
         if part
     )
-    return clip_line(f"{location} [{metadata}] {text_value(message)}")
+    return f"{location} [{metadata}] {text_value(message)}"
 
 
 def parse_phpcs(documents: list[object]) -> tuple[str, list[str]] | None:
@@ -376,33 +396,12 @@ def render_native(
 ) -> list[str]:
     if residue:
         summary += f" {len(residue)} non-JSON output lines also emitted."
-    lines = [clip_line(summary)]
-    diagnostics = sorted(diagnostics, key=diagnostic_priority)
-    detail_slots = max_lines - 1
-    residue_slots = 0
+    lines = [summary]
+    lines.extend(sorted(diagnostics, key=diagnostic_priority))
     if residue:
-        residue_slots = min(
-            3, detail_slots if not diagnostics else max(1, detail_slots - 2)
+        lines.append(
+            "REVIEW NEEDED: unrecognized non-JSON output is retained in the log; agree on a targeted section before reading it."
         )
-    diagnostic_slots = detail_slots - residue_slots
-    if len(diagnostics) > diagnostic_slots:
-        shown = max(0, diagnostic_slots - 1)
-        lines.extend(diagnostics[:shown])
-        lines.append(f"... {len(diagnostics) - shown} diagnostics omitted ...")
-    else:
-        lines.extend(diagnostics)
-    if residue_slots:
-        shown = min(len(residue), residue_slots)
-        if len(residue) > residue_slots > 1:
-            shown -= 1
-        for index, line in enumerate(residue[:shown], start=1):
-            lines.append(f"[tool output {index}/{len(residue)}] {line}")
-        omitted = len(residue) - shown
-        if omitted:
-            if residue_slots == 1:
-                lines[-1] += f" (... {omitted} non-JSON lines omitted)"
-            else:
-                lines.append(f"... {omitted} non-JSON output lines omitted ...")
     return lines
 
 
@@ -452,8 +451,11 @@ def adapter_summary(
             return None, "rtk reported no tests for a failed pytest run"
         if returncode != 0:
             # Filter summaries alone can discard the assertion/file needed for repair.
-            return trim_lines(output, max_lines, preserve_failures=True)[0], None
-        return trim_lines(completed.stdout, max_lines)[0], None
+            return parse_text_diagnostics(output, returncode), None
+        filtered = parse_text_diagnostics(completed.stdout, returncode)
+        if any("UNPARSED" in line for line in filtered):
+            return parse_text_diagnostics(output, returncode), None
+        return [re.sub(r"^log:\d+: ", "", line) for line in filtered], None
 
     parser = NATIVE_ADAPTERS.get(adapter)
     if parser is not None:
@@ -476,6 +478,17 @@ def adapter_summary(
         summary, diagnostics = parsed
         if returncode != 0 and not diagnostics:
             return None, "the tool failed without any parsed diagnostics"
+        document_line = 2
+        for match in re.finditer(r"[\[{]", output):
+            try:
+                json.JSONDecoder().raw_decode(output, match.start())
+            except ValueError:
+                continue
+            document_line += output[: match.start()].count("\n")
+            break
+        diagnostics = [
+            f"log:{document_line} (JSON output starts): {line}" for line in diagnostics
+        ]
         return render_native(summary, diagnostics, residue, max_lines), None
 
     if adapter == "generic":
@@ -554,34 +567,6 @@ def terminate_group(process: subprocess.Popen) -> tuple[int, str | None]:
             " Detached children may remain; inspect the process tree before retrying."
         )
     return 1, limitation
-
-
-def with_excerpts(lines: list[str], root: Path, max_lines: int) -> list[str]:
-    rendered = []
-    excerpts = 0
-    for line in lines:
-        rendered.append(line)
-        match = re.match(r"(.+?):(\d+)(?::\d+)? \[", line)
-        if not match or excerpts >= 3:
-            continue
-        path = (root / match[1]).resolve()
-        try:
-            path.relative_to(root.resolve())
-            with path.open(encoding="utf-8", errors="replace") as stream:
-                for number, source in enumerate(stream, 1):
-                    if number == int(match[2]):
-                        rendered.append(f"  {number} | {clip_line(source, 250)}")
-                        excerpts += 1
-                        break
-                    if number > 10000:
-                        break
-        except (OSError, ValueError):
-            continue
-    if len(rendered) > max_lines:
-        return rendered[: max_lines - 1] + [
-            f"... {len(rendered) - max_lines + 1} summary lines omitted; inspect full log ..."
-        ]
-    return rendered
 
 
 def run_quality(
@@ -685,7 +670,7 @@ def run_quality(
     if parsed is None:
         parsed = summarize_known_success(text, code)
     if parsed is None:
-        parsed = trim_lines(text, max_lines, preserve_failures=code != 0)[0]
+        parsed = parse_text_diagnostics(text, code)
     status = "passed" if code in success_codes else "findings"
     if (
         failure
@@ -731,9 +716,6 @@ def run_quality(
             if status == "passed"
             else "Command failed without diagnostics; inspect its installation and log."
         ]
-    parsed = with_excerpts(
-        [clip_line(line) for line in parsed], cwd or Path.cwd(), max_lines
-    )
     stable_diagnostics = re.sub(
         r"\b\d+(?:\.\d+)?\s*(?:s|seconds)\b", "<duration>", "\n".join(parsed)
     )
@@ -771,16 +753,12 @@ def save_summary(value: dict, *, root: Path, max_lines: int = 30) -> None:
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         value["summary_log"] = str(path)
-        if not value.get("log") and not value.get("evidence"):
+        if not value.get("evidence"):
             evidence = path.with_suffix(".json")
             value["evidence"] = str(evidence)
             evidence.write_text(json.dumps(value), encoding="utf-8")
         bounded = dict(value)
-        bounded["summary"] = trim_lines(
-            "\n".join(value["summary"]),
-            min(max_lines, 12),
-            preserve_failures=value["status"] != "passed",
-        )[0]
+        bounded["summary"] = value["summary"]
         path.write_text(render_result(bounded, max_lines) + "\n", encoding="utf-8")
     except OSError as exc:
         value.pop("summary_log", None)
@@ -794,10 +772,10 @@ def save_summary(value: dict, *, root: Path, max_lines: int = 30) -> None:
 
 def bound_output(text: str, max_lines: int = 30, max_bytes: int = 4096) -> str:
     """Bound model-facing text after metadata; complete evidence remains on disk."""
-    lines = text.splitlines()
-    if len(lines) <= max_lines and len(text.encode()) <= max_bytes:
+    if len(text.splitlines()) <= max_lines and len(text.encode()) <= max_bytes:
         return text
-    metadata = [
+    lines = text.splitlines()
+    references = [
         line
         for line in lines
         if line.startswith(
@@ -806,29 +784,41 @@ def bound_output(text: str, max_lines: int = 30, max_bytes: int = 4096) -> str:
                 "[ai-quality] summary log",
                 "[ai-quality] full log",
                 "[ai-quality] duration",
-                "Summary log",
             )
         )
-    ][-4:]
-    footer = "\n".join(metadata).encode()[-2000:].decode("utf-8", errors="ignore")
-    body = [line for line in lines if line not in metadata][
-        : max_lines - len(metadata) - 1
     ]
-    notice = "\n... output abbreviated; see saved evidence ...\n"
-    budget = max_bytes - len((notice + footer).encode())
-    return (
-        "\n".join(body).encode()[:budget].decode("utf-8", errors="ignore")
-        + notice
-        + footer
+    example = next(
+        (
+            line
+            for line in lines[1:]
+            if re.search(r"(?:log:|\S+\.\w+:)\d+", line) and len(line.encode()) <= 500
+        ),
+        None,
+    )
+    return "\n".join(
+        [
+            lines[0],
+            *([example] if example else []),
+            "REVIEW NEEDED: diagnostic report exceeds the display budget; select a failure group from saved evidence. No raw output returned.",
+            *references,
+        ]
     )
 
 
 def render_result(value: dict, max_lines: int = 30) -> str:
     lines = [f"[ai-quality] {value['label']}: {value['status']}"]
     details = value.get("summary", [])
-    lines.extend(details[:max_lines])
-    if len(details) > max_lines:
-        lines.append(f"... {len(details) - max_lines} diagnostics omitted ...")
+    if value["status"] == "passed":
+        details = [
+            line
+            for line in details
+            if re.search(
+                r"\b\d+ (?:passed|tests?|issues|errors|files?)\b|^PASS:|warning|skipped|REVIEW|UNPARSED",
+                line,
+                re.IGNORECASE,
+            )
+        ] or ["PASS"]
+    lines.extend(details)
     lines.append(
         f"[ai-quality] duration: {value.get('duration_seconds', 0)}s; exit code: {value.get('returncode', 'not available')}"
     )
@@ -851,12 +841,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-lines", type=int, default=30)
     parser.add_argument("--timeout", type=float, default=600)
     parser.add_argument("--json", action="store_true")
+    parser.add_argument("--report-log", type=Path)
+    parser.add_argument("--context-line", type=int)
     parser.add_argument("--shell", action="store_true")
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
+    if args.context_line is not None and (args.context_line < 1 or not args.report_log):
+        parser.error("--context-line requires --report-log and a positive line number")
     if args.command and args.command[0] == "--":
         args.command = args.command[1:]
-    if not args.command or args.max_lines < 4 or args.timeout <= 0:
+    if (
+        (not args.command and not args.report_log)
+        or args.max_lines < 4
+        or args.timeout <= 0
+    ):
         parser.error("provide a command, --max-lines >= 4 and a positive --timeout")
     return args
 
@@ -871,6 +869,37 @@ def receipt_guard(receipt: Path):
 
 def main() -> int:
     args = parse_args()
+    if args.report_log:
+        if args.context_line:
+            start = max(1, args.context_line - 5)
+            context = []
+            with args.report_log.open(errors="replace") as stream:
+                for number, line in enumerate(stream, 1):
+                    if start <= number <= args.context_line + 5:
+                        context.append(f"{number}: {line.rstrip()}")
+                    if number > args.context_line + 5:
+                        break
+            text = "\n".join(context)
+            if len(text.encode()) > 4096:
+                print(
+                    "REVIEW NEEDED: requested error section exceeds 4096 bytes; agree on a narrower field or record before reading it."
+                )
+            else:
+                print(text)
+            return 0
+        destination = Path(args.log_dir) / f"{time.time_ns()}-reported.log"
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(args.report_log, destination)
+        value = result(
+            "findings",
+            "saved failure",
+            parse_text_diagnostics(destination.read_text(errors="replace"), 1, 1),
+            log=str(destination),
+            returncode=1,
+        )
+        save_summary(value, root=Path.cwd())
+        print(render_result(value))
+        return 0
     if args.label.startswith("test-"):
         receipt = (
             Path.cwd()
@@ -907,4 +936,8 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except OSError as error:
+        print(f"REVIEW NEEDED: reporting failed: {error}", file=sys.stderr)
+        sys.exit(2)

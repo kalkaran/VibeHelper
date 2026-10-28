@@ -29,6 +29,7 @@ CHROME_MCP_EXPLICIT=0
 RUN_IMPECCABLE="$FRESH_INSTALL"
 WITH_LLM_COUNCIL=0
 RUN_OMNIROUTE=1
+MEMORY_WATCH=auto
 SKIP_GLOBAL=0
 REPO_ROOT=""
 
@@ -62,6 +63,7 @@ Options:
   --chrome-mcp    Configure or repair Chrome DevTools MCP for Claude Code.
   --no-chrome-mcp Do not configure Chrome DevTools MCP.
   --impeccable    Install Impeccable for Claude Code (included by fresh install).
+  --no-memory-watch     Disable automatic session graph watching.
   --no-omniroute        Skip the local free-only OmniRoute runtime setup.
   --with-llm-council
                   Clone karpathy/llm-council into ~/.local/share/llm-council.
@@ -147,6 +149,10 @@ while [[ $# -gt 0 ]]; do
 		;;
 	--impeccable)
 		RUN_IMPECCABLE=1
+		shift
+		;;
+	--no-memory-watch)
+		MEMORY_WATCH=0
 		shift
 		;;
 	--no-omniroute)
@@ -2104,6 +2110,7 @@ Full logs stay on disk. Do not expand task scope to repair unrelated findings.
 
 Before final answer:
 - After code changes, create or replace `git-add.txt` at the repository root. Inspect each candidate diff and include only files necessary for the intended change: source, relevant tests, required configuration, documentation and requested assets. Include additions, modifications and deletions, and both paths for renames. Never fill the list blindly from all Git status output.
+- Save reviewed pathspecs with `python3 vibe_scripts/claude/write-git-add.py < /path/to/reviewed-manifest.txt`. This writes git-add.txt and a timestamped copy under notes/git-add-history/, preserving the previous recommendation. Exclude history from staging.
 - Exclude ignored files, secrets, local agent settings, session notes, logs, backups, caches, installed dependencies, build output, temporary screenshots/reports and the manifest itself. Include package manifests only for intentional package configuration changes, and lockfiles only when required by intentional dependency or toolchain changes; requested deliverables and fixtures may be included after review.
 - Write one repository-relative path per line prefixed with `:(top,literal)`. Use Git C-style quoting for quotes, backslashes or newlines in filenames. Do not list directories or add comments. Leave the file empty when there is nothing to stage.
 - Manifest review is mandatory, even for small tasks. Read the complete staged and unstaged diffs for every candidate, and the full contents of new files; truncated output, filenames, status summaries and passing tests are not sufficient. Inspect binary assets with a suitable viewer or omit them. Check for secrets, private data, debug leftovers and unintended deletions, permissions, symlinks or submodule changes. Record each path's purpose and review evidence in session notes without copying secrets.
@@ -2272,8 +2279,10 @@ scope is separate from graph coverage and the files needed for inspection.
 4. State the planned change and affected tests using that evidence. Inspection
    paths do not authorize edits, design reviews or changes outside the request.
 
-Automatic memory hooks are disabled. Use the context or refresh command explicitly;
-ordinary edits, reads and completion do not trigger graph maintenance.
+Agent sessions share a filesystem watcher that refreshes code after three seconds
+without saves. SessionEnd releases it; Stop between replies leaves it running.
+Knowledge and media changes await explicit semantic review. Use memory-policy.json
+watch=false or --no-memory-watch to opt out. Status reports coverage and logs.
 Graphify's supported code refresh may rebuild all code. Documents have separate
 semantic freshness; code refresh never completes document review. Hooks do not
 run semantic inference or install tools. Existing global/custom graph watchers
@@ -2728,6 +2737,9 @@ install_shared_vibe_script "ai-quality-wrapper.py"
 install_shared_vibe_script "agent-check-edited.py"
 install_shared_vibe_script "update-codebase-wiki.py"
 install_shared_vibe_script "project-memory.py"
+install_shared_vibe_script "write-git-add.py"
+install_shared_vibe_script "project-memory-index.py"
+install_shared_vibe_script "project-memory-watch.py"
 install_shared_vibe_script "install-project-memory.py"
 install_shared_vibe_script "cleanup-cache.py"
 install_shared_vibe_script "usage-tracker.py"
@@ -2761,9 +2773,9 @@ else
 fi
 
 if [[ "$DRY_RUN" -eq 1 ]]; then
-	log "Would remove automatic memory hooks; keep explicit graph commands and exclusions."
+	log "Would configure session graph watching; preserve explicit graph commands and exclusions."
 else
-	python3 vibe_scripts/claude/install-project-memory.py --provider claude --crg "$RUN_CRG" --graphify "$RUN_GRAPHIFY"
+	python3 vibe_scripts/claude/install-project-memory.py --provider claude --hooks "$MEMORY_WATCH" --crg "$RUN_CRG" --graphify "$RUN_GRAPHIFY"
 fi
 
 install_omniroute

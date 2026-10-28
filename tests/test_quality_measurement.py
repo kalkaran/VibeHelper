@@ -74,7 +74,18 @@ def test_diagnostic_repair_measurement(tmp_path):
                 assert "SC1009" in completed.stdout
                 assert "Expected closing delimiter" in completed.stdout
         assert counter.read_text() == "xxxx", "Each requested check must execute once"
-        assert len(list(logs.glob("*.log"))) == 4
+        assert (
+            len(
+                [
+                    path
+                    for path in logs.glob("*.log")
+                    if not path.name.endswith(".summary.log")
+                ]
+            )
+            == 4
+        )
+        if version == "current":
+            assert len(list(logs.glob("*.summary.log"))) == 4
         measurements[version] = {
             "runs": results,
             "command_count": len(counter.read_text()),

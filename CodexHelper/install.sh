@@ -62,6 +62,7 @@ Options:
   --adhd                Install i-have-adhd and enable its response style (default).
   --no-adhd             Skip i-have-adhd installation and response-style setup.
   --no-omniroute  Skip the local free-only OmniRoute runtime setup.
+  --no-memory-watch     Disable automatic session graph watching.
   --with-llm-council    Install the optional LLM Council integration in part 1.
   --no-crg-build        Skip the initial code-review-graph build in part 1.
   -h, --help            Show this help.
@@ -171,7 +172,7 @@ while [[ $# -gt 0 ]]; do
 		PART1_ONLY_ARGS+=("$1")
 		shift
 		;;
-	--no-rtk-hook | --install-prereqs | --context7 | --chrome-mcp | --no-chrome-mcp | --impeccable | --no-humanizer | --adhd | --no-adhd | --no-omniroute | --with-llm-council | --no-crg-build)
+	--no-rtk-hook | --install-prereqs | --context7 | --chrome-mcp | --no-chrome-mcp | --impeccable | --no-humanizer | --adhd | --no-adhd | --no-memory-watch | --no-omniroute | --with-llm-council | --no-crg-build)
 		PART1_ONLY_ARGS+=("$1")
 		shift
 		;;

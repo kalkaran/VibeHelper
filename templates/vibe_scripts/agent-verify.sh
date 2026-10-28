@@ -10,7 +10,7 @@ if [[ "$(basename -- "$SCRIPT_DIR")" == "codex" || "$(basename -- "$SCRIPT_DIR")
 	ROOT="$(cd -- "$SCRIPT_DIR/../.." && pwd)"
 fi
 shift "$(($# > 0 ? 1 : 0))"
-if [[ "$MODE" != "test" && "$MODE" != "fallow" && "$MODE" != "edited" && "$MODE" != "lint" && "$#" -gt 0 ]]; then
+if [[ "$MODE" != "report" && "$MODE" != "test" && "$MODE" != "fallow" && "$MODE" != "edited" && "$MODE" != "lint" && "$#" -gt 0 ]]; then
 	echo "Only edited, lint, test and fallow accept additional scope arguments" >&2
 	exit 2
 fi
@@ -32,7 +32,9 @@ run_if_available() {
 	fi
 }
 
-if [[ "$MODE" == "fallow" ]]; then
+if [[ "$MODE" == "report" ]]; then
+	python3 "$SCRIPT_DIR/ai-quality-wrapper.py" --label saved-failure --report-log "$1" "${@:2}"
+elif [[ "$MODE" == "fallow" ]]; then
 	python3 "$SCRIPT_DIR/fallow.py" report "$@"
 elif [[ "$MODE" == "edited" ]]; then
 	if [[ "$#" -gt 0 ]]; then

@@ -144,9 +144,10 @@ def test_native_findings_and_bounded_diagnostics(tmp_path):
         max_lines=8,
     )
     assert value["status"] == "findings"
-    assert len(value["summary"]) <= 8
+    assert len(value["summary"]) == 40
     assert any("demo.sh:1:2" in line and "SC2086" in line for line in value["summary"])
-    assert any("omitted" in line for line in value["summary"])
+    assert any("demo.sh:39:2" in line for line in value["summary"])
+    assert "REVIEW NEEDED" in WRAPPER.render_result(value)
 
 
 @pytest.mark.parametrize("source", ["print('{malformed')", "print('{}')"])
@@ -536,7 +537,8 @@ def test_native_excerpt_and_empty_test_status(tmp_path):
         f"print({json.dumps(report)!r}); raise SystemExit(1)",
         adapter="native:shellcheck-json1",
     )
-    assert any("1 | echo $unsafe" in line for line in value["summary"])
+    assert any("Quote variable" in line for line in value["summary"])
+    assert not any("1 | echo $unsafe" in line for line in value["summary"])
     value = command(
         tmp_path, "print('no tests ran'); raise SystemExit(5)", adapter="rtk:pytest"
     )
@@ -904,7 +906,23 @@ def test_fresh_hook_then_generated_edited_target_uses_session_scope(
         timeout=15,
     )
     assert checked.returncode == 0, checked.stdout + checked.stderr
-    assert "lint-ruff-edited: passed" in checked.stdout
+    assert "PASS: all" in checked.stdout
+    evidence = [
+        max(
+            (repo / ".cache/ai-quality").glob("*-edited-files.summary.json"),
+            key=lambda path: path.stat().st_mtime_ns,
+        )
+    ]
+    steps = [
+        step
+        for path in evidence
+        for step in json.loads(path.read_text()).get("results", [])
+    ]
+    assert any(
+        step["label"] == "lint-ruff-edited" and step["status"] == "passed"
+        for step in steps
+    )
+    assert not any(step["label"] == "lint-shellcheck-edited" for step in steps)
     assert "lint-shellcheck-edited" not in checked.stdout
     assert "summary log (read first):" in checked.stdout
 

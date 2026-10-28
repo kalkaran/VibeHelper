@@ -4,6 +4,10 @@ IFS=$'\n\t'
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." >/dev/null 2>&1 && pwd)"
 
+report_failure() {
+	python3 "$ROOT/templates/vibe_scripts/ai-quality-wrapper.py" --label test-script --report-log "$1" --log-dir "$ROOT/.cache/ai-quality"
+}
+
 REVIEWER_RULE="After substantive coding, always spawn a separate reviewer agent to inspect the final implementation for breaking changes, scope creep, and alignment with the user request."
 
 assert_reviewer_rule() {
@@ -29,7 +33,7 @@ assert_gitignore_entries() {
 	for entry in "# VibeHelper local AI/dev tooling" "*.bak" "*.bak.*" ".cache/" ".agents/" ".claude/" ".codex/" ".mcp.json" "AGENTS.md" "CLAUDE.md" "agent/" "codebase-wiki/" "graphify-out/" "node_modules/" "notes/" "obsidian/" "vendor/" "/vibe_scripts/" "/skills-lock.json" "biome.json"; do
 		if ! grep -Fxq "$entry" "$gitignore"; then
 			echo "missing .gitignore entry: $entry" >&2
-			cat "$gitignore" >&2
+			report_failure "$gitignore" >&2
 			return 1
 		fi
 	done
@@ -71,7 +75,7 @@ run_template_packaging_test() {
 		--repo "$tmp/repo" --repo-only \
 		--no-system-packages --no-humanizer --no-omniroute --no-rtk --no-graphify --no-ponytail \
 		--no-crg --no-context7 >"$tmp/package.log" 2>&1; then
-		cat "$tmp/package.log" >&2
+		report_failure "$tmp/package.log" >&2
 		return 1
 	fi
 	for required in skills-lock.json vibe_scripts/claude/sync-skills.py \
@@ -79,7 +83,7 @@ run_template_packaging_test() {
 		vibe_scripts/claude/update-codebase-wiki.py; do
 		if [[ ! -f "$tmp/repo/$required" ]]; then
 			echo "packaged Claude WSL installer did not copy $required" >&2
-			cat "$tmp/package.log" >&2
+			report_failure "$tmp/package.log" >&2
 			return 1
 		fi
 	done
@@ -137,13 +141,13 @@ EOF_NODE
 EOF_CURRENT
 		if ! CLAUDE_CALLS="$tmp/calls" CLAUDE_PLUGIN_STATE=installed HOME="$tmp/home" PATH="$tmp/bin:$PATH" bash "$ROOT/ClaudeHelper/$platform/part1.sh" \
 			--repo "$tmp/repo" --dry-run --force --no-system-packages --no-humanizer --no-omniroute --no-rtk --no-graphify --no-ponytail --no-crg --no-context7 >"$log" 2>&1; then
-			cat "$log" >&2
+			report_failure "$log" >&2
 			return 1
 		fi
 		if ! grep -Fq "Chrome DevTools MCP is already registered with @latest" "$log" ||
 			grep -Fq "mcp add chrome-devtools" "$tmp/calls" 2>/dev/null; then
 			echo "Claude $platform reconfigured a current Chrome DevTools MCP registration" >&2
-			cat "$log" >&2
+			report_failure "$log" >&2
 			return 1
 		fi
 
@@ -151,38 +155,38 @@ EOF_CURRENT
 		rm -f "$tmp/home/.claude.json"
 		if ! CLAUDE_CALLS="$tmp/calls" HOME="$tmp/home" PATH="$tmp/bin:$PATH" bash "$ROOT/ClaudeHelper/$platform/part1.sh" \
 			--repo "$tmp/repo" --dry-run --no-system-packages --no-humanizer --no-omniroute --no-rtk --no-graphify --no-ponytail --no-crg --no-context7 >"$tmp/missing.log" 2>&1; then
-			cat "$tmp/missing.log" >&2
+			report_failure "$tmp/missing.log" >&2
 			return 1
 		fi
 		if ! grep -Fq "Would run: claude mcp add chrome-devtools --scope user -- npx chrome-devtools-mcp@latest" "$tmp/missing.log"; then
 			echo "Claude $platform did not register a missing Chrome DevTools MCP" >&2
-			cat "$tmp/missing.log" >&2
+			report_failure "$tmp/missing.log" >&2
 			return 1
 		fi
 
 		: >"$tmp/calls"
 		if ! CLAUDE_CALLS="$tmp/calls" CLAUDE_PLUGIN_STATE=installed HOME="$tmp/home" PATH="$tmp/bin:$PATH" bash "$ROOT/ClaudeHelper/$platform/part1.sh" \
 			--repo "$tmp/repo" --dry-run --force --no-system-packages --no-humanizer --no-omniroute --no-rtk --no-graphify --no-ponytail --no-crg --no-context7 >"$tmp/plugin.log" 2>&1; then
-			cat "$tmp/plugin.log" >&2
+			report_failure "$tmp/plugin.log" >&2
 			return 1
 		fi
 		if ! grep -Fq "already installed as an enabled Claude plugin" "$tmp/plugin.log" ||
 			grep -Fq "mcp add chrome-devtools" "$tmp/plugin.log"; then
 			echo "Claude $platform duplicated the official Chrome DevTools MCP plugin" >&2
-			cat "$tmp/plugin.log" >&2
+			report_failure "$tmp/plugin.log" >&2
 			return 1
 		fi
 
 		: >"$tmp/calls"
 		if ! CLAUDE_CALLS="$tmp/calls" NODE_VERSION=18.20.0 HOME="$tmp/home" PATH="$tmp/bin:$PATH" bash "$ROOT/ClaudeHelper/$platform/part1.sh" \
 			--repo "$tmp/repo" --dry-run --force --no-system-packages --no-humanizer --no-omniroute --no-rtk --no-graphify --no-ponytail --no-crg --no-context7 >"$tmp/old-node.log" 2>&1; then
-			cat "$tmp/old-node.log" >&2
+			report_failure "$tmp/old-node.log" >&2
 			return 1
 		fi
 		if ! grep -Fq "requires a package-supported Node.js version" "$tmp/old-node.log" ||
 			grep -Fq "mcp add chrome-devtools" "$tmp/old-node.log"; then
 			echo "Claude $platform registered Chrome DevTools MCP with unsupported Node.js" >&2
-			cat "$tmp/old-node.log" >&2
+			report_failure "$tmp/old-node.log" >&2
 			return 1
 		fi
 
@@ -192,25 +196,25 @@ EOF_CURRENT
 EOF_STALE
 		if ! CLAUDE_CALLS="$tmp/calls" HOME="$tmp/home" PATH="$tmp/bin:$PATH" bash "$ROOT/ClaudeHelper/$platform/part1.sh" \
 			--repo "$tmp/repo" --dry-run --no-system-packages --no-humanizer --no-omniroute --no-rtk --no-graphify --no-ponytail --no-crg --no-context7 >"$tmp/stale.log" 2>&1; then
-			cat "$tmp/stale.log" >&2
+			report_failure "$tmp/stale.log" >&2
 			return 1
 		fi
 		if grep -Fq "mcp remove chrome-devtools" "$tmp/calls" || ! grep -Fq "rerun with --force or --chrome-mcp" "$tmp/stale.log"; then
 			echo "Claude $platform did not preserve stale Chrome MCP settings during a normal rerun" >&2
-			cat "$tmp/stale.log" >&2
+			report_failure "$tmp/stale.log" >&2
 			return 1
 		fi
 
 		: >"$tmp/calls"
 		if ! CLAUDE_CALLS="$tmp/calls" CLAUDE_PLUGIN_STATE=installed HOME="$tmp/home" PATH="$tmp/bin:$PATH" bash "$ROOT/ClaudeHelper/$platform/part1.sh" \
 			--repo "$tmp/repo" --dry-run --force --no-system-packages --no-humanizer --no-omniroute --no-rtk --no-graphify --no-ponytail --no-crg --no-context7 >"$tmp/update.log" 2>&1; then
-			cat "$tmp/update.log" >&2
+			report_failure "$tmp/update.log" >&2
 			return 1
 		fi
 		if ! grep -Fq "Would run: claude mcp remove chrome-devtools --scope user" "$tmp/update.log" ||
 			! grep -Fq "Would run: claude mcp add chrome-devtools --scope user -- npx chrome-devtools-mcp@latest" "$tmp/update.log"; then
 			echo "Claude $platform did not update a stale Chrome DevTools MCP registration" >&2
-			cat "$tmp/update.log" >&2
+			report_failure "$tmp/update.log" >&2
 			return 1
 		fi
 
@@ -218,25 +222,25 @@ EOF_STALE
 		: >"$tmp/calls"
 		if CLAUDE_CALLS="$tmp/calls" CLAUDE_FAIL_ADD=1 HOME="$tmp/home" PATH="$tmp/bin:$PATH" bash "$ROOT/ClaudeHelper/$platform/part1.sh" \
 			--repo "$tmp/repo" --force --no-system-packages --no-humanizer --no-omniroute --no-rtk --no-graphify --no-ponytail --no-crg --no-context7 >"$tmp/rollback.log" 2>&1; then
-			cat "$tmp/rollback.log" >&2
+			report_failure "$tmp/rollback.log" >&2
 			return 1
 		fi
 		if ! cmp -s "$tmp/expected-claude.json" "$tmp/home/.claude.json" ||
 			! grep -Fq "restored the previous user configuration" "$tmp/rollback.log"; then
 			echo "Claude $platform did not restore Chrome DevTools MCP settings after a failed update" >&2
-			cat "$tmp/rollback.log" >&2
+			report_failure "$tmp/rollback.log" >&2
 			return 1
 		fi
 
 		: >"$tmp/calls"
 		if ! CLAUDE_CALLS="$tmp/calls" HOME="$tmp/home" PATH="$tmp/bin:$PATH" bash "$ROOT/ClaudeHelper/$platform/part1.sh" \
 			--repo "$tmp/repo" --dry-run --force --no-chrome-mcp --no-system-packages --no-humanizer --no-omniroute --no-rtk --no-graphify --no-ponytail --no-crg --no-context7 >"$tmp/disabled.log" 2>&1; then
-			cat "$tmp/disabled.log" >&2
+			report_failure "$tmp/disabled.log" >&2
 			return 1
 		fi
 		if grep -Fq "mcp add chrome-devtools" "$tmp/disabled.log" || grep -Fq "mcp remove chrome-devtools" "$tmp/disabled.log"; then
 			echo "Claude $platform ignored --no-chrome-mcp" >&2
-			cat "$tmp/disabled.log" >&2
+			report_failure "$tmp/disabled.log" >&2
 			return 1
 		fi
 		rm -rf "$tmp"
@@ -258,7 +262,7 @@ run_default_wiring_test() {
 		--no-ponytail \
 		--no-crg \
 		--no-context7 >"$tmp/install.log" 2>&1; then
-		cat "$tmp/install.log" >&2
+		report_failure "$tmp/install.log" >&2
 		return 1
 	fi
 
@@ -286,7 +290,7 @@ run_default_wiring_test() {
 		--no-ponytail \
 		--no-crg \
 		--no-context7 >"$tmp/update.log" 2>&1; then
-		cat "$tmp/update.log" >&2
+		report_failure "$tmp/update.log" >&2
 		return 1
 	fi
 	if compgen -G "$tmp/.claude/settings.local.json.bak*" >/dev/null; then
@@ -311,7 +315,7 @@ run_hook_error_logging_test() {
 		--no-crg \
 		--no-context7 \
 		--no-wire >"$tmp/install.log" 2>&1; then
-		cat "$tmp/install.log" >&2
+		report_failure "$tmp/install.log" >&2
 		return 1
 	fi
 
@@ -322,12 +326,12 @@ run_hook_error_logging_test() {
 
 	if ! grep -Fq '"reason": "json-decode-failed"' "$tmp/.cache/hook-errors.log"; then
 		echo "Claude hook did not log malformed JSON failure" >&2
-		cat "$tmp/.cache/hook-errors.log" >&2
+		report_failure "$tmp/.cache/hook-errors.log" >&2
 		return 1
 	fi
 	if ! grep -Fq '"colno": 2' "$tmp/.cache/hook-errors.log" || ! grep -Fq '"error":' "$tmp/.cache/hook-errors.log"; then
 		echo "Claude hook log did not include error details and location" >&2
-		cat "$tmp/.cache/hook-errors.log" >&2
+		report_failure "$tmp/.cache/hook-errors.log" >&2
 		return 1
 	fi
 }
@@ -348,7 +352,7 @@ run_no_wire_test() {
 		--no-crg \
 		--no-context7 \
 		--no-wire >"$tmp/install.log" 2>&1; then
-		cat "$tmp/install.log" >&2
+		report_failure "$tmp/install.log" >&2
 		return 1
 	fi
 
@@ -373,12 +377,12 @@ run_cleanup_test() {
 		--no-ponytail \
 		--no-crg \
 		--no-context7 >"$tmp/install.log" 2>&1; then
-		cat "$tmp/install.log" >&2
+		report_failure "$tmp/install.log" >&2
 		return 1
 	fi
 
 	if ! bash "$ROOT/ClaudeHelper/install.sh" --repo "$tmp" --cleanup --yes >"$tmp/cleanup.log" 2>&1; then
-		cat "$tmp/cleanup.log" >&2
+		report_failure "$tmp/cleanup.log" >&2
 		return 1
 	fi
 
@@ -421,7 +425,7 @@ EOF_SHELLCHECK
 		--no-ponytail \
 		--no-crg \
 		--no-context7 >"$tmp/install.log" 2>&1; then
-		cat "$tmp/install.log" >&2
+		report_failure "$tmp/install.log" >&2
 		return 1
 	fi
 
@@ -485,19 +489,19 @@ EOF_MARKDOWNLINT
 		--no-ponytail \
 		--no-crg \
 		--no-context7 >"$tmp/install.log" 2>&1; then
-		cat "$tmp/install.log" >&2
+		report_failure "$tmp/install.log" >&2
 		return 1
 	fi
 
 	if ! grep -Fq "markdownlint-cli2" "$tmp/vibe_scripts/claude/Makefile"; then
 		echo "generated Claude Makefile did not wire markdownlint-cli2" >&2
-		cat "$tmp/vibe_scripts/claude/Makefile" >&2
+		report_failure "$tmp/vibe_scripts/claude/Makefile" >&2
 		return 1
 	fi
 	python3 "$ROOT/tests/assert_quality_selection.py" "$tmp" claude markdown
 	if ! grep -Fq "MARKDOWN_EXTS" "$tmp/vibe_scripts/claude/agent-check-edited.py"; then
 		echo "generated Claude edited-file checker does not include Markdown files" >&2
-		cat "$tmp/vibe_scripts/claude/agent-check-edited.py" >&2
+		report_failure "$tmp/vibe_scripts/claude/agent-check-edited.py" >&2
 		return 1
 	fi
 }
@@ -529,18 +533,18 @@ EOF_NPX
 		--no-crg \
 		--no-context7 \
 		--no-wire >"$tmp/install.log" 2>&1; then
-		cat "$tmp/install.log" >&2
+		report_failure "$tmp/install.log" >&2
 		return 1
 	fi
 
 	if [[ ! -f "$tmp/.claude/skills/impeccable/SKILL.md" ]]; then
 		echo "Claude Impeccable install was skipped because Codex Impeccable existed" >&2
-		cat "$tmp/install.log" >&2
+		report_failure "$tmp/install.log" >&2
 		return 1
 	fi
 	if ! grep -q -- '--providers=claude-code' "$tmp/npx.log"; then
 		echo "Impeccable install did not target Claude Code" >&2
-		cat "$tmp/npx.log" >&2
+		report_failure "$tmp/npx.log" >&2
 		return 1
 	fi
 }
@@ -582,35 +586,35 @@ run_wsl_delegation_test() {
 		--no-ponytail \
 		--no-crg \
 		--no-context7 >"$tmp/install.log" 2>&1; then
-		cat "$tmp/install.log" >&2
+		report_failure "$tmp/install.log" >&2
 		return 1
 	fi
 	if ! grep -q -- "Skipping apt package bootstrap" "$tmp/install.log"; then
 		echo "WSL --repo-only did not skip apt package bootstrap" >&2
-		cat "$tmp/install.log" >&2
+		report_failure "$tmp/install.log" >&2
 		return 1
 	fi
 	if grep -q -- "Would install missing Ubuntu packages via apt-get\\|Installing missing Ubuntu packages via apt-get" "$tmp/install.log"; then
 		echo "WSL --repo-only attempted apt package bootstrap" >&2
-		cat "$tmp/install.log" >&2
+		report_failure "$tmp/install.log" >&2
 		return 1
 	fi
 
 	if ! grep -q -- "WSL/part2.sh" "$tmp/install.log"; then
 		echo "WSL part1 next-steps message did not point back to WSL/part2.sh" >&2
-		cat "$tmp/install.log" >&2
+		report_failure "$tmp/install.log" >&2
 		return 1
 	fi
 	if grep -q -- "MacOS/part2.sh" "$tmp/install.log"; then
 		echo "WSL part1 next-steps message wrongly pointed at MacOS/part2.sh" >&2
-		cat "$tmp/install.log" >&2
+		report_failure "$tmp/install.log" >&2
 		return 1
 	fi
 
 	if ! bash "$ROOT/ClaudeHelper/WSL/part2.sh" \
 		--repo "$tmp" \
 		--wire >>"$tmp/install.log" 2>&1; then
-		cat "$tmp/install.log" >&2
+		report_failure "$tmp/install.log" >&2
 		return 1
 	fi
 	assert_target "$tmp/vibe_scripts/claude/Makefile" edited-ai
@@ -636,7 +640,7 @@ run_lint_shell_empty_input_test() {
 		--no-ponytail \
 		--no-crg \
 		--no-context7 >"$tmp/install.log" 2>&1; then
-		cat "$tmp/install.log" >&2
+		report_failure "$tmp/install.log" >&2
 		return 1
 	fi
 
@@ -646,7 +650,7 @@ run_lint_shell_empty_input_test() {
 	# the linter with zero file args and fails; BSD xargs on macOS masks the bug.
 	if ! (cd "$tmp" && make -f vibe_scripts/claude/Makefile lint-ai >"$tmp/lint.log" 2>&1); then
 		echo "make -f vibe_scripts/claude/Makefile lint-ai failed against a repo with zero .sh files" >&2
-		cat "$tmp/lint.log" >&2
+		report_failure "$tmp/lint.log" >&2
 		return 1
 	fi
 }
@@ -671,12 +675,12 @@ run_fresh_install_test() {
 		--no-ponytail \
 		--no-crg \
 		--no-context7 >"$tmp/unified.log" 2>&1; then
-		cat "$tmp/unified.log" >&2
+		report_failure "$tmp/unified.log" >&2
 		return 1
 	fi
 	if ! grep -Fq "Would back up CLAUDE.md" "$tmp/unified.log"; then
 		echo "Claude --fresh-install did not enable managed-file refresh" >&2
-		cat "$tmp/unified.log" >&2
+		report_failure "$tmp/unified.log" >&2
 		return 1
 	fi
 
@@ -692,7 +696,7 @@ run_fresh_install_test() {
 			--no-ponytail \
 			--no-crg \
 			--no-context7 >"$tmp/part1.log" 2>&1; then
-			cat "$tmp/part1.log" >&2
+			report_failure "$tmp/part1.log" >&2
 			return 1
 		fi
 	done
@@ -700,13 +704,13 @@ run_fresh_install_test() {
 	for script in "$ROOT/ClaudeHelper/MacOS/part2.sh" "$ROOT/ClaudeHelper/WSL/part2.sh"; do
 		rm -f "$tmp/vibe_scripts/claude/Makefile"
 		if ! bash "$script" --repo "$tmp" --fresh-install >"$tmp/part2.log" 2>&1; then
-			cat "$tmp/part2.log" >&2
+			report_failure "$tmp/part2.log" >&2
 			return 1
 		fi
 		assert_target "$tmp/vibe_scripts/claude/Makefile" edited-ai
 		if ! grep -Fq "ClaudeHelper-Version: 2026-10-12-v7" "$tmp/vibe_scripts/claude/Makefile"; then
 			echo "Claude part2 --fresh-install did not write the current managed block" >&2
-			cat "$tmp/vibe_scripts/claude/Makefile" >&2
+			report_failure "$tmp/vibe_scripts/claude/Makefile" >&2
 			return 1
 		fi
 	done
@@ -790,73 +794,73 @@ EOF_SUDO
 	chmod +x "$tmp/bin"/*
 
 	if ! HOME="$tmp/home" PATH="$tmp/bin:$PATH" bash "$ROOT/ClaudeHelper/MacOS/part1.sh" --repo "$tmp/repo" --dry-run --force >"$tmp/mac.log" 2>&1; then
-		cat "$tmp/mac.log" >&2
+		report_failure "$tmp/mac.log" >&2
 		return 1
 	fi
 	for expected in "brew upgrade rtk" "brew upgrade uv" "brew upgrade pipx" "uv tool upgrade graphifyy" "uv tool upgrade code-review-graph" "skills add blader/humanizer" "skills add Leonxlnx/unlazy --agent claude-code" "claude plugin marketplace update ponytail" "claude plugin update ponytail@ponytail" "impeccable skills install"; do
 		if ! grep -Fq "$expected" "$tmp/mac.log"; then
 			echo "Claude macOS --force did not plan: $expected" >&2
-			cat "$tmp/mac.log" >&2
+			report_failure "$tmp/mac.log" >&2
 			return 1
 		fi
 	done
 	if grep -Fq "Would register it: code-review-graph install" "$tmp/mac.log"; then
 		echo "Claude --force reconfigured unchanged code-review-graph" >&2
-		cat "$tmp/mac.log" >&2
+		report_failure "$tmp/mac.log" >&2
 		return 1
 	fi
 	if ! grep -Fq "only if its version changes" "$tmp/mac.log"; then
 		echo "Claude --force did not make code-review-graph setup conditional" >&2
-		cat "$tmp/mac.log" >&2
+		report_failure "$tmp/mac.log" >&2
 		return 1
 	fi
 	if ! grep -Fq "Skipping unchanged Context7 MCP setup during update" "$tmp/mac.log"; then
 		echo "Claude --force repeated unchanged Context7 setup" >&2
-		cat "$tmp/mac.log" >&2
+		report_failure "$tmp/mac.log" >&2
 		return 1
 	fi
 	if ! HOME="$tmp/home" PATH="$tmp/bin:$PATH" bash "$ROOT/ClaudeHelper/MacOS/part1.sh" --repo "$tmp/repo" --dry-run --fresh-install --no-context7 >"$tmp/mac-fresh.log" 2>&1; then
-		cat "$tmp/mac-fresh.log" >&2
+		report_failure "$tmp/mac-fresh.log" >&2
 		return 1
 	fi
 	if ! grep -Fq "impeccable skills install -y --providers=claude-code --scope=project --force" "$tmp/mac-fresh.log"; then
 		echo "Claude macOS --fresh-install did not force-refresh Impeccable for Claude Code" >&2
-		cat "$tmp/mac-fresh.log" >&2
+		report_failure "$tmp/mac-fresh.log" >&2
 		return 1
 	fi
 	if ! grep -Fq "code-review-graph install --platform claude-code --no-hooks --no-instructions -y" "$tmp/mac-fresh.log"; then
 		echo "Claude --fresh-install did not configure code-review-graph without replacing CLAUDE.md" >&2
-		cat "$tmp/mac-fresh.log" >&2
+		report_failure "$tmp/mac-fresh.log" >&2
 		return 1
 	fi
 	: >"$tmp/crg-calls"
 	if ! HOME="$tmp/home" PATH="$tmp/bin:$PATH" CRG_VERSION_FILE="$tmp/crg-version" CRG_CALLS="$tmp/crg-calls" bash "$ROOT/ClaudeHelper/MacOS/part1.sh" --repo "$tmp/repo" --force --no-humanizer --no-omniroute --no-rtk --no-graphify --no-ponytail --no-context7 >"$tmp/mac-unchanged.log" 2>&1; then
-		cat "$tmp/mac-unchanged.log" >&2
+		report_failure "$tmp/mac-unchanged.log" >&2
 		return 1
 	fi
 	if grep -Fq "install --platform claude-code" "$tmp/crg-calls"; then
 		echo "unchanged code-review-graph ran real Claude MCP setup" >&2
-		cat "$tmp/crg-calls" >&2
+		report_failure "$tmp/crg-calls" >&2
 		return 1
 	fi
 	: >"$tmp/crg-calls"
 	if ! HOME="$tmp/home" PATH="$tmp/bin:$PATH" CRG_VERSION_FILE="$tmp/crg-version" CRG_CALLS="$tmp/crg-calls" CRG_NEXT_VERSION="2.0.0" bash "$ROOT/ClaudeHelper/MacOS/part1.sh" --repo "$tmp/repo" --force --no-humanizer --no-omniroute --no-rtk --no-graphify --no-ponytail --no-context7 >"$tmp/mac-changed.log" 2>&1; then
-		cat "$tmp/mac-changed.log" >&2
+		report_failure "$tmp/mac-changed.log" >&2
 		return 1
 	fi
 	if ! grep -Fq "install --platform claude-code --no-hooks --no-instructions -y" "$tmp/crg-calls"; then
 		echo "updated code-review-graph did not run Claude MCP setup" >&2
-		cat "$tmp/crg-calls" >&2
+		report_failure "$tmp/crg-calls" >&2
 		return 1
 	fi
 	rm -rf "$tmp/repo/.claude/skills/impeccable"
 	if ! HOME="$tmp/home" PATH="$tmp/bin:$PATH" bash "$ROOT/ClaudeHelper/install.sh" --repo "$tmp/repo" --dry-run --fresh-install --no-context7 >"$tmp/unified-fresh.log" 2>&1; then
-		cat "$tmp/unified-fresh.log" >&2
+		report_failure "$tmp/unified-fresh.log" >&2
 		return 1
 	fi
 	if ! grep -Fq "impeccable skills install -y --providers=claude-code --scope=project --force" "$tmp/unified-fresh.log"; then
 		echo "Claude unified --fresh-install did not force-install Impeccable for Claude Code" >&2
-		cat "$tmp/unified-fresh.log" >&2
+		report_failure "$tmp/unified-fresh.log" >&2
 		return 1
 	fi
 
@@ -867,54 +871,54 @@ exit 0
 EOF_BREW_UNMANAGED
 	chmod +x "$tmp/bin/brew"
 	if ! HOME="$tmp/home" PATH="$tmp/bin:$PATH" bash "$ROOT/ClaudeHelper/MacOS/part1.sh" --repo "$tmp/repo" --dry-run --force --no-context7 >"$tmp/mac-unmanaged.log" 2>&1; then
-		cat "$tmp/mac-unmanaged.log" >&2
+		report_failure "$tmp/mac-unmanaged.log" >&2
 		return 1
 	fi
 	if ! grep -Fq "RTK is installed but is not owned by Homebrew; leaving it unchanged." "$tmp/mac-unmanaged.log"; then
 		echo "Claude macOS --force did not preserve unmanaged RTK" >&2
-		cat "$tmp/mac-unmanaged.log" >&2
+		report_failure "$tmp/mac-unmanaged.log" >&2
 		return 1
 	fi
 	if grep -Fq "official RTK installer" "$tmp/mac-unmanaged.log"; then
 		echo "Claude macOS --force still planned the official RTK installer" >&2
-		cat "$tmp/mac-unmanaged.log" >&2
+		report_failure "$tmp/mac-unmanaged.log" >&2
 		return 1
 	fi
 
 	rm -f "$tmp/bin/rtk"
 	if ! HOME="$tmp/home" PATH="$tmp/bin:/usr/bin:/bin" bash "$ROOT/ClaudeHelper/MacOS/part1.sh" --repo "$tmp/repo" --dry-run --no-context7 >"$tmp/mac-missing.log" 2>&1; then
-		cat "$tmp/mac-missing.log" >&2
+		report_failure "$tmp/mac-missing.log" >&2
 		return 1
 	fi
 	if ! grep -Fq "brew install rtk" "$tmp/mac-missing.log"; then
 		echo "Claude macOS did not plan RTK installation with Homebrew" >&2
-		cat "$tmp/mac-missing.log" >&2
+		report_failure "$tmp/mac-missing.log" >&2
 		return 1
 	fi
 
 	if ! HOME="$tmp/home" PATH="$tmp/bin:$PATH" bash "$ROOT/ClaudeHelper/WSL/part1.sh" --repo "$tmp/repo" --dry-run --force >"$tmp/wsl.log" 2>&1; then
-		cat "$tmp/wsl.log" >&2
+		report_failure "$tmp/wsl.log" >&2
 		return 1
 	fi
 	for expected in "Would install or refresh Ubuntu packages via apt-get" "official RTK installer" "uv self update" "uv tool upgrade graphifyy" "uv tool upgrade code-review-graph" "skills add Leonxlnx/unlazy --agent claude-code" "claude plugin update ponytail@ponytail"; do
 		if ! grep -Fq "$expected" "$tmp/wsl.log"; then
 			echo "Claude WSL --force did not plan: $expected" >&2
-			cat "$tmp/wsl.log" >&2
+			report_failure "$tmp/wsl.log" >&2
 			return 1
 		fi
 	done
 	if grep -Fq "Would register it: code-review-graph install" "$tmp/wsl.log" || ! grep -Fq "only if its version changes" "$tmp/wsl.log"; then
 		echo "Claude WSL --force did not keep code-review-graph setup conditional" >&2
-		cat "$tmp/wsl.log" >&2
+		report_failure "$tmp/wsl.log" >&2
 		return 1
 	fi
 	if ! HOME="$tmp/home" PATH="$tmp/bin:$PATH" bash "$ROOT/ClaudeHelper/WSL/part1.sh" --repo "$tmp/repo" --dry-run --fresh-install --no-context7 >"$tmp/wsl-fresh.log" 2>&1; then
-		cat "$tmp/wsl-fresh.log" >&2
+		report_failure "$tmp/wsl-fresh.log" >&2
 		return 1
 	fi
 	if ! grep -Fq "impeccable skills install -y --providers=claude-code --scope=project --force" "$tmp/wsl-fresh.log"; then
 		echo "Claude WSL --fresh-install did not force-install Impeccable for Claude Code" >&2
-		cat "$tmp/wsl-fresh.log" >&2
+		report_failure "$tmp/wsl-fresh.log" >&2
 		return 1
 	fi
 }
@@ -929,22 +933,22 @@ run_force_with_codex_coexistence_test() {
 	mkdir -p "$tmp/agent"
 	printf '<!-- CodexHelper-Version: test -->\n' >"$tmp/agent/index.md"
 	if ! bash "$ROOT/ClaudeHelper/install.sh" --repo "$tmp" --force --repo-only --no-humanizer --no-omniroute --no-rtk --no-graphify --no-ponytail --no-crg --no-context7 --no-wire >"$tmp/install.log" 2>&1; then
-		cat "$tmp/install.log" >&2
+		report_failure "$tmp/install.log" >&2
 		return 1
 	fi
 	if ! grep -Fq -- "--force will refresh tools while preserving shared managed files" "$tmp/install.log"; then
 		echo "Claude --force did not enter Codex-safe tool refresh mode" >&2
-		cat "$tmp/install.log" >&2
+		report_failure "$tmp/install.log" >&2
 		return 1
 	fi
 	if ! grep -Fq "$REVIEWER_RULE" "$tmp/CLAUDE.md"; then
 		echo "Claude --force did not update CLAUDE.md during Codex coexistence" >&2
-		cat "$tmp/install.log" >&2
+		report_failure "$tmp/install.log" >&2
 		return 1
 	fi
 	if ! grep -Fq "CodexHelper-Version: test" "$tmp/agent/index.md"; then
 		echo "Claude --force overwrote shared workflow files during Codex coexistence" >&2
-		cat "$tmp/agent/index.md" >&2
+		report_failure "$tmp/agent/index.md" >&2
 		return 1
 	fi
 
@@ -954,12 +958,12 @@ run_force_with_codex_coexistence_test() {
 	printf '<!-- CodexHelper-Version: test -->\n' >"$user_repo/AGENTS.md"
 	printf 'user-owned Claude instructions\n' >"$user_repo/CLAUDE.md"
 	if ! bash "$ROOT/ClaudeHelper/install.sh" --repo "$user_repo" --force --repo-only --no-humanizer --no-omniroute --no-rtk --no-graphify --no-ponytail --no-crg --no-context7 --no-wire >"$user_repo/install.log" 2>&1; then
-		cat "$user_repo/install.log" >&2
+		report_failure "$user_repo/install.log" >&2
 		return 1
 	fi
 	if [[ "$(<"$user_repo/CLAUDE.md")" != "user-owned Claude instructions" ]]; then
 		echo "Claude --force replaced a user-owned CLAUDE.md during Codex coexistence" >&2
-		cat "$user_repo/CLAUDE.md" >&2
+		report_failure "$user_repo/CLAUDE.md" >&2
 		return 1
 	fi
 }

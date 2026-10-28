@@ -345,13 +345,63 @@ context helps. The brief links relevant wiki pages, queries code relationships
 and tests, and reports freshness. Confirm the source before relying on a graph
 finding; inspection does not authorize unrelated edits or design work.
 
-Automatic memory hooks are disabled by default. Installers remove known legacy
-registrations and retain explicit `context`, `status` and `refresh` commands.
-Missing tools and failed updates remain visible without blocking completion.
-Custom graph watchers remain untouched. Graphify's code refresh can rebuild all
-code; semantic document updates require separate extraction and source review.
-The `status` command lists pending work, while `refresh --architecture` requests
-both code indexes. Neither command installs or upgrades tools.
+Agent sessions share one watcher per project. It refreshes both code indexes
+three seconds after the last save, including untracked files and nested Git
+repositories. Saves during indexing queue another refresh. The watcher stays
+alive between replies and exits when the last session ends or its agent process
+exits. Use `--no-memory-watch` during installation or set `watch` to `false` in
+`vibe_scripts/<provider>/memory-policy.json` to disable it.
+
+`status` reports watcher health, pending counts, coverage and diagnostic logs.
+Complete inventories are saved under `.cache/project-memory/*-report.json`.
+Coverage distinguishes indexed, unsupported, excluded and failed source files;
+Git-ignored files and generated output are omitted from the working inventory.
+Failed scans retain previous graphs. Markdown, PDFs and images await separate
+semantic review; the watcher never launches AI interpretation.
+Manual `context`, `status` and `refresh --architecture` remain available. Missing
+tools and failed updates remain visible without blocking ordinary coding.
+Custom graph watchers remain untouched. Neither command installs or upgrades tools.
+
+To migrate an existing installation using this checkout:
+
+```bash
+python3 templates/vibe_scripts/managed-install.py memory-discover --provider codex
+python3 templates/vibe_scripts/managed-install.py memory-refresh \
+  --provider codex --root /path/to/project --dry-run
+python3 templates/vibe_scripts/managed-install.py memory-refresh \
+  --provider codex --root /path/to/project
+```
+
+Repeat for Claude with `--provider claude`. Migration touches memory helpers,
+their hook registrations and the known memory-guidance paragraph. It preserves
+custom policy keys and explicit watcher opt-outs. Modified helpers require
+review; `--previous-source` accepts a directory containing an independently
+verified previous release for exact byte comparison. Each migration writes a
+backup manifest and `RESTORE.txt` under `.cache/vibehelper-install/memory-backup-*`.
+It then refreshes both graphs and records coverage, duration and diagnostics in
+that backup's `result.json` and `refresh.log`. Incomplete coverage returns nonzero.
+Start a new agent session to load the installed session hooks.
+
+Quality checks report a concise pass notice or parsed failure diagnostics with
+log line locations. Complete logs and parsed JSON evidence stay on disk.
+Unrecognized output and reports too large to display are flagged for review;
+they never fall back to an arbitrary log tail. If the diagnosis needs context,
+read just the relevant section with
+`./vibe_scripts/codex/agent-verify.sh report /path/to/log --context-line 42`.
+This returns five surrounding lines on each side. Agree on a narrower record
+when that section is still too large; do not read the whole file by default.
+Use the corresponding Claude helper in Claude projects.
+
+Existing installations can receive only these reporting helpers with
+`python3 templates/vibe_scripts/managed-install.py reporting-refresh --provider codex --root /path/to/project`.
+The managed updater preserves customized files and writes restoration backups.
+
+After reviewing staging recommendations, save their literal pathspecs with
+`python3 vibe_scripts/codex/write-git-add.py < /path/to/reviewed-manifest.txt`.
+This updates `git-add.txt` and writes a timestamped copy under
+`notes/git-add-history/`. It also preserves the previous recommendation before
+replacement. History stays local and outside staging; the command never stages
+or commits files.
 
 Generated reports, caches and session logs are excluded from Graphify inputs.
 Use `wiki-ai` only for durable knowledge, review its generated diff, and preserve

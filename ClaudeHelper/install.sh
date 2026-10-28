@@ -49,6 +49,7 @@ Options:
   --no-chrome-mcp Do not configure Chrome DevTools MCP.
   --impeccable    Install Impeccable design skill/hooks (included by fresh install).
   --no-omniroute  Skip the local free-only OmniRoute runtime setup.
+  --no-memory-watch     Disable automatic session graph watching.
   --with-llm-council  Clone karpathy/llm-council locally.
   --repo-only     Only write repo files; skip all global tool installs.
   -h, --help      Show this help.
@@ -116,7 +117,7 @@ while [[ $# -gt 0 ]]; do
 		WIRE_MODE="no-wire"
 		shift
 		;;
-	--no-humanizer | --no-rtk | --no-graphify | --no-ponytail | --no-crg | --crg-build | --no-context7 | --chrome-mcp | --no-chrome-mcp | --impeccable | --no-omniroute | --with-llm-council | --repo-only | --skip-global | --no-system-packages)
+	--no-humanizer | --no-rtk | --no-graphify | --no-ponytail | --no-crg | --crg-build | --no-context7 | --chrome-mcp | --no-chrome-mcp | --impeccable | --no-memory-watch | --no-omniroute | --with-llm-council | --repo-only | --skip-global | --no-system-packages)
 		PART1_ONLY_ARGS+=("$1")
 		shift
 		;;

@@ -101,6 +101,24 @@ def test_existing_without_refresh(runtime):
     assert runtime["calls"] == [[runtime["binary"], "install", "--platform", "claude"]]
 
 
+def test_current_codex_package_registers_both_skill_roots(runtime, monkeypatch):
+    original = INSTALL.probe
+
+    def probe(*command):
+        if command == (runtime["binary"], "--help"):
+            return subprocess.CompletedProcess(
+                command, 0, "claude|codex|agents|devin", ""
+            )
+        return original(*command)
+
+    monkeypatch.setattr(INSTALL, "probe", probe)
+    assert INSTALL.install("codex", refresh=True) == 0
+    assert runtime["calls"][-2:] == [
+        [runtime["binary"], "install", "--platform", "agents"],
+        [runtime["binary"], "install", "--platform", "codex"],
+    ]
+
+
 @pytest.mark.parametrize("failure", ["upgrade", "--platform"])
 def test_failure_still_reports_failure(runtime, failure, capsys):
     runtime["fail"] = failure

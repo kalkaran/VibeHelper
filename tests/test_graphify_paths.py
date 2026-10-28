@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 
 import pytest
-from test_project_memory import INSTALL, MEMORY, args
+from test_project_memory import INSTALL, MEMORY, args, backend
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -23,7 +23,7 @@ def repo(tmp_path):
 
 @pytest.mark.parametrize("directory", [".graphify", "graphify-out"])
 def test_graphify_lifecycle(repo, monkeypatch, directory):
-    calls = []
+    calls = backend(monkeypatch, repo)
     real_run = MEMORY.run
     output = repo / directory
     output.mkdir()
@@ -41,8 +41,9 @@ def test_graphify_lifecycle(repo, monkeypatch, directory):
         return "updated"
 
     monkeypatch.setattr(MEMORY, "run", run)
-    monkeypatch.setattr(MEMORY.shutil, "which", lambda name: name)
-    value = MEMORY.handle(repo, args("hook"), {"hook_event_name": "Stop"})
+    request = args("refresh")
+    request.architecture = True
+    value = MEMORY.handle(repo, request)
     assert value["freshness"]["graphify"]["status"] == "current"
     assert (output / "needs_update").exists()
     reviewed = args("accept-semantic")
@@ -79,17 +80,18 @@ def test_refresh_discovers_new_output_directory(repo, monkeypatch):
     legacy.write_text('{"nodes": [], "links": []}')
     original = legacy.read_bytes()
     INSTALL.install(repo, "codex", crg=False)
-    real_run = MEMORY.run
+    backend(monkeypatch, repo)
+    original_index = MEMORY.index_backend
 
-    def run(root, command, timeout=30):
-        if command[0] == "git":
-            return real_run(root, command, timeout)
+    def index(root, key, current):
+        (root / ".graphify").mkdir()
         MEMORY.write_json(root / ".graphify/graph.json", {"nodes": [], "links": []})
-        return "updated"
+        return original_index(root, key, current)
 
-    monkeypatch.setattr(MEMORY, "run", run)
-    monkeypatch.setattr(MEMORY.shutil, "which", lambda name: name)
-    value = MEMORY.handle(repo, args("hook"), {"hook_event_name": "Stop"})
+    monkeypatch.setattr(MEMORY, "index_backend", index)
+    request = args("refresh")
+    request.architecture = True
+    value = MEMORY.handle(repo, request)
     assert value["freshness"]["graphify"]["status"] == "current"
     assert legacy.read_bytes() == original
     assert (repo / ".graphify/needs_update").exists()
@@ -102,19 +104,24 @@ def test_legacy_writer_cannot_make_current_graph_fresh_by_pruning(repo, monkeypa
     )
     original = current.read_bytes()
     INSTALL.install(repo, "codex", crg=False)
-    real_run = MEMORY.run
 
-    def run(root, command, timeout=30):
-        if command[0] == "git":
-            return real_run(root, command, timeout)
+    def incomplete(root, key, current):
         MEMORY.write_json(root / "graphify-out/graph.json", {"nodes": [], "links": []})
-        return "updated"
+        return {
+            "indexed": [],
+            "unsupported": [],
+            "excluded": [],
+            "failed": {},
+            "missing": ["tracking.py"],
+            "log": "fixture.log",
+        }
 
-    monkeypatch.setattr(MEMORY, "run", run)
-    monkeypatch.setattr(MEMORY.shutil, "which", lambda name: name)
-    value = MEMORY.handle(repo, args("hook"), {"hook_event_name": "Stop"})
+    monkeypatch.setattr(MEMORY, "index_backend", incomplete)
+    request = args("refresh")
+    request.architecture = True
+    value = MEMORY.handle(repo, request)
     assert value["freshness"]["graphify"]["status"] == "pending"
-    assert "verified changed index" in value["freshness"]["graphify"]["error"]
+    assert "Incomplete graphify coverage" in value["freshness"]["graphify"]["error"]
     assert current.read_bytes() == original
 
 

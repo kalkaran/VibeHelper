@@ -4,9 +4,11 @@
 import argparse
 import fcntl
 import hashlib
+import importlib.util
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -66,6 +68,81 @@ CODE.update(
         ".v",
         ".sv",
     }
+)
+# Source formats from both indexers; knowledge/media take precedence over AST support.
+CODE.update(
+    [
+        ".mts",
+        ".cts",
+        ".mjs",
+        ".cjs",
+        ".ejs",
+        ".ets",
+        ".vb",
+        ".cbl",
+        ".cob",
+        ".cobol",
+        ".cpy",
+        ".groovy",
+        ".gradle",
+        ".cu",
+        ".cuh",
+        ".metal",
+        ".rake",
+        ".luau",
+        ".psm1",
+        ".psd1",
+        ".ml",
+        ".mli",
+        ".astro",
+        ".svh",
+        ".vh",
+        ".r",
+        ".f",
+        ".f90",
+        ".f95",
+        ".f03",
+        ".f08",
+        ".pas",
+        ".pp",
+        ".dpr",
+        ".dpk",
+        ".lpr",
+        ".inc",
+        ".dfm",
+        ".lfm",
+        ".lpk",
+        ".tf",
+        ".tfvars",
+        ".hcl",
+        ".dm",
+        ".dme",
+        ".dmm",
+        ".dmf",
+        ".razor",
+        ".cshtml",
+        ".cls",
+        ".trigger",
+        ".lisp",
+        ".cl",
+        ".lsp",
+        ".asd",
+        ".robot",
+        ".resource",
+        ".sol",
+        ".erl",
+        ".hrl",
+        ".escript",
+        ".pl",
+        ".pm",
+        ".xs",
+        ".res",
+        ".resi",
+        ".gd",
+        ".nix",
+        ".ipynb",
+        ".zsh",
+    ]
 )
 EXCLUDE = {
     ".git",
@@ -267,48 +344,179 @@ def included(name):
 
 
 def snapshot(root):
-    """Compare file metadata without reading source or asset contents."""
+    """Inventory working files, descending into Gitlinks and untracked repositories.
+
+    A failed Git command or stat aborts the scan; callers keep the old state.
+    """
     started = time.monotonic()
     budget = remaining(8)
-    deadline = started + budget
-    paths = run(
-        root, ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"], 5
-    ).split("\0")
-    # Reviewed wiki/guidance is commonly ignored by the installers.
-    for directory in ("codebase-wiki", "agent"):
-        for path in (root / directory).rglob("*.md"):
-            if time.monotonic() > deadline:
-                raise MemoryTimeout(
-                    "memory scan exceeded 8 seconds; freshness remains pending",
-                    operation="guidance traversal",
-                    path=str(path),
-                    budget_seconds=budget,
-                    elapsed_seconds=time.monotonic() - started,
-                )
-            paths.append(str(path.relative_to(root)))
-    values = {}
-    for name in sorted(set(paths)):
-        if not name:
-            continue
-        if time.monotonic() > deadline:
+
+    def check_scan(path, operation):
+        if time.monotonic() - started > budget:
             raise MemoryTimeout(
                 "memory scan exceeded 8 seconds; previous freshness retained",
-                operation="source scan",
-                path=name,
-                files_hashed=len(values),
+                operation=operation,
+                path=str(path),
                 budget_seconds=budget,
-                elapsed_seconds=time.monotonic() - started,
             )
-        path = root / name
-        if (
-            not included(name)
-            or path.is_symlink()
-            or not path.resolve().is_relative_to(root)
-            or not path.is_file()
-        ):
+
+    paths = set()
+    for directory in ("codebase-wiki", "agent"):
+        for path in (root / directory).rglob("*.md"):
+            check_scan(path, "guidance traversal")
+            if not path.is_symlink() and path.resolve().is_relative_to(root):
+                paths.add((path.relative_to(root).as_posix(), file_stamp(path)))
+    pending = [root]
+    visited = set()
+    while pending:
+        directory = pending.pop()
+        if directory in visited:
             continue
-        values[name] = file_stamp(path)
-    return values
+        visited.add(directory)
+        names = run(
+            directory,
+            ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+            30,
+        ).split("\0")
+        for name in names:
+            if not name:
+                continue
+            path = directory / name
+            check_scan(path, "source scan")
+            relative = path.relative_to(root).as_posix().rstrip("/")
+            if (
+                not included(relative)
+                or path.is_symlink()
+                or not path.resolve().is_relative_to(root)
+            ):
+                continue
+            if path.is_dir():
+                if (path / ".git").exists():
+                    pending.append(path)
+                continue
+            # A tracked deletion is confirmed by lstat, not a failed scan.
+            try:
+                paths.add((relative, file_stamp(path)))
+            except FileNotFoundError:
+                if path.is_symlink():
+                    continue
+                # ls-files includes tracked deletions; untracked races are retried.
+                tracked = run(
+                    directory, ["git", "ls-files", "--error-unmatch", "--", name], 5
+                )
+                if not tracked:
+                    raise
+    return dict(sorted(paths))
+
+
+def classification(root, files):
+    result = {key: [] for key in ("code", "knowledge", "media", "unsupported")}
+    media = {
+        ".png",
+        ".jpg",
+        ".jpeg",
+        ".gif",
+        ".webp",
+        ".svg",
+        ".bmp",
+        ".tiff",
+        ".ico",
+        ".dmi",
+        ".mp4",
+        ".mov",
+        ".webm",
+        ".mkv",
+        ".avi",
+        ".m4v",
+        ".mp3",
+        ".wav",
+        ".m4a",
+        ".ogg",
+    }
+    for name in files:
+        suffix = Path(name).suffix.lower()
+        if suffix in media:
+            kind = "media"
+        elif suffix in {".pdf", ".docx", ".pptx", ".xlsx", ".epub"}:
+            kind = "knowledge"
+        else:
+            with (root / name).open("rb") as stream:
+                data = stream.read(8192)
+            if b"\0" in data:
+                kind = "unsupported"
+            elif suffix in CODE or (not suffix and data.startswith(b"#!")):
+                kind = "code"
+            else:
+                kind = "knowledge"
+        result[kind].append(name)
+    return result
+
+
+def sibling(name):
+    spec = importlib.util.spec_from_file_location(
+        name, Path(__file__).with_name(name + ".py")
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def tool_python(executable):
+    with Path(executable).open() as stream:
+        header = stream.readline().strip()
+    command = shlex.split(header[2:]) if header.startswith("#!") else []
+    if len(command) == 2 and Path(command[0]).name == "env":
+        command = [shutil.which(command[1])]
+    if len(command) != 1 or not command[0] or "python" not in Path(command[0]).name:
+        raise RuntimeError(f"Cannot identify Python environment for {executable}")
+    return command[0]
+
+
+def index_backend(root, backend, current):
+    executable = shutil.which("code-review-graph" if backend == "crg" else "graphify")
+    if not executable:
+        raise RuntimeError(f"{backend} is unavailable; inspect source directly")
+    cache = root / ".cache/project-memory"
+    request = cache / (backend + "-request.json")
+    result = cache / (backend + "-coverage.json")
+    write_json(
+        request,
+        {
+            "files": sorted(code_files(current, root)),
+            "inventory": sorted(current),
+            "output": str(backend_path(root, backend)),
+        },
+    )
+    result.unlink(missing_ok=True)
+    log = cache / (backend + "-refresh.log")
+    command = [
+        tool_python(executable),
+        str(Path(__file__).with_name("project-memory-index.py")),
+        backend,
+        str(root),
+        str(request),
+        str(result),
+    ]
+    started = time.monotonic()
+    with log.open("w") as stream:
+        process = subprocess.Popen(
+            command,
+            cwd=root,
+            stdout=stream,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+        try:
+            process.wait(timeout=remaining(600))
+        except subprocess.TimeoutExpired:
+            os.killpg(process.pid, signal.SIGTERM)
+            process.wait(timeout=5)
+            raise RuntimeError(f"{backend} timed out; log: {log}") from None
+    if process.returncode or not result.is_file():
+        raise RuntimeError(f"{backend} failed (exit {process.returncode}); log: {log}")
+    coverage = read_json(result)
+    coverage.update(log=str(log), duration_seconds=round(time.monotonic() - started, 3))
+    return coverage
 
 
 def identity(root):
@@ -333,7 +541,9 @@ def changes(before, after):
     )
 
 
-def code_files(files):
+def code_files(files, root=None):
+    if root is not None:
+        return {name: files[name] for name in classification(root, files)["code"]}
     return {
         name: value
         for name, value in files.items()
@@ -413,26 +623,71 @@ def compact(status):
     }
 
 
+def rules_stamp(root, current):
+    names = {
+        name
+        for name in current
+        if Path(name).name
+        in {".gitignore", ".graphifyignore", ".graphifyrc", ".crgignore"}
+    }
+    names.update(
+        {
+            ".code-review-graph/languages.toml",
+            ".git/info/exclude",
+            ".graphifyignore",
+            ".graphifyrc",
+            ".crgignore",
+        }
+    )
+    return {
+        name: file_stamp(root / name)
+        for name in sorted(names)
+        if (root / name).is_file()
+    }
+
+
 def freshness(root, state, current, repo):
     result = {}
+    sources = code_files(current, root)
     for backend in BACKENDS:
         stamp = state.get(backend, {})
-        pending = changes(stamp.get("files", {}), code_files(current))
-        same = stamp.get("identity") == repo and stamp.get("artifact") == artifact(
-            root, backend
+        pending = changes(stamp.get("files", {}), sources)
+        coverage = state.get("coverage", {}).get(backend, {})
+        accounted = set(coverage.get("unsupported", [])) | set(
+            coverage.get("excluded", [])
+        )
+        pending = [
+            name
+            for name in pending
+            if name not in accounted
+            or stamp.get("accounted", {}).get(name) != current.get(name)
+        ]
+        same = (
+            stamp.get("identity") == repo
+            and stamp.get("artifact") == artifact(root, backend)
+            and stamp.get("rules") == rules_stamp(root, current)
         )
         result[backend] = {
-            "status": "current" if stamp and same and not pending else "pending",
+            "status": "current"
+            if stamp
+            and same
+            and not pending
+            and not state.get("errors", {}).get(backend)
+            else "pending",
             "paths": pending,
             "error": state.get("errors", {}).get(backend),
+            "coverage": coverage,
+            "last_successful_refresh": state.get("last_successful_refresh", {}).get(
+                backend
+            ),
         }
-    semantic = {k: v for k, v in current.items() if Path(k).suffix.lower() not in CODE}
+    semantic = {k: v for k, v in current.items() if k not in sources}
     stamp = state.get("semantic", {})
     result["semantic"] = {
         "status": "reviewed"
         if stamp
         and stamp.get("files") == semantic
-        and stamp.get("code") == code_files(current)
+        and stamp.get("code") == sources
         and stamp.get("identity") == repo
         and stamp.get("artifact") == artifact(root, "graphify")
         else "needs review",
@@ -445,86 +700,39 @@ def refresh(root, state, current, repo, backends):
     for backend in backends:
         if freshness(root, state, current, repo)[backend]["status"] == "current":
             continue
-        executable = shutil.which(
-            "code-review-graph" if backend == "crg" else "graphify"
-        )
         try:
-            if not executable:
-                raise RuntimeError(f"{backend} is unavailable; inspect source directly")
-            before = artifact(root, backend)
-            index_path = backend_path(root, backend)
-            before_path = index_path
-            before_mtime = (
-                index_path.stat().st_mtime_ns if index_path.exists() else None
-            )
-            if backend == "crg":
-                # Rebuild on branch/HEAD changes and deletions: incremental diff may
-                # miss a deleted untracked file or a checkout with older mtimes.
-                previous = state.get(backend, {})
-                deleted = set(previous.get("files", {})) - set(code_files(current))
-                mode = (
-                    "build"
-                    if not previous or previous.get("identity") != repo or deleted
-                    else "update"
-                )
-                output = run(root, [executable, mode, "--repo", str(root)], 80)
-            else:
-                # Installed Graphify 0.4.13 exposes a full code rebuild here.
-                # Do not use the mtime-only incremental skill merge for checkouts.
-                existing = read_json(index_path)
-                if existing and (
-                    not isinstance(existing, dict)
-                    or not isinstance(existing.get("nodes"), list)
-                    or not all(
-                        isinstance(node, dict) and "id" in node
-                        for node in existing["nodes"]
-                    )
-                ):
-                    raise ValueError(
-                        "Malformed Graphify index preserved; inspect it before rebuilding"
-                    )
-                if code_files(current):
-                    output = run(root, [executable, "update", str(root)], 80)
-                else:
-                    output = "No code sources remain; pruning stale code nodes."
-                    if not index_path.exists():
-                        write_json(index_path, {"nodes": [], "links": []})
-                    prune_graphify(root, current)
-            index_path = backend_path(root, backend)
-            after = artifact(root, backend)
-            if (
-                not after
-                or (
-                    before_path == index_path
-                    and before == after
-                    and index_path.stat().st_mtime_ns == before_mtime
-                )
-                or re.search(
-                    r"rebuild failed|Traceback \(most recent call last",
-                    output,
-                    re.IGNORECASE,
-                )
-            ):
-                raise RuntimeError(
-                    "backend did not produce a verified changed index; freshness remains pending"
-                )
-            if backend == "graphify" and code_files(current):
-                prune_graphify(root, current)
-                after = artifact(root, backend)
+            expected_sources = code_files(current, root)
+            before_rules = rules_stamp(root, current)
+            coverage = index_backend(root, backend, current)
+            state.setdefault("coverage", {})[backend] = coverage
             latest = snapshot(root)
-            if code_files(latest) != code_files(current) or identity(root) != repo:
-                raise RuntimeError(
-                    "files changed during refresh; retry at the next planning boundary"
-                )
-            current.clear()
-            current.update(latest)
+            if (
+                code_files(latest, root) != expected_sources
+                or identity(root) != repo
+                or rules_stamp(root, latest) != before_rules
+            ):
+                raise RuntimeError("files changed during refresh; queued for retry")
+            indexed = {
+                name: current[name] for name in coverage["indexed"] if name in current
+            }
             state[backend] = {
-                "files": code_files(current),
+                "files": indexed,
+                "accounted": {
+                    name: current[name]
+                    for name in [*coverage["unsupported"], *coverage["excluded"]]
+                    if name in current
+                },
+                "rules": rules_stamp(root, current),
                 "identity": repo,
-                "artifact": after,
+                "artifact": artifact(root, backend),
                 "updated_at": time.time(),
             }
+            if coverage["failed"] or coverage["missing"]:
+                raise RuntimeError(
+                    f"Incomplete {backend} coverage; inspect {coverage['log']}"
+                )
             state.setdefault("errors", {}).pop(backend, None)
+            state.setdefault("last_successful_refresh", {})[backend] = time.time()
         except (
             OSError,
             ValueError,
@@ -699,7 +907,7 @@ def handle(root, args, payload=None):
         return {}
     global DEADLINE
     previous = DEADLINE
-    DEADLINE = time.monotonic() + (110 if args.action == "hook" else 120)
+    DEADLINE = time.monotonic() + (110 if args.action == "hook" else 1800)
     try:
         return handle_locked(root, args, payload)
     except MemoryTimeout as error:
@@ -778,13 +986,10 @@ def handle_locked(root, args, payload=None):
                 raise ValueError(
                     "snapshot changed or Graphify output missing; review again before recording evidence"
                 )
+            sources = code_files(current, root)
             state["semantic"] = {
-                "code": code_files(current),
-                "files": {
-                    k: v
-                    for k, v in current.items()
-                    if Path(k).suffix.lower() not in CODE
-                },
+                "code": sources,
+                "files": {k: v for k, v in current.items() if k not in sources},
                 "identity": repo,
                 "artifact": artifact(root, "graphify"),
                 "evidence": args.evidence,
@@ -796,6 +1001,8 @@ def handle_locked(root, args, payload=None):
         write_json(cache / "state.json", state)
         value = {
             "freshness": status,
+            "classification": classification(root, current),
+            "watcher": sibling("project-memory-watch").status(root),
             "snapshot": hashlib.sha256(
                 json.dumps(current, sort_keys=True).encode()
             ).hexdigest(),
@@ -985,6 +1192,7 @@ def main():
             "accept-semantic",
             "usage",
             "hook-errors",
+            "watch",
         ),
     )
     parser.add_argument(
@@ -1015,6 +1223,24 @@ def main():
         if args.action == "accept-semantic" and not args.evidence.strip():
             raise ValueError("record the reviewed source paths with --evidence")
         payload = json.load(sys.stdin) if args.action == "hook" else {}
+        if args.action == "watch":
+            return sibling("project-memory-watch").watch(root, args.provider)
+        if args.action == "hook" and payload.get("hook_event_name") in {
+            "SessionStart",
+            "SessionEnd",
+        }:
+            value = sibling("project-memory-watch").session(
+                root, args.provider, payload
+            )
+            if value.get("status") == "unavailable":
+                raise RuntimeError(
+                    value.get("error", "Project memory watcher unavailable")
+                )
+            print("{}")
+            return 0
+        if args.action == "hook":
+            print("{}")
+            return 0
         root = Path(
             run(args.root, ["git", "rev-parse", "--show-toplevel"], 5).strip()
         ).resolve()
@@ -1059,7 +1285,45 @@ def main():
                     )
                 )
         else:
-            print(json.dumps(value, indent=2))
+            if args.action in {"status", "refresh", "context"}:
+                report = root / ".cache/project-memory" / (args.action + "-report.json")
+                write_json(report, value)
+                value = dict(value, report=str(report))
+                if "classification" in value:
+                    value["classification"] = {
+                        key: len(paths)
+                        for key, paths in value["classification"].items()
+                    }
+                if "freshness" in value:
+                    value["freshness"] = {
+                        key: {
+                            **row,
+                            "paths": len(row.get("paths", [])),
+                            "coverage": {
+                                name: len(item)
+                                if isinstance(item, (list, dict)) and name != "failed"
+                                else item
+                                for name, item in row.get("coverage", {}).items()
+                            },
+                        }
+                        for key, row in value["freshness"].items()
+                    }
+            rendered = json.dumps(value, indent=2)
+            if (
+                args.action in {"status", "refresh", "context"}
+                and len(rendered.encode()) > 4096
+            ):
+                print(
+                    json.dumps(
+                        {
+                            "status": "review_needed",
+                            "report": str(report),
+                            "message": "Parsed report exceeds the display budget; select an error or context group from saved evidence.",
+                        }
+                    )
+                )
+            else:
+                print(rendered)
         if args.action == "refresh":
             requested = ["crg", "graphify"] if args.architecture else ["crg"]
             return int(

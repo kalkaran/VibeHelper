@@ -65,7 +65,20 @@ def record_tests(root, provider):
                 stderr=subprocess.STDOUT,
                 check=False,
             )
-        print(log.read_text()[-12000:], end="")
+        output = log.read_text()
+        diagnostics = hook.QUALITY.parse_text_diagnostics(
+            output, completed.returncode, 1
+        )
+        value = hook.QUALITY.result(
+            "passed" if completed.returncode == 0 else "findings",
+            "full test target",
+            diagnostics,
+            returncode=completed.returncode,
+            log=str(log),
+            duration_seconds=round(time.monotonic() - started, 2),
+        )
+        hook.QUALITY.save_summary(value, root=root)
+        print(hook.QUALITY.render_result(value))
         if completed.returncode == 0 and before is not None:
             try:
                 after = hook.test_signature(root, makefile)

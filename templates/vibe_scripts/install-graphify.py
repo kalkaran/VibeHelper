@@ -118,7 +118,12 @@ def install(platform, refresh=False, dry_run=False, binary=None):
     ):
         print(f"Graphify {platform} skill already installed.")
         return 0
-    registered = run([binary, "install", "--platform", platform], dry_run)
+    registered = True
+    if platform == "codex" and "|agents|" in probe(binary, "--help").stdout:
+        registered = run([binary, "install", "--platform", "agents"], dry_run)
+    registered = (
+        run([binary, "install", "--platform", platform], dry_run) and registered
+    )
     if not registered:
         print("Graphify skill registration failed.", file=sys.stderr)
     elif success and not dry_run:

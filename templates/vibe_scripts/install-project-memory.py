@@ -33,8 +33,7 @@ def desired(provider):
         ]
         for event, matcher in {
             "SessionStart": ".*",
-            "PreToolUse": "^mcp__.*(?:code[-_]review[-_]graph|graphify).*",
-            "Stop": ".*",
+            "SessionEnd": ".*",
         }.items()
     }
 
@@ -168,24 +167,27 @@ def render(event, group):
     )
 
 
-def install(root, provider, hooks=False, crg=True, graphify=True, configure_hooks=True):
+def install(root, provider, hooks=None, crg=True, graphify=True, configure_hooks=True):
     helper = root / f"vibe_scripts/{provider}"
     for path in (helper, root / ".graphifyignore", root / f".{provider}"):
         if not path.resolve().is_relative_to(root):
             raise ValueError(f"Memory installation path leaves repository: {path}")
-    save(
-        helper / "memory-policy.json",
-        json.dumps(
-            {
-                "_managed": provider.title() + "Helper-Version: project-memory-v1",
-                "hooks": hooks,
-                "crg": crg,
-                "graphify": graphify,
-            },
-            indent=2,
-        )
-        + "\n",
+    policy_path = helper / "memory-policy.json"
+    policy = json.loads(policy_path.read_text()) if policy_path.exists() else {}
+    enabled = (
+        policy.get("watch", policy.get("hooks", True)) if hooks is None else bool(hooks)
     )
+    policy.update(
+        {
+            "_managed": provider.title() + "Helper-Version: project-memory-v2",
+            "hooks": enabled,
+            "watch": enabled,
+        }
+    )
+    policy.setdefault("crg", crg)
+    policy.setdefault("graphify", graphify)
+    save(policy_path, json.dumps(policy, indent=2) + "\n")
+    hooks = enabled
     if configure_hooks and (hooks or (root / f".{provider}").is_dir()):
         target = root / (
             ".codex/config.toml"
@@ -228,7 +230,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--provider", required=True, choices=("codex", "claude"))
     parser.add_argument("--root", type=Path, default=Path.cwd())
-    parser.add_argument("--hooks", type=int, choices=(0, 1), default=0)
+    parser.add_argument("--hooks", choices=("auto", "0", "1"), default="auto")
     parser.add_argument("--configure-hooks", type=int, choices=(0, 1), default=1)
     parser.add_argument("--crg", type=int, choices=(0, 1), default=1)
     parser.add_argument("--graphify", type=int, choices=(0, 1), default=1)
@@ -240,7 +242,7 @@ if __name__ == "__main__":
             template.get("hooks", {}),
             args.root.resolve(),
             args.provider,
-            install=bool(args.hooks),
+            install=args.hooks != "0",
             cleanup=True,
         )
         print(json.dumps(template, indent=2))
@@ -248,7 +250,7 @@ if __name__ == "__main__":
         install(
             args.root.resolve(),
             args.provider,
-            bool(args.hooks),
+            None if args.hooks == "auto" else args.hooks == "1",
             bool(args.crg),
             bool(args.graphify),
             bool(args.configure_hooks),

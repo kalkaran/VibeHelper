@@ -23,6 +23,17 @@ Failures have concise diagnostics and an evidence path. Unchanged blocked Stops
 reuse the existing result without rerunning tools or creating duplicate logs.
 Explicit checks always run and invalidate older automatic failure results.
 Complete evidence stays on disk.
+
+To update only the session-memory hook adapter in an existing installation:
+
+```sh
+python3 templates/vibe_scripts/managed-install.py memory-hook-refresh --provider codex --root /absolute/project
+```
+
+Use `--dry-run` to preview, or `--provider claude` for Claude. This copies the
+shared `project-memory.py` template and updates its ownership receipt. It
+preserves modified helpers and leaves policy, hook configuration and indexes alone.
+
 TOML configuration inspection requires Python 3.11 or newer; other checks remain
 available on older supported Python runtimes.
 
