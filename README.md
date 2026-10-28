@@ -268,17 +268,74 @@ model catalogs do not prove account access or free pricing.
 
 ## What gets added
 
-Depending on the helper and options you choose, VibeHelper can add:
+The inventory below covers files created by the helpers and their integrations.
+`<provider>` means `codex` or `claude`. Optional tools add their files only when
+enabled; graphs, logs and reports are created when their commands or hooks run.
 
-- project instructions such as `AGENTS.md` or `CLAUDE.md`
-- local hooks for safer assistant runs
-- `agent/` workflow guidance
-- `codebase-wiki/` repo memory
-- `notes/` session logs
-- helper scripts for edited-file checks
-- Separate Makefiles in `vibe_scripts/codex/` and `vibe_scripts/claude/`, with
-  edited-file, lint, verification, wiki and skills commands; Codex also has
-  `savings-ai`
+### Project files and settings
+
+| Location | What gets added and why |
+| --- | --- |
+| `AGENTS.md` / `CLAUDE.md` | Provider instructions for scope, review, verification, logging and tool use. |
+| `agent/<provider>/` | `index.md`, `commands.md`, `coding-rules.md`, `context-strategy.md`, `procedures.md`, `verify.md`, `omniroute.md`, `usage.md` and `evaluation.json`; Codex also receives `llm-council.md`. |
+| `codebase-wiki/` | `index.md`, `architecture.md`, `testing.md`, `conventions.md`, `known-issues.md` and `risky-areas.md` for durable project knowledge. |
+| `notes/` | `queries.md` and `conversation-log.md`; later, timestamped recommendations in `git-add-history/`. Prior log entries are preserved. |
+| `git-add.txt` | The agent's reviewed staging recommendation, created after work; the history writer preserves previous recommendations. Nothing is staged automatically. |
+| `.codex/` | Project `config.toml`, a reviewable `config-snippet.toml`, and policy, RTK, usage, post-edit and Stop hook scripts under `hooks/`. Controlled by the Codex hook options. |
+| `.claude/` | Merged `settings.local.json`; policy, graph-first, RTK, post-edit and Stop scripts under `hooks/`; `commands/edited-ai.md`, `commands/verify-ai.md` and `commands/wiki-ai.md`. |
+| Provider MCP configuration | Context7, Chrome DevTools and code-review-graph registrations when enabled. Codex uses its TOML configuration; Claude integrations use their selected user/project configuration, including project `.mcp.json`. |
+| `.agents/skills/`, `.claude/skills/` and provider plugin directories | Skill files and plugin-managed hooks, according to the integration's provider and scope. See the installation table below. |
+| `skills-lock.json` | Sources and update policies for Humanizer, Graphify, Impeccable and Ponytail. Unlazy and i-have-adhd have separate installer setup and are not entries in this lockfile. |
+| `vibe_scripts/<provider>/Makefile` | Provider-specific controlled check, verification, wiki and skill targets; Codex also has `savings-ai`. Existing project Makefiles remain separate. |
+| `.gitignore` | Managed exclusions for local agent files, graphs, notes, caches, backups and dependency directories. |
+| `.graphifyignore`, `vibe_scripts/<provider>/memory-policy.json` | Graph-output exclusions and persistent choices for watching and enabled indexers. |
+| `package.json`, npm lockfile, `node_modules/` | Codex's approved npm quality-tool installation adds development dependencies; it can create a minimal package manifest if none exists. |
+| `composer.json`, `composer.lock`, `vendor/` | Codex's approved PHP quality-tool installation adds Composer development dependencies. |
+| `biome.json` | Codex can create a missing configuration for detected static-web files; an existing Biome configuration is preserved. |
+| `.impeccable/`, `PRODUCT.md`, `DESIGN.md` | Optional Impeccable setup/project initialization, alongside its skill and provider hook configuration. |
+
+### Helper scripts and runtime artifacts
+
+Both providers receive these files under `vibe_scripts/<provider>/`:
+
+| Files | Purpose |
+| --- | --- |
+| `agent-verify.sh`, `agent-check-edited.py`, `ai-quality-wrapper.py`, `quality-hook.py`, `test-verification.py` | Controlled checks, edited-file selection, parsed diagnostics, hook results and test receipts. |
+| `project-memory.py`, `project-memory-index.py`, `project-memory-watch.py`, `install-project-memory.py` | Source inventory, graph coverage, shared session watching and lifecycle-hook setup. |
+| `update-codebase-wiki.py`, `sync-skills.py` | Maintain wiki drafts and check/update managed skills. |
+| `write-git-add.py`, `cleanup-cache.py` | Keep staging-recommendation history and remove expired generated cache files. |
+| `fallow.py` | Install and run the explicit JS/TS analysis command. |
+| `omniroute.py` | Configure the optional gateway, route approved tasks and report history/usage. |
+| `usage-tracker.py`, `usage-tracker.patch`, `usage-tracker.md` | Install and run the local Codex usage dashboard; delivered by either helper. |
+
+Codex additionally receives `git-policy.py` for its global Git-policy adapter.
+Session hooks record edited files and quality evidence, maintain memory watchers
+and run cache cleanup. Codex also records RTK/context-reduction usage. A turn's
+Stop event leaves the session watcher running; the last session exit releases it.
+
+| Created during installation or later use | Contents |
+| --- | --- |
+| `.cache/vibehelper-install/` and `*.bak.*` | Ownership receipts, installation results and replacement backups; migrations include restoration instructions. |
+| `.cache/ai-quality/`, `.cache/quality-tests/`, `.cache/quality-sessions/`, `.cache/hook-errors.log` | Full logs, parsed summaries, test receipts, session state and hook diagnostics. |
+| `.cache/project-memory/`, `.code-review-graph/`, `.graphify/` or legacy `graphify-out/` | Inventory/coverage reports, watcher state/logs and generated graph databases/reports. |
+| `.cache/vibehelper-tools/fallow/` | Pinned Fallow runtime when a project-local executable is unavailable. |
+| `GATES.md`, `.unlazy/` | Acceptance ledgers and task evidence created when agents use Unlazy; these are not all pre-created by installation. |
+
+### Shared user-level additions
+
+| Location or setting | When it changes |
+| --- | --- |
+| Python tool environments and executable paths | Graphify, code-review-graph, Ruff and prerequisites use their supported package managers. Managed upgrades preserve detected ownership; shell PATH guidance/fixes may be offered. |
+| `~/.codex/`, `~/.claude/`, `~/.agents/` | Enabled global skills/plugins and MCP registrations. Graphify registers provider skills from its executable; Codex also registers the agents skill location when supported. |
+| `~/.codex/AGENTS.md` | Codex's enabled i-have-adhd setup adds its default response-style instructions. |
+| `~/.codex/config.toml`, `~/.codex/hooks/ai_git_blocker.py` | Optional approved global Codex Git-policy installation; project hooks are separate. |
+| `~/.local/share/vibehelper/omniroute/` | Optional shared gateway runtime, private settings/accounts and attempt history; no login service is installed. |
+| `~/.local/share/llm-council/` | Optional LLM Council checkout; service dependencies and provider credentials still need separate setup. |
+| `~/.local/share/vibehelper/token-usage/`, `~/.local/share/vibehelper/usage-dashboard/`, `~/.cache/vibehelper/usage/` | Explicit tracker `install`/`setup` downloads its pinned dependency and creates the shared launcher; copying project scripts alone does not start a dashboard. See [dashboard setup](#local-codex-usage-dashboard) for launcher locations. |
+
+For an exact run's configured, skipped and failed components, use the installer
+summary and its receipt. A listed capability is not proof that its package,
+credentials or hook trust are ready on a particular machine.
 
 ## Project memory and planning
 
@@ -428,43 +485,91 @@ historical latency. New sessions load the repaired registrations.
 
 ## What it can install
 
-Defaults and opt-in tools differ between the two helpers. They can install:
+This is the direct installation inventory for the macOS and WSL helpers.
+Package managers resolve each tool's transitive dependencies. “Default” means
+the setup path is enabled, subject to prompts, prerequisites and explicit
+opt-outs; it does not mean every integration is active without further setup.
 
-- Codex project files: instructions, hooks, repo notes, and local helper scripts
-  for Codex.
-- Claude Code project files: instructions, hooks, slash commands, repo notes,
-  and local helper scripts for Claude.
-- Git command guards: block selected Git mutations in agent shell calls while
-  leaving status and diff inspection available.
-- Reviewed staging handoff: prepares `git-add.txt`, a dry-run preview and a
-  per-file explanation for you to stage.
-- Humanizer: rewrites generated prose so docs, READMEs, and release notes sound
-  less stiff.
-- Context7: gives agents current library and framework docs when they need API
-  details.
-- Chrome DevTools MCP: lets Codex or Claude Code inspect and control Chrome for
-  browser debugging.
-- Ponytail: pushes agents toward smaller changes and less overbuilt code.
-- Unlazy: keeps long or multi-part tasks moving until their acceptance checks
-  pass.
-- Graphify: maps a repo into a graph so agents can understand large codebases
-  faster.
-- code-review-graph: tracks code relationships so agents can review blast radius
-  before changing files.
-- Impeccable: helps with frontend design, layout, polish, and UI checks when
-  enabled.
-- LLM Council: provides optional multi-model review for high-value decisions.
-- OmniRoute: routes approved small tasks to eligible free models through a local
-  gateway, with the main agent reviewing the result.
-- Codex usage tracker: shows recorded usage by project, model, session and turn
-  in a live local dashboard.
-- RTK: trims noisy read-only command output before it reaches the agent.
-- Ruff: formats and lints Python.
-- Biome: formats and checks JavaScript, TypeScript, CSS, and JSON.
-- HTMLHint: checks HTML.
-- markdownlint-cli2: checks Markdown files.
-- ShellCheck and shfmt: check and format shell scripts.
-- PHP_CodeSniffer and PHPStan: check PHP style, syntax, and types.
+### Skills, plugins and agent tools
+
+| Component | Purpose | Codex setup | Claude Code setup |
+| --- | --- | --- | --- |
+| Humanizer (`blader/humanizer`) | Edit generated prose. | Default project skill setup; `--no-humanizer` skips. | Default skill setup; `--no-humanizer` skips. |
+| Unlazy (`Leonxlnx/unlazy`) | Record acceptance gates and verify completion. | Default project skill setup. | Default skill setup. |
+| Ponytail (`DietrichGebert/ponytail`) | Keep implementation and review small and complete. | Offers marketplace registration; finish plugin installation in `/plugins` and review `/hooks`. | Installs the plugin by default; `--no-ponytail` skips. Review hook trust. |
+| i-have-adhd (`ayghri/i-have-adhd`) | Concise, action-first responses across sessions. | Default plugin and global response-style setup; `--no-adhd` skips. | Not installed by ClaudeHelper. |
+| Impeccable | Frontend design skill, project design records and hooks. | `--impeccable` or `--fresh-install`; existing installations can be refreshed. | `--impeccable` or `--fresh-install`; existing installations can be refreshed. |
+| Graphify (`graphifyy`, executable `graphify`) | Code/knowledge graphs and the Graphify skill. | Default package and provider skill registration. | Default; `--no-graphify` skips. |
+| code-review-graph | Code relationship graph and MCP tools. | Default setup; initial build enabled unless `--no-crg-build`. | Default registration unless `--no-crg`; initial build requires `--crg-build`. |
+| Context7 (`ctx7` setup) | Current library/API documentation through MCP. | `--context7`, fresh install, or interactive offer; existing registration is checked. | Default project MCP setup; `--no-context7` skips. |
+| Chrome DevTools MCP (`chrome-devtools-mcp`) | Browser inspection and debugging. | Default registration; `--no-chrome-mcp` skips. | Default registration; `--no-chrome-mcp` skips; an enabled existing plugin can be reused. |
+| RTK | Reduce command output before it reaches the agent. | Default with Codex hooks; `--no-rtk-hook` skips. | Default; `--no-rtk` skips. |
+| OmniRoute | Local gateway for approved small tasks and usage/history reports. | Explicit setup consent; `--yes` does not approve it; `--no-omniroute` skips. | Same consent and skip behavior. |
+| LLM Council (`karpathy/llm-council`) | Optional multi-model review application. | `--with-llm-council` clones the repository. | `--with-llm-council` clones the repository. |
+| Codex usage tracker | Local dashboard using a pinned token-usage parser. | Scripts delivered; run tracker `install`/`setup` explicitly. | Same scripts delivered; they still read Codex logs. |
+
+The skill/plugin rows describe VibeHelper's direct selections, including items
+outside `skills-lock.json`. Upstream plugins may bundle several commands or
+skills; their own installed manifests define that version's contents. Context7
+and code-review-graph are MCP integrations, not additional VibeHelper skills.
+The Ponytail bundle includes `ponytail`, `ponytail-review`, `ponytail-audit`,
+`ponytail-debt`, `ponytail-gain` and `ponytail-help`: implementation discipline,
+change review, repository audit, shortcut tracking, savings and usage guidance.
+
+### Quality tools
+
+Codex detects project languages, offers missing tools, and wires the checks.
+`--install` accepts missing quality-tool installation; `--no-install` uses existing
+tools. Claude wires existing quality tools and project scripts; it does not
+install the Ruff, npm lint, PHP or shell packages listed below. Both providers
+install Fallow for detected JS/TS projects when package installation is allowed.
+
+| Tool/package | Purpose | Installation and location |
+| --- | --- | --- |
+| Ruff (`ruff`) | Python formatting and lint. | Codex installs with `uv tool`; upgrades recognize uv/pipx ownership. Claude uses an existing executable. |
+| Biome (`@biomejs/biome`) | JS/TS, CSS and JSON checks/formatting. | Codex adds an npm development dependency for detected web/Node/TS projects. |
+| HTMLHint (`htmlhint`) | HTML diagnostics. | Codex adds an npm development dependency for detected web/Node/TS projects. |
+| markdownlint-cli2 | Markdown checks and supported fixes. | Codex adds an npm development dependency when Markdown is detected. |
+| ShellCheck (`shellcheck`) | Shell diagnostics. | Codex uses Homebrew on macOS or apt-get on WSL when shell files are detected. |
+| shfmt | Shell formatting. | Same language detection and package-manager route as ShellCheck. |
+| PHP_CodeSniffer (`squizlabs/php_codesniffer`) | `phpcs` checks and the `phpcbf` fixer. | Codex adds a Composer development dependency for PHP projects. |
+| PHPStan (`phpstan/phpstan`) | PHP static analysis. | Codex adds a Composer development dependency for PHP projects. |
+| Fallow (`fallow`) | JS/TS dead-code, dependency and code-quality analysis. | Both reuse a local executable or install the pinned npm package in `.cache/vibehelper-tools/fallow/`; requires Node.js 22+. Runs only on explicit request. |
+
+Detected tools are also usable without being installed by VibeHelper: Codex's
+quality wiring recognizes **mypy or Pyright**, **pytest**, project npm
+`lint`/`format`/`typecheck`/`test` scripts, **PHP's syntax checker**, **Go/gofmt/go
+vet/go test**, **Staticcheck**, **Cargo/rustfmt/Clippy**, and **.NET**
+format/build/test commands. Claude's generated Makefile adds existing npm
+typecheck/test scripts alongside the shared edited-file checks. A command
+adapter or recommendation does not mean its toolchain was installed.
+
+### Prerequisites and installation modes
+
+| Prerequisite | What the installers do |
+| --- | --- |
+| Git, Python 3, Node.js/npm/npx and the selected agent CLI | Use them to create files, run setup and register integrations. The Codex and Claude Code CLIs themselves are not installed. |
+| Homebrew, uv and pipx on macOS | Codex offers prerequisite setup; `--install-prereqs`, `--install-brew`, `--install-uv` and `--install-pipx` explicitly select it. `--yes` alone does not install Homebrew. Claude installs uv through existing Homebrew or uv's official script if neither uv nor pipx is available. |
+| Ubuntu WSL base packages | `curl`, `git`, `ca-certificates`, `python3`, `python3-pip`, `python3-venv`, `pipx`, `nodejs`, `npm`. Codex requires `--install-system-packages`/`--install-prereqs` or interactive confirmation; Claude installs missing packages by default, with `--no-system-packages` to skip. |
+| Composer | Codex can install it through Homebrew/apt-get when PHP tools need it. PHP itself must be available. |
+| Chrome | Must already be installed or reachable through a configured browser endpoint. MCP setup does not install Chrome. |
+
+`--repo-only` skips global tools and quality-package installation while writing
+project files and wiring available tools. Codex can still set up project-scoped
+Humanizer, Unlazy and selected Impeccable skills in this mode.
+`--refresh-managed` skips global-tool and quality-package installation/upgrades.
+Codex's current implementation still calls its project skill setup in this mode,
+so Humanizer, Unlazy and selected/existing Impeccable setup can invoke `npx` and
+fetch or refresh skill packages. It is not a guarantee of an offline run.
+Optional dashboards, LLM Council dependencies, provider credentials, Impeccable
+initialization and Codex hook trust remain separate setup steps.
+
+Inventory sources: the [Codex installer](CodexHelper/install.sh) and its
+[macOS](CodexHelper/MacOS/) / [WSL](CodexHelper/WSL/) phases; the
+[Claude installer](ClaudeHelper/install.sh) and its
+[macOS](ClaudeHelper/MacOS/) / [WSL](ClaudeHelper/WSL/) phases;
+[shared helpers](templates/vibe_scripts/) and the
+[skills lockfile](templates/skills-lock.json).
 
 ## How the tools help
 
@@ -808,7 +913,9 @@ security-sensitive or cross-project changes. Each verifier selects its own
 Makefile. The project root Makefile is preserved.
 
 Existing installs can use `--refresh-managed` to refresh managed instructions
-and hooks without package updates. `--force` also updates installed packages.
+and hooks while skipping global-tool and quality-package updates. Codex's
+[project skill setup exception](#prerequisites-and-installation-modes) still
+applies. `--force` also updates installed packages.
 Legacy shared scripts and root targets remain available for manual review; new
 commands use provider-specific paths. Cleanup preserves shared project data
 and the other provider. See each helper README for the retained files.
@@ -823,7 +930,8 @@ and the other provider. See each helper README for the retained files.
 See [the maintained flow and evidence](INSTALLATION-FLOW.md) for installer phases,
 component states, migration, repair hooks, and verification limits.
 
-Use `--refresh-managed` to refresh helper files without updating packages.
+Use `--refresh-managed` to refresh helper files, subject to the
+[Codex project skill setup exception](#prerequisites-and-installation-modes).
 `--force` still refreshes installed tools through their detected package manager.
 Semgrep integration has been retired; `--security-scan` is unsupported. Existing
 global binaries are left installed. Custom security checks remain project-owned.
