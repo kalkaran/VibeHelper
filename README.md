@@ -465,24 +465,6 @@ Use `wiki-ai` only for durable knowledge, review its generated diff, and preserv
 handwritten sections. See `agent/codex/context-strategy.md` or its Claude
 equivalent for recording a completed semantic review.
 
-Hook repair changes on 2026-10-19:
-
-- Removed automatic graph updates and the graph-first file-read blockade.
-- Limited each edit check to its edited paths. The 2026-10-20 update removes the
-  test-dependent Stop cache and checks surviving edited files on each Stop.
-- Replaced full-file hashing in quality snapshots with file metadata.
-- Separated the global Git mutation blocker from project-specific quality rules.
-  Quoted command names are accepted; compound shell execution keeps conservative
-  checks. The mutation strings in regression tests are parsed, never executed.
-- Added repeatable repair previews, backups, per-repository results and background
-  Stop cleanup. Both providers' macOS and WSL installers receive the shared fixes.
-
-The review also found unsupported-file Stop retries and mandatory agent/delegation
-prompts. Those policies remain unchanged. Deleted-file testing was separated from
-automatic hooks on 2026-10-20 as described above. Configured
-graph timeouts showed a potential long wait; the review did not establish actual
-historical latency. New sessions load the repaired registrations.
-
 ## What it can install
 
 This is the direct installation inventory for the macOS and WSL helpers.
